@@ -432,3 +432,59 @@ class DiscountCode(models.Model):
 
     def __str__(self):
         return f'{self.code} ({self.discount_type} {self.discount_value})'
+
+
+# ── Idempotency ──────────────────────────────────────────────────────────────
+
+class IdempotencyRecord(models.Model):
+    """Stored fingerprint + response snapshot for a critical POST request.
+
+    Implements API_CONTRACT.md §2 (Idempotency) and DOMAIN.md §6.3
+    (Idempotency Rule). For every state-changing endpoint that opts in via
+    `pos.services.idempotency`, the client supplies an `Idempotency-Key`
+    header. The first successful invocation persists a row here with a
+    deterministic hash of the request payload + the saved response status
+    and body. Subsequent invocations with:
+
+      * same key + same payload  → replay the stored response
+      * same key + different payload → 409 conflict (callers raise it)
+
+    Scoping is per-tenant: two tenants may legitimately use the same opaque
+    key string without collision. `(tenant, key)` is unique to give an
+    explicit DB-level guarantee on top of the service-layer check.
+
+    Wire-up into endpoints is deferred — this slice only ships the
+    scaffolding. See `pos/services/idempotency.py` for the helpers.
+    """
+
+    tenant = models.ForeignKey(
+        'accounts.Tenant', on_delete=models.CASCADE,
+        related_name='idempotency_records', db_index=True,
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='idempotency_records',
+    )
+    key            = models.CharField(max_length=255, db_index=True)
+    method         = models.CharField(max_length=10)
+    path           = models.CharField(max_length=255)
+    request_hash   = models.CharField(max_length=64)
+    response_status = models.PositiveSmallIntegerField()
+    response_body  = models.JSONField(default=dict, blank=True)
+    created_at     = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at     = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['tenant', 'key'],
+                name='pos_idem_tenant_key_uniq',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['tenant', 'key'], name='pos_idem_tenant_key_idx'),
+        ]
+
+    def __str__(self):
+        return f'Idem[{self.tenant_id}/{self.key}] {self.method} {self.path}'

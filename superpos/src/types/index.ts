@@ -212,3 +212,56 @@ export interface PaymentBreakdown {
   val: number;
   color: string;
 }
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * Shared v3.6 status vocabularies — mirror of
+ * `superpos_backend/pos/domain/statuses.py` STATUS_REGISTRY.
+ *
+ * These are the wire values exchanged with the backend. Keep this file and
+ * `pos/domain/statuses.py` in lock-step: dropping or renaming a value here
+ * is a breaking change to the API contract.
+ *
+ * Phase 1 slice ships the types only — no UI screens consume them yet.
+ * They unblock typed payload/response shapes for Phase 2+ work without
+ * forcing a refactor of existing pages.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+// §5.2 Five-Status Document Model
+export type PostingStatus  = 'draft' | 'posted' | 'cancelled' | 'void';
+export type DocPaymentStatus = 'unpaid' | 'partially_paid' | 'paid' | 'n_a';
+export type ReturnStatus   = 'not_returned' | 'partially_returned' | 'returned';
+export type ApprovalStatus = 'not_required' | 'pending' | 'approved' | 'rejected';
+export type SyncStatus     = 'synced' | 'pending_sync' | 'sync_failed';
+
+// §41 Table Service / Open Orders
+export type OpenOrderStatus =
+  | 'draft' | 'sent' | 'needs_bill' | 'paid_clearing' | 'paid' | 'cancelled';
+
+export type OpenOrderLineStatus =
+  | 'draft' | 'sent' | 'prepared_pending' | 'preparing'
+  | 'ready' | 'served' | 'billed' | 'voided' | 'cancelled';
+
+export type TableStatus =
+  | 'available' | 'occupied' | 'sent_to_kitchen'
+  | 'needs_bill' | 'paid_clearing' | 'out_of_service';
+
+export type KitchenTicketStatus =
+  | 'queued' | 'printed' | 'print_failed'
+  | 'preparing' | 'ready' | 'served' | 'voided';
+
+// §14 Shift
+export type ShiftStatus = 'open' | 'closed' | 'force_closed' | 'reconciling';
+
+/** Aggregate map mirroring backend `STATUS_REGISTRY` keys. */
+export interface StatusRegistry {
+  posting_status:         PostingStatus;
+  payment_status:         DocPaymentStatus;
+  return_status:          ReturnStatus;
+  approval_status:        ApprovalStatus;
+  sync_status:            SyncStatus;
+  open_order_status:      OpenOrderStatus;
+  open_order_line_status: OpenOrderLineStatus;
+  table_status:           TableStatus;
+  kitchen_ticket_status:  KitchenTicketStatus;
+  shift_status:           ShiftStatus;
+}
