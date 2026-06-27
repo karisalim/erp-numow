@@ -1,0 +1,1037 @@
+import csv
+import io
+from datetime import timedelta
+from decimal import Decimal, InvalidOperation
+
+from django.db import transaction
+from django.db.models import Avg, Count, F, Sum
+from django.http import HttpResponse
+from django.shortcuts import get_object_or_404
+from django.utils import timezone
+from rest_framework import generics, permissions, status
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
+
+from accounts.permissions import IsCashierOrAbove, IsManagerOrAbove
+from .filters import ProductFilter, SaleFilter, StockMovementFilter
+from .models import Category, InventoryBatch, Product, Sale, SaleItem, StockMovement
+from .serializers import (
+    CategorySerializer,
+    InventoryBatchSerializer,
+    ProductSerializer,
+    ProductStockUpdateSerializer,
+    PurchaseReceiptSerializer,
+    ReceiptSerializer,
+    SaleListSerializer,
+    SaleSerializer,
+    StockAdjustmentSerializer,
+    StockMovementSerializer,
+)
+
+
+# ── Tenant isolation mixin ────────────────────────────────────────────────────
+
+class TenantMixin:
+    def _tenant(self):
+        return getattr(self.request.user, 'tenant', None)
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        tenant = self._tenant()
+        if tenant:
+            qs = qs.filter(tenant=tenant)
+        return qs
+
+    def perform_create(self, serializer):
+        tenant = self._tenant()
+        if tenant:
+            serializer.save(tenant=tenant)
+        else:
+            serializer.save()
+
+
+# ── Categories ────────────────────────────────────────────────────────────────
+
+class CategoryListCreateView(TenantMixin, generics.ListCreateAPIView):
+    queryset         = Category.objects.all()
+    serializer_class = CategorySerializer
+    search_fields    = ['name']
+
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+
+# ── Products ──────────────────────────────────────────────────────────────────
+
+class ProductListCreateView(TenantMixin, generics.ListCreateAPIView):
+    queryset         = Product.objects.select_related('category').all()
+    serializer_class = ProductSerializer
+    filterset_class  = ProductFilter
+    search_fields    = ['name', 'barcode', 'sku']
+    ordering_fields  = ['name', 'price', 'stock', 'created_at']
+    ordering         = ['name']
+
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+
+class ProductDetailView(TenantMixin, generics.RetrieveUpdateDestroyAPIView):
+    queryset         = Product.objects.select_related('category').all()
+    serializer_class = ProductSerializer
+
+    def get_permissions(self):
+        if self.request.method in ('PUT', 'PATCH', 'DELETE'):
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+
+@api_view(['GET'])
+@permission_classes([IsCashierOrAbove])
+def product_by_barcode(request, barcode):
+    tenant = getattr(request.user, 'tenant', None)
+    qs = Product.objects.filter(barcode=barcode, active=True)
+    if tenant:
+        qs = qs.filter(tenant=tenant)
+    try:
+        product = qs.get()
+        return Response(ProductSerializer(product).data)
+    except Product.DoesNotExist:
+        return Response({'detail': 'Product not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+
+def _parse_weight_encoded_barcode(barcode: str, prefix: str):
+    """Decode a 13-digit scale-printed barcode of the form
+    `PP PPPPP WWWWW C` — prefix (2) + PLU (5) + net-weight grams (5) + checksum.
+
+    Returns `(plu, weight_kg)` on success, or `None` if the input doesn't
+    structurally match. The checksum digit is intentionally not validated
+    here — different scale brands use different schemes (EAN-13, Mettler,
+    Bizerba) and we don't want to reject barcodes that wholesalers print
+    with a non-standard check digit.
+    """
+    if not barcode or len(barcode) != 13 or not barcode.isdigit():
+        return None
+    if not prefix or not barcode.startswith(prefix):
+        return None
+    plu        = barcode[2:7]
+    weight_str = barcode[7:12]
+    try:
+        weight_kg = Decimal(weight_str) / Decimal('1000')
+    except (InvalidOperation, ValueError):
+        return None
+    return plu, weight_kg
+
+
+@api_view(['GET'])
+@permission_classes([IsCashierOrAbove])
+def product_scan(request, barcode):
+    """
+    GET /api/products/scan/<barcode>/
+
+    Single entry-point for the POS barcode scanner. Behaviour:
+
+    1. If the barcode matches the tenant's weight-encoded scale prefix
+       (default '23'), decode the embedded PLU + net weight and respond
+       with the matching product plus the pre-calculated line total.
+       Frontend should drop these straight into the cart with the
+       provided `quantity` and `line_total` — no further math needed.
+
+    2. Otherwise, fall back to a normal barcode lookup against
+       `Product.barcode` (identical to `product_by_barcode`).
+
+    Response shape (weight-encoded match):
+        {
+            "type":       "weight_encoded",
+            "product":    { ...ProductSerializer payload... },
+            "plu":        "09524",
+            "quantity":   "0.144",
+            "price_each": "140.00",
+            "line_total": "20.16"
+        }
+
+    Response shape (plain barcode match):
+        { "type": "barcode", "product": { ...ProductSerializer... } }
+    """
+    tenant = getattr(request.user, 'tenant', None)
+
+    # Honour tenant config; fall back to '23' if admin hasn't set one.
+    prefix = (getattr(tenant, 'scale_barcode_prefix', '') or '23').strip()
+    parsed = _parse_weight_encoded_barcode(barcode, prefix)
+
+    if parsed is not None:
+        plu, weight_kg = parsed
+        qs = Product.objects.filter(plu=plu, active=True)
+        if tenant:
+            qs = qs.filter(tenant=tenant)
+        product = qs.first()
+        if product is None:
+            return Response(
+                {'detail': f'No product matches PLU {plu}.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Quantize to 3dp on weight and 2dp on currency so the total written
+        # to SaleItem.line_total matches what the receipt prints exactly —
+        # downstream `sum(qty * price)` math is then a no-op rounding-wise.
+        quantity   = weight_kg.quantize(Decimal('0.001'))
+        line_total = (quantity * product.price).quantize(Decimal('0.01'))
+        return Response({
+            'type':       'weight_encoded',
+            'product':    ProductSerializer(product).data,
+            'plu':        plu,
+            'quantity':   str(quantity),
+            'price_each': str(product.price),
+            'line_total': str(line_total),
+        })
+
+    qs = Product.objects.filter(barcode=barcode, active=True)
+    if tenant:
+        qs = qs.filter(tenant=tenant)
+    product = qs.first()
+    if product is None:
+        return Response({'detail': 'Product not found.'}, status=status.HTTP_404_NOT_FOUND)
+    return Response({'type': 'barcode', 'product': ProductSerializer(product).data})
+
+
+@api_view(['PATCH'])
+@permission_classes([IsManagerOrAbove])
+def product_stock_update(request, pk):
+    tenant = getattr(request.user, 'tenant', None)
+    qs = Product.objects.all()
+    if tenant:
+        qs = qs.filter(tenant=tenant)
+    try:
+        product = qs.get(pk=pk)
+    except Product.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    s = ProductStockUpdateSerializer(product, data=request.data, partial=True)
+    s.is_valid(raise_exception=True)
+    s.save()
+    return Response(ProductSerializer(product).data)
+
+
+# ── Products: CSV import / export ─────────────────────────────────────────────
+
+CSV_EXPORT_COLUMNS = ['name', 'barcode', 'sku', 'price', 'cost', 'stock', 'reorder', 'category_name']
+
+
+@api_view(['GET'])
+@permission_classes([IsManagerOrAbove])
+def products_export(request):
+    """
+    GET /api/products/export/
+
+    Streams a CSV of every product belonging to the caller's tenant.
+    Columns: name, barcode, sku, price, cost, stock, reorder, category_name.
+    """
+    tenant = getattr(request.user, 'tenant', None)
+    qs = Product.objects.select_related('category').all()
+    if tenant:
+        qs = qs.filter(tenant=tenant)
+    qs = qs.order_by('name')
+
+    filename = f'products-{timezone.now():%Y%m%d-%H%M%S}.csv'
+    response = HttpResponse(content_type='text/csv; charset=utf-8')
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    response.write('﻿')  # BOM so Excel opens UTF-8 correctly
+
+    writer = csv.writer(response)
+    writer.writerow(CSV_EXPORT_COLUMNS)
+    for p in qs.iterator(chunk_size=500):
+        writer.writerow([
+            p.name,
+            p.barcode,
+            p.sku,
+            p.price,
+            p.cost,
+            p.stock,
+            p.reorder,
+            p.category.name if p.category else '',
+        ])
+    return response
+
+
+def _import_row(tenant, row, category_cache):
+    """
+    Upsert one CSV row into Product.
+
+    Returns 'created' or 'updated' on success.
+    Raises ValueError with a human-readable message on bad data.
+    On update: only price, cost, stock are refreshed (per spec).
+    """
+    name    = (row.get('name')    or '').strip()
+    barcode = (row.get('barcode') or '').strip()
+    sku     = (row.get('sku')     or '').strip()
+
+    if not name:
+        raise ValueError('Missing product name')
+    if not barcode:
+        raise ValueError('Missing barcode')
+
+    try:
+        price = Decimal(str(row.get('price') or '0').strip())
+        cost  = Decimal(str(row.get('cost')  or '0').strip())
+    except (InvalidOperation, ValueError):
+        raise ValueError('Invalid price or cost — must be a decimal number')
+
+    # Accept "50" and "50.0" as 50; reject "50.5".
+    try:
+        stock_dec   = Decimal(str(row.get('stock')   or '0').strip())
+        reorder_dec = Decimal(str(row.get('reorder') or '10').strip())
+    except (InvalidOperation, ValueError, TypeError):
+        raise ValueError('Invalid stock or reorder — must be a number')
+    if stock_dec != stock_dec.to_integral_value() or reorder_dec != reorder_dec.to_integral_value():
+        raise ValueError('stock and reorder must be whole numbers (e.g. 50, not 50.5)')
+    stock   = int(stock_dec)
+    reorder = int(reorder_dec)
+
+    if price < 0 or cost < 0 or stock < 0 or reorder < 0:
+        raise ValueError('Numeric fields must not be negative')
+
+    cat_name = (row.get('category_name') or '').strip()
+    category = None
+    if cat_name:
+        # Cache to avoid re-querying for repeated category names in the same import
+        key = cat_name.lower()
+        category = category_cache.get(key)
+        if category is None:
+            category, _ = Category.objects.get_or_create(tenant=tenant, name=cat_name)
+            category_cache[key] = category
+
+    existing = Product.objects.filter(tenant=tenant, barcode=barcode).first()
+    if existing:
+        existing.price = price
+        existing.cost  = cost
+        existing.stock = stock
+        existing.save(update_fields=['price', 'cost', 'stock', 'updated_at'])
+        return 'updated'
+
+    Product.objects.create(
+        tenant   = tenant,
+        barcode  = barcode,
+        sku      = sku or barcode,
+        name     = name,
+        price    = price,
+        cost     = cost,
+        stock    = stock,
+        reorder  = reorder,
+        category = category,
+    )
+    return 'created'
+
+
+@api_view(['POST'])
+@permission_classes([IsManagerOrAbove])
+def products_import(request):
+    """
+    POST /api/products/import/   (multipart/form-data, field name: "file")
+
+    Bulk-upsert products from a CSV. Each row is wrapped in its own savepoint,
+    so a bad row never poisons the rest of the batch.
+    """
+    tenant = getattr(request.user, 'tenant', None)
+    if not tenant:
+        return Response(
+            {'detail': 'User has no tenant.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    upload = request.FILES.get('file')
+    if not upload:
+        return Response(
+            {'detail': 'No file provided. Send multipart/form-data with a "file" field.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        text = upload.read().decode('utf-8-sig')
+    except UnicodeDecodeError:
+        return Response(
+            {'detail': 'File must be UTF-8 encoded.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    reader   = csv.DictReader(io.StringIO(text))
+    headers  = {(h or '').strip() for h in (reader.fieldnames or [])}
+    required = {'name', 'barcode'}
+    missing  = required - headers
+    if missing:
+        return Response(
+            {'detail': f'Missing required column(s): {sorted(missing)}. '
+                       f'Required headers: {sorted(required)}.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    total = created = updated = 0
+    errors = []
+    category_cache = {}
+
+    for line_no, row in enumerate(reader, start=2):  # row 1 is the header
+        total += 1
+        try:
+            with transaction.atomic():
+                outcome = _import_row(tenant, row, category_cache)
+            if outcome == 'created':
+                created += 1
+            else:
+                updated += 1
+        except ValueError as exc:
+            errors.append({'row': line_no, 'error': str(exc)})
+        except Exception as exc:
+            errors.append({'row': line_no, 'error': f'Unexpected error: {exc}'})
+
+    return Response(
+        {
+            'total_rows': total,
+            'created':    created,
+            'updated':    updated,
+            'errors':     errors,
+        },
+        status=status.HTTP_200_OK,
+    )
+
+
+# ── Inventory batches ─────────────────────────────────────────────────────────
+
+class StockMovementListCreateView(TenantMixin, generics.ListCreateAPIView):
+    """
+    GET  /api/stock-movements/?product_id=<id>
+    POST /api/stock-movements/   (creates a movement and applies stock delta)
+
+    The frontend uses this to render a per-product audit trail and to record
+    stock receipts ("Receive Stock") without going through the heavier
+    PurchaseReceipt flow.
+    """
+
+    queryset           = StockMovement.objects.select_related('product').all()
+    serializer_class   = StockMovementSerializer
+    permission_classes = [IsManagerOrAbove]
+    filterset_class    = StockMovementFilter
+    ordering_fields    = ['created_at']
+    ordering           = ['-created_at']
+
+    def get_queryset(self):
+        # Honour the legacy `product=<id>` alias the StockMovementsModal sends.
+        qs = super().get_queryset()
+        product_alias = self.request.query_params.get('product')
+        if product_alias and 'product_id' not in self.request.query_params:
+            qs = qs.filter(product_id=product_alias)
+        return qs
+
+    def get_serializer_context(self):
+        ctx = super().get_serializer_context()
+        ctx['request'] = self.request
+        return ctx
+
+
+class InventoryBatchListCreateView(TenantMixin, generics.ListCreateAPIView):
+    queryset           = InventoryBatch.objects.select_related('product').all()
+    serializer_class   = InventoryBatchSerializer
+    search_fields      = ['batch_number', 'product__name']
+    ordering_fields    = ['expiry_date', 'received_at']
+    ordering           = ['expiry_date']
+    permission_classes = [IsManagerOrAbove]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        product_id = self.request.query_params.get('product')
+        if product_id:
+            qs = qs.filter(product_id=product_id)
+        return qs
+
+
+class InventoryBatchDetailView(TenantMixin, generics.RetrieveUpdateDestroyAPIView):
+    queryset           = InventoryBatch.objects.select_related('product').all()
+    serializer_class   = InventoryBatchSerializer
+    permission_classes = [IsManagerOrAbove]
+
+
+# ── Inventory actions ─────────────────────────────────────────────────────────
+
+@api_view(['POST'])
+@permission_classes([IsManagerOrAbove])
+def purchase_receipt(request):
+    tenant = getattr(request.user, 'tenant', None)
+    if not tenant:
+        return Response({'detail': 'User has no tenant.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    s = PurchaseReceiptSerializer(data=request.data, context={'request': request})
+    s.is_valid(raise_exception=True)
+    d = s.validated_data
+
+    product      = d['product']
+    qty          = d['qty']
+    batch_number = d.get('batch_number') or f'AUTO-{timezone.now():%Y%m%d%H%M%S}'
+
+    batch = InventoryBatch.objects.create(
+        tenant             = tenant,
+        product            = product,
+        batch_number       = batch_number,
+        remaining_quantity = qty,
+        expiry_date        = d.get('expiry_date'),
+        cost_price         = d.get('cost_price'),
+    )
+
+    Product.objects.filter(pk=product.pk).update(stock=F('stock') + qty)
+    product.refresh_from_db(fields=['stock'])
+
+    StockMovement.objects.create(
+        tenant        = tenant,
+        product       = product,
+        qty           = qty,
+        movement_type = StockMovement.MovementType.PURCHASE_IN,
+        note          = f'Purchase receipt — batch {batch_number}',
+    )
+
+    return Response(
+        {'batch': InventoryBatchSerializer(batch).data, 'product_stock': product.stock},
+        status=status.HTTP_201_CREATED,
+    )
+
+
+@api_view(['POST'])
+@permission_classes([IsManagerOrAbove])
+def stock_adjustment(request):
+    tenant = getattr(request.user, 'tenant', None)
+    if not tenant:
+        return Response({'detail': 'User has no tenant.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    s = StockAdjustmentSerializer(data=request.data, context={'request': request})
+    s.is_valid(raise_exception=True)
+    d = s.validated_data
+
+    product        = d['product']
+    actual_qty     = d['actual_qty']
+    reason         = d['reason']
+    previous_stock = product.stock
+    diff           = actual_qty - previous_stock
+
+    Product.objects.filter(pk=product.pk).update(stock=actual_qty)
+    product.refresh_from_db(fields=['stock'])
+
+    StockMovement.objects.create(
+        tenant        = tenant,
+        product       = product,
+        qty           = diff,
+        movement_type = StockMovement.MovementType.ADJUSTMENT,
+        note          = reason,
+    )
+
+    return Response({
+        'product_id':     product.pk,
+        'product_name':   product.name,
+        'previous_stock': previous_stock,
+        'new_stock':      product.stock,
+        'difference':     diff,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsManagerOrAbove])
+def inventory_alerts(request):
+    tenant = getattr(request.user, 'tenant', None)
+    qs = Product.objects.filter(active=True, stock__lt=F('reorder'))
+    if tenant:
+        qs = qs.filter(tenant=tenant)
+
+    results = [
+        {
+            'product_id':    p.pk,
+            'name':          p.name,
+            'barcode':       p.barcode,
+            'current_stock': p.stock,
+            'reorder_point': p.reorder,
+            'shortfall':     p.reorder - p.stock,
+        }
+        for p in qs.order_by('stock')
+    ]
+
+    return Response({'count': len(results), 'results': results})
+
+
+# ── Sales ─────────────────────────────────────────────────────────────────────
+
+class SaleListCreateView(TenantMixin, generics.ListCreateAPIView):
+    queryset           = Sale.objects.select_related('cashier', 'branch', 'terminal').prefetch_related('items')
+    filterset_class    = SaleFilter
+    search_fields      = ['id', 'branch__name', 'terminal__name']
+    ordering_fields    = ['created_at', 'total']
+    ordering           = ['-created_at']
+    permission_classes = [IsCashierOrAbove]
+
+    def get_serializer_class(self):
+        if self.request.method == 'POST':
+            return SaleSerializer
+        return SaleListSerializer
+
+    def get_queryset(self):
+        # TenantMixin scopes by tenant; cashiers see only their own rows.
+        qs = super().get_queryset()
+        user = self.request.user
+        if getattr(user, 'role', None) == 'Cashier':
+            qs = qs.filter(cashier=user)
+        return qs
+
+    def perform_create(self, serializer):
+        user   = self.request.user
+        tenant = getattr(user, 'tenant', None)
+        serializer.save(
+            tenant   = tenant,
+            cashier  = user,
+            branch   = user.branch,
+            terminal = user.terminal,
+        )
+
+
+@api_view(['GET'])
+@permission_classes([IsCashierOrAbove])
+def sales_export(request):
+    """
+    GET /api/sales/export/?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD
+
+    CSV export of sales for the calling tenant, applying the same
+    `start_date` / `end_date` filters as the list endpoint. Date params are
+    inclusive on both ends. Returns text/csv with a download filename.
+    """
+    import datetime
+
+    user   = request.user
+    tenant = getattr(user, 'tenant', None)
+    qs = (
+        Sale.objects
+        .select_related('cashier')
+        .prefetch_related('items')
+        .order_by('-created_at')
+    )
+    if tenant:
+        qs = qs.filter(tenant=tenant)
+    # Cashiers may only export their own sales.
+    if getattr(user, 'role', None) == 'Cashier':
+        qs = qs.filter(cashier=user)
+
+    start_param = request.query_params.get('start_date')
+    end_param   = request.query_params.get('end_date')
+
+    def _parse(name, value):
+        try:
+            return datetime.date.fromisoformat(value)
+        except (TypeError, ValueError):
+            raise ValueError(f'Invalid {name}: expected YYYY-MM-DD.')
+
+    try:
+        if start_param:
+            qs = qs.filter(created_at__date__gte=_parse('start_date', start_param))
+        if end_param:
+            qs = qs.filter(created_at__date__lte=_parse('end_date', end_param))
+    except ValueError as exc:
+        return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    qs = qs.annotate(_item_count=Count('items'))
+
+    filename = 'sales_export.csv'
+    response = HttpResponse(content_type='text/csv; charset=utf-8')
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    response.write('﻿')  # UTF-8 BOM so Excel opens Arabic columns correctly
+
+    writer = csv.writer(response)
+    writer.writerow([
+        'ID', 'Date', 'Cashier', 'Method',
+        'Items Count', 'Subtotal', 'Tax', 'Total', 'Status',
+    ])
+    for s in qs.iterator(chunk_size=500):
+        short_id = (str(s.sale_uuid)[-8:] if s.sale_uuid else str(s.pk))
+        cashier  = ''
+        if s.cashier_id:
+            cashier = s.cashier.get_full_name() or s.cashier.username
+        writer.writerow([
+            short_id,
+            timezone.localtime(s.created_at).strftime('%Y-%m-%d %H:%M:%S'),
+            cashier,
+            s.method,
+            s._item_count,
+            s.subtotal,
+            s.tax_amount,
+            s.total,
+            s.status,
+        ])
+    return response
+
+
+@api_view(['GET'])
+@permission_classes([IsCashierOrAbove])
+def sale_receipt(request, sale_uuid=None, pk=None):
+    """
+    GET /api/sales/<uuid|pk>/receipt/
+
+    Returns the structured receipt payload — system-filled fields under
+    `auto`, tenant-configured text under `config`, lines + totals. The
+    frontend renders the printed bill from this without baking in any
+    policy text.
+    """
+    tenant = getattr(request.user, 'tenant', None)
+    qs = (
+        Sale.objects
+        .select_related('cashier', 'branch', 'terminal', 'tenant', 'payment')
+        .prefetch_related('items')
+    )
+    if tenant:
+        qs = qs.filter(tenant=tenant)
+    if getattr(request.user, 'role', None) == 'Cashier':
+        qs = qs.filter(cashier=request.user)
+
+    if sale_uuid:
+        sale = get_object_or_404(qs, sale_uuid=sale_uuid)
+    else:
+        sale = get_object_or_404(qs, pk=pk)
+    return Response(ReceiptSerializer(sale).data)
+
+
+class SaleDetailView(TenantMixin, generics.RetrieveAPIView):
+    queryset           = Sale.objects.select_related('cashier', 'branch', 'terminal').prefetch_related('items__product')
+    serializer_class   = SaleSerializer
+    permission_classes = [IsCashierOrAbove]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        user = self.request.user
+        if getattr(user, 'role', None) == 'Cashier':
+            qs = qs.filter(cashier=user)
+        return qs
+
+    def get_object(self):
+        qs = self.get_queryset()
+        if 'sale_uuid' in self.kwargs:
+            obj = get_object_or_404(qs, sale_uuid=self.kwargs['sale_uuid'])
+        else:
+            obj = get_object_or_404(qs, pk=self.kwargs['pk'])
+        self.check_object_permissions(self.request, obj)
+        return obj
+
+
+@api_view(['POST'])
+@permission_classes([IsCashierOrAbove])
+def void_sale(request, pk=None, sale_uuid=None):
+    """
+    POST /api/sales/<id|uuid>/void/
+
+    Permissions:
+      - Manager/Admin/Owner can void any sale within their tenant.
+      - Cashier can void only their own sales.
+
+    Already-voided sales return 400.
+
+    Inventory is restored: each line's product stock is incremented and a
+    `RETURN_IN` StockMovement is logged so the audit trail remains intact.
+    """
+    user   = request.user
+    tenant = getattr(user, 'tenant', None)
+
+    qs = Sale.objects.select_related('cashier').prefetch_related('items__product')
+    if tenant:
+        qs = qs.filter(tenant=tenant)
+
+    if sale_uuid is not None:
+        sale = get_object_or_404(qs, sale_uuid=sale_uuid)
+    else:
+        sale = get_object_or_404(qs, pk=pk)
+
+    if getattr(user, 'role', None) == 'Cashier' and sale.cashier_id != user.id:
+        return Response(
+            {'detail': 'Cashiers can only void their own sales.'},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    if sale.status == Sale.Status.VOIDED:
+        return Response(
+            {'detail': 'Sale is already voided.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if sale.status != Sale.Status.COMPLETED:
+        return Response(
+            {'detail': 'Only completed sales can be voided.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    with transaction.atomic():
+        sale.status = Sale.Status.VOIDED
+        sale.save(update_fields=['status', 'updated_at'])
+
+        # Restore product stock + record the reversing movement. Keep qty as
+        # Decimal so weighted items (e.g., 0.5 kg) round-trip without
+        # truncating to zero.
+        for item in sale.items.all():
+            if not item.product_id:
+                continue
+            qty = item.qty
+            if qty > 0:
+                Product.objects.filter(pk=item.product_id).update(
+                    stock=F('stock') + qty,
+                )
+            StockMovement.objects.create(
+                tenant        = tenant,
+                product_id    = item.product_id,
+                qty           = qty,
+                movement_type = StockMovement.MovementType.RETURN_IN,
+                sale          = sale,
+                note          = f'Void of sale {sale.sale_uuid}',
+            )
+
+    sale.refresh_from_db()
+    return Response(SaleSerializer(sale).data)
+
+
+# ── Dashboard ─────────────────────────────────────────────────────────────────
+
+@api_view(['GET'])
+@permission_classes([IsManagerOrAbove])
+def dashboard_summary(request):
+    """
+    GET /api/dashboard/summary/?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD
+
+    All KPIs are aggregated over the inclusive [start_date, end_date] window
+    using `created_at__date__range`. When the params are omitted the window
+    defaults to today only. Tenant-scoped; Manager/Admin/Owner only.
+
+    Backwards-compatible: still emits the legacy `today / this_week /
+    this_month / payment_methods` shape so existing callers don't break.
+    """
+    import datetime
+
+    tenant = getattr(request.user, 'tenant', None)
+    today  = timezone.localdate()
+
+    def _parse(name, value, fallback):
+        if not value:
+            return fallback
+        try:
+            return datetime.date.fromisoformat(value)
+        except ValueError:
+            raise ValueError(f'Invalid {name}: expected YYYY-MM-DD.')
+
+    try:
+        start = _parse('start_date', request.query_params.get('start_date'), today)
+        end   = _parse('end_date',   request.query_params.get('end_date'),   today)
+    except ValueError as exc:
+        return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Safety: if the caller sent an inverted range (start strictly after end),
+    # swap before applying `created_at__date__range` so the ORM never sees an
+    # impossible window. Friendlier than returning 400 for what's clearly a
+    # picker glitch.
+    if start > end:
+        start, end = end, start
+
+    completed = Sale.objects.filter(status=Sale.Status.COMPLETED)
+    products  = Product.objects.filter(active=True)
+    if tenant:
+        completed = completed.filter(tenant=tenant)
+        products  = products.filter(tenant=tenant)
+
+    window = completed.filter(created_at__date__range=(start, end))
+
+    # ── Window KPIs ──────────────────────────────────────────────────────────
+    agg = window.aggregate(
+        revenue=Sum('total'),
+        transactions=Count('id'),
+        avg_basket=Avg('total'),
+    )
+    items_sold = (
+        SaleItem.objects
+        .filter(sale__in=window)
+        .aggregate(qty=Sum('qty'))['qty']
+        or 0
+    )
+    revenue      = float(agg['revenue'] or 0)
+    transactions = agg['transactions'] or 0
+    avg_basket   = round(float(agg['avg_basket'] or 0), 2)
+    items_sold   = float(items_sold)
+
+    kpis = {
+        'revenue':      revenue,
+        'transactions': transactions,
+        'avg_basket':   avg_basket,
+        'items_sold':   items_sold,
+        # Trends require a previous-window comparison — return zeros so the UI
+        # can still render the delta line cleanly until that lands.
+        'revenue_trend':      0.0,
+        'transactions_trend': 0.0,
+        'avg_basket_trend':   0.0,
+        'items_sold_trend':   0.0,
+    }
+
+    # ── Top products (by revenue) within the window ──────────────────────────
+    window_items = SaleItem.objects.filter(sale__in=window)
+    top_products = [
+        {
+            'name':       row['product_name'],
+            'units_sold': float(row['units_sold'] or 0),
+            'revenue':    float(row['revenue']    or 0),
+        }
+        for row in (
+            window_items
+            .values('product_name')
+            .annotate(units_sold=Sum('qty'), revenue=Sum('line_total'))
+            .order_by('-revenue')[:10]
+        )
+    ]
+
+    # ── Payment methods within window ───────────────────────────────────────
+    payment_methods = {}
+    for method_val, method_label in Sale.Method.choices:
+        r = window.filter(method=method_val).aggregate(
+            count=Count('id'), total=Sum('total'),
+        )
+        total = float(r['total'] or 0)
+        payment_methods[method_val] = {
+            'label': method_label,
+            'count': r['count'],
+            'total': total,
+            'pct':   round((total / revenue) * 100, 1) if revenue > 0 else 0,
+        }
+
+    # ── Low stock (current state, not date-bound) ────────────────────────────
+    low_stock_qs = products.filter(stock__lte=F('reorder')).order_by('stock')
+    low_stock = [
+        {
+            'id':            p.pk,
+            'name':          p.name,
+            'color':         p.color,
+            'stock':         float(p.stock),
+            'reorder_point': float(p.reorder),
+            'unit':          p.unit,
+        }
+        for p in low_stock_qs[:20]
+    ]
+    low_stock_count = low_stock_qs.count()
+
+    # ── Backwards-compatible blocks for older callers ────────────────────────
+    def legacy_agg(qs):
+        r = qs.aggregate(revenue=Sum('total'), count=Count('id'), avg=Avg('total'))
+        return {
+            'total': float(r['revenue'] or 0),
+            'count': r['count'],
+            'avg':   round(float(r['avg'] or 0), 2),
+        }
+
+    today_start = today
+    week_start  = today - timedelta(days=7)
+    month_start = today - timedelta(days=30)
+
+    return Response({
+        'range': {
+            'start_date': start.isoformat(),
+            'end_date':   end.isoformat(),
+        },
+        'kpis':            kpis,
+        'top_products':    top_products,
+        'payment_methods': payment_methods,
+        'low_stock':       low_stock,
+        'low_stock_count': low_stock_count,
+        # ── Legacy fields (kept for the older dashboard endpoint consumers) ──
+        'today':      legacy_agg(completed.filter(created_at__date=today_start)),
+        'this_week':  legacy_agg(completed.filter(created_at__date__gte=week_start)),
+        'this_month': legacy_agg(completed.filter(created_at__date__gte=month_start)),
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsManagerOrAbove])
+def dashboard_top_products(request):
+    tenant = getattr(request.user, 'tenant', None)
+    today  = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    qs = SaleItem.objects.filter(
+        sale__status=Sale.Status.COMPLETED,
+        sale__created_at__gte=today,
+    )
+    if tenant:
+        qs = qs.filter(sale__tenant=tenant)
+
+    top = list(
+        qs.values('product_name')
+        .annotate(qty_sold=Sum('qty'), revenue=Sum('line_total'))
+        .order_by('-qty_sold')[:10]
+    )
+    for item in top:
+        item['qty_sold'] = float(item['qty_sold'])
+        item['revenue']  = float(item['revenue'])
+
+    return Response(top)
+
+
+@api_view(['GET'])
+@permission_classes([IsManagerOrAbove])
+def dashboard_low_stock(request):
+    tenant = getattr(request.user, 'tenant', None)
+    qs = Product.objects.filter(active=True, stock__lt=F('reorder'))
+    if tenant:
+        qs = qs.filter(tenant=tenant)
+
+    results = [
+        {
+            'product_id':    p.pk,
+            'name':          p.name,
+            'barcode':       p.barcode,
+            'category':      p.category.name if p.category else '',
+            'current_stock': p.stock,
+            'reorder_point': p.reorder,
+            'shortfall':     p.reorder - p.stock,
+        }
+        for p in qs.select_related('category').order_by('stock')
+    ]
+
+    return Response({'count': len(results), 'results': results})
+
+
+@api_view(['GET'])
+@permission_classes([IsManagerOrAbove])
+def dashboard_daily_stats(request):
+    import datetime
+
+    tenant     = getattr(request.user, 'tenant', None)
+    date_param = request.query_params.get('date')
+
+    if date_param:
+        try:
+            parsed = datetime.date.fromisoformat(date_param)
+        except ValueError:
+            return Response(
+                {'detail': 'Invalid date format. Use YYYY-MM-DD.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        day_start = timezone.make_aware(
+            datetime.datetime(parsed.year, parsed.month, parsed.day)
+        )
+    else:
+        day_start = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        parsed    = day_start.date()
+
+    day_end = day_start + timedelta(days=1)
+
+    qs = Sale.objects.filter(
+        status=Sale.Status.COMPLETED,
+        created_at__gte=day_start,
+        created_at__lt=day_end,
+    )
+    if tenant:
+        qs = qs.filter(tenant=tenant)
+
+    agg = qs.aggregate(total_sales=Sum('total'), count=Count('id'), avg=Avg('total'))
+
+    total_items = (
+        SaleItem.objects
+        .filter(sale__in=qs)
+        .aggregate(qty=Sum('qty'))['qty'] or 0
+    )
+
+    return Response({
+        'date':              parsed.isoformat(),
+        'total_sales':       float(agg['total_sales'] or 0),
+        'transaction_count': agg['count'],
+        'avg_basket':        round(float(agg['avg'] or 0), 2),
+        'total_items':       float(total_items),
+    })

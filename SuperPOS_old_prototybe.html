@@ -1,0 +1,1589 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SuperPOS</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<style>
+  :root{
+    --neutral-50:#FAFBFC;--neutral-100:#F3F4F6;--neutral-200:#E5E7EB;--neutral-300:#D1D5DB;
+    --neutral-400:#9CA3AF;--neutral-500:#6B7280;--neutral-600:#4B5563;--neutral-700:#374151;
+    --neutral-800:#1F2937;--neutral-900:#111827;
+    --primary-50:#EFF6FF;--primary-100:#DBEAFE;--primary-500:#3B82F6;--primary-600:#2563EB;--primary-700:#1D4ED8;
+    --success-50:#ECFDF5;--success-500:#10B981;--success-600:#059669;--success-700:#047857;
+    --error-50:#FEF2F2;--error-500:#EF4444;--error-600:#DC2626;--error-700:#B91C1C;
+    --warning-50:#FFFBEB;--warning-500:#F59E0B;--warning-600:#D97706;--warning-700:#B45309;
+    --info-50:#ECFEFF;--info-500:#06B6D4;--info-700:#0E7490;
+    --bg-primary:var(--neutral-50);--bg-secondary:#fff;--bg-tertiary:var(--neutral-100);
+    --text-primary:var(--neutral-900);--text-secondary:var(--neutral-600);--text-tertiary:var(--neutral-500);
+    --border-subtle:var(--neutral-200);--border-default:var(--neutral-300);
+    --shadow-sm:0 1px 2px rgba(0,0,0,0.05);
+    --shadow-md:0 4px 6px rgba(0,0,0,0.08);
+    --shadow-lg:0 10px 15px rgba(0,0,0,0.12);
+    --font-body:"Segoe UI",-apple-system,BlinkMacSystemFont,system-ui,sans-serif;
+    --font-mono:"SF Mono","Monaco","Menlo","Courier New",monospace;
+  }
+  html,body{font-family:var(--font-body);background:var(--bg-primary);color:var(--text-primary);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  *{box-sizing:border-box}
+  button{font-family:inherit}
+  input,select,textarea{font-family:inherit}
+  .focus-ring:focus-visible{outline:2px solid var(--primary-500);outline-offset:2px}
+  .row-zebra:nth-child(even){background:var(--neutral-50)}
+  @keyframes blink{50%{opacity:0}}
+  .caret{display:inline-block;width:2px;height:1.1em;background:var(--primary-500);vertical-align:-3px;margin-left:2px;animation:blink 1s steps(1) infinite}
+  @keyframes flash{0%{background:var(--success-50)}100%{background:transparent}}
+  .scan-flash{animation:flash 600ms ease-out}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .spin{animation:spin 1s linear infinite}
+  @keyframes pulse-ring{0%{transform:scale(.95);opacity:.7}70%{transform:scale(1.4);opacity:0}100%{transform:scale(1.4);opacity:0}}
+  .pulse-ring{animation:pulse-ring 1.5s cubic-bezier(0.4,0,0.6,1) infinite}
+  @keyframes fade-in{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+  .fade-in{animation:fade-in 200ms ease-out}
+  /* Receipt mono */
+  .receipt{font-family:var(--font-mono);font-size:13px;line-height:1.55;color:#000}
+  .receipt .dashed{border-top:1px dashed #999;margin:8px 0}
+  /* No-spin number input */
+  input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
+  input[type=number]{-moz-appearance:textfield}
+  /* Tailwind theme via class on <html> for color tokens used in markup */
+</style>
+<script>
+  tailwind.config = {
+    theme: { extend: {
+      colors: {
+        neutral:{50:'#FAFBFC',100:'#F3F4F6',200:'#E5E7EB',300:'#D1D5DB',400:'#9CA3AF',500:'#6B7280',600:'#4B5563',700:'#374151',800:'#1F2937',900:'#111827'},
+        brand:{50:'#EFF6FF',100:'#DBEAFE',500:'#3B82F6',600:'#2563EB',700:'#1D4ED8'},
+        success:{50:'#ECFDF5',500:'#10B981',600:'#059669',700:'#047857'},
+        danger:{50:'#FEF2F2',500:'#EF4444',600:'#DC2626',700:'#B91C1C'},
+        warn:{50:'#FFFBEB',500:'#F59E0B',600:'#D97706',700:'#B45309'},
+      },
+      fontFamily:{sans:['"Segoe UI"','-apple-system','BlinkMacSystemFont','system-ui','sans-serif'],mono:['"SF Mono"','Monaco','Menlo','monospace']},
+      boxShadow:{sm:'0 1px 2px rgba(0,0,0,0.05)',md:'0 4px 6px rgba(0,0,0,0.08)',lg:'0 10px 15px rgba(0,0,0,0.12)'},
+      borderRadius:{md:'8px',lg:'12px'},
+    }}
+  }
+</script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="env,react">
+const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+/* ============================================================
+   DATA
+============================================================ */
+const PRODUCTS = [
+  { id:'p1',  barcode:'5410188006353', sku:'BVR-001', name:'Coca-Cola 330ml',       category:'Beverages', price:1.20, cost:0.50, tax:0.10, stock:148, reorder:50, color:'#dc2626' },
+  { id:'p2',  barcode:'8410076473219', sku:'BAK-014', name:'Bimbo White Bread 600g',category:'Bakery',    price:2.45, cost:1.10, tax:0.05, stock:32,  reorder:20, color:'#f59e0b' },
+  { id:'p3',  barcode:'8480000200013', sku:'DAR-007', name:'Hacendado Milk 1L',     category:'Dairy',     price:0.95, cost:0.45, tax:0.05, stock:86,  reorder:40, color:'#60a5fa' },
+  { id:'p4',  barcode:'21100401234',   sku:'MET-PLU1001', name:'Beef Steak (kg)',   category:'Meat',      price:18.50,cost:11.00,tax:0.10, stock:14,  reorder:10, color:'#991b1b', weighted:true, plu:'10040' },
+  { id:'p5',  barcode:'8410297121023', sku:'SNK-022', name:'Lays Classic 150g',     category:'Snacks',    price:2.10, cost:0.95, tax:0.10, stock:74,  reorder:30, color:'#facc15' },
+  { id:'p6',  barcode:'5449000000996', sku:'BVR-003', name:'Sprite 500ml',          category:'Beverages', price:1.45, cost:0.55, tax:0.10, stock:9,   reorder:25, color:'#16a34a' },
+  { id:'p7',  barcode:'8001505005707', sku:'PAS-008', name:'Barilla Spaghetti 500g',category:'Pasta',     price:1.85, cost:0.80, tax:0.05, stock:122, reorder:30, color:'#1e40af' },
+  { id:'p8',  barcode:'5060337502016', sku:'CHO-019', name:'Cadbury Dairy Milk 80g',category:'Snacks',    price:1.65, cost:0.70, tax:0.10, stock:0,   reorder:20, color:'#7c2d12' },
+  { id:'p9',  barcode:'8410057014104', sku:'PRD-002', name:'Bananas (kg)',          category:'Produce',   price:1.49, cost:0.60, tax:0.05, stock:38,  reorder:20, color:'#eab308', weighted:true, plu:'10041' },
+  { id:'p10', barcode:'8480000823014', sku:'HSE-031', name:'Olive Oil 1L',          category:'Pantry',    price:7.90, cost:4.50, tax:0.10, stock:42,  reorder:15, color:'#65a30d' },
+  { id:'p11', barcode:'4009900522861', sku:'CON-009', name:'Orbit Gum 14pcs',       category:'Confectionery',price:1.30,cost:0.45,tax:0.10, stock:6,   reorder:25, color:'#06b6d4' },
+  { id:'p12', barcode:'8000500037560', sku:'CHO-020', name:'Nutella 400g',          category:'Pantry',    price:4.95, cost:2.80, tax:0.10, stock:54,  reorder:20, color:'#78350f' },
+];
+
+const QUICK_GRID = ['p1','p3','p5','p2','p9','p7','p10','p12'].map(id=>PRODUCTS.find(p=>p.id===id));
+
+const fmt = n => '€' + n.toFixed(2);
+const stockBadge = (p) => {
+  if (p.stock === 0) return { label:'Out', kind:'danger' };
+  if (p.stock < p.reorder) return { label:'Low', kind:'warn' };
+  return { label:'In stock', kind:'success' };
+};
+
+/* ============================================================
+   UI PRIMITIVES
+============================================================ */
+const Btn = ({variant='primary', size='md', className='', children, ...p}) => {
+  const sz = { sm:'h-8 px-3 text-[13px]', md:'h-10 px-4 text-sm', lg:'h-12 px-5 text-base', xl:'h-14 px-6 text-base' }[size];
+  const v = {
+    primary:'bg-brand-500 text-white hover:bg-brand-600 active:bg-brand-700 disabled:bg-neutral-300 disabled:text-neutral-500',
+    secondary:'bg-white text-brand-600 border border-neutral-300 hover:bg-neutral-50 active:bg-neutral-100',
+    tertiary:'bg-transparent text-brand-600 hover:bg-brand-50',
+    ghost:'bg-transparent text-neutral-600 hover:bg-neutral-100',
+    danger:'bg-danger-500 text-white hover:bg-danger-600 active:bg-danger-700',
+    success:'bg-success-500 text-white hover:bg-success-600 active:bg-success-700',
+    dark:'bg-neutral-900 text-white hover:bg-neutral-800',
+  }[variant];
+  return <button className={`inline-flex items-center justify-center gap-2 rounded-md font-semibold transition-colors focus-ring disabled:cursor-not-allowed ${sz} ${v} ${className}`} {...p}>{children}</button>;
+};
+
+const Badge = ({kind='gray', size='sm', children}) => {
+  const c = {
+    gray:'bg-neutral-100 text-neutral-700',
+    success:'bg-success-50 text-success-700',
+    danger:'bg-danger-50 text-danger-700',
+    warn:'bg-warn-50 text-warn-700',
+    info:'bg-[#ECFEFF] text-[#0E7490]',
+    brand:'bg-brand-50 text-brand-700',
+  }[kind];
+  const sz = size==='md'?'px-3 py-1 text-[12px]':'px-2 py-0.5 text-[11px]';
+  return <span className={`inline-flex items-center gap-1 rounded ${sz} font-semibold ${c}`}>{children}</span>;
+};
+
+const Card = ({className='',children}) => <div className={`bg-white border border-neutral-200 rounded-lg shadow-sm ${className}`}>{children}</div>;
+
+const Icon = ({name, size=18, className=''}) => {
+  const s = { width:size, height:size };
+  const stroke = { fill:'none', stroke:'currentColor', strokeWidth:2, strokeLinecap:'round', strokeLinejoin:'round' };
+  const P = {
+    barcode: <svg {...s} {...stroke} viewBox="0 0 24 24"><path d="M3 5v14M7 5v14M11 5v14M15 5v14M19 5v14"/></svg>,
+    search:  <svg {...s} {...stroke} viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>,
+    plus:    <svg {...s} {...stroke} viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>,
+    minus:   <svg {...s} {...stroke} viewBox="0 0 24 24"><path d="M5 12h14"/></svg>,
+    trash:   <svg {...s} {...stroke} viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>,
+    check:   <svg {...s} {...stroke} viewBox="0 0 24 24"><path d="m5 12 5 5L20 7"/></svg>,
+    x:       <svg {...s} {...stroke} viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>,
+    card:    <svg {...s} {...stroke} viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18"/></svg>,
+    cash:    <svg {...s} {...stroke} viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="2"/><circle cx="12" cy="12" r="2.5"/></svg>,
+    wallet:  <svg {...s} {...stroke} viewBox="0 0 24 24"><path d="M3 7h15a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/><path d="M3 7V5a2 2 0 0 1 2-2h11"/><circle cx="16.5" cy="13" r="1.2"/></svg>,
+    receipt: <svg {...s} {...stroke} viewBox="0 0 24 24"><path d="M5 3h14v18l-2-1.5L15 21l-2-1.5L11 21l-2-1.5L7 21 5 19.5V3Z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>,
+    printer: <svg {...s} {...stroke} viewBox="0 0 24 24"><path d="M7 8V3h10v5M7 18H5a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="7" y="14" width="10" height="7" rx="1"/></svg>,
+    mail:    <svg {...s} {...stroke} viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>,
+    home:    <svg {...s} {...stroke} viewBox="0 0 24 24"><path d="m3 11 9-8 9 8M5 9v11h14V9"/></svg>,
+    pos:     <svg {...s} {...stroke} viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M3 9h18M7 14h4"/></svg>,
+    box:     <svg {...s} {...stroke} viewBox="0 0 24 24"><path d="m3 7 9-4 9 4-9 4-9-4Z"/><path d="M3 7v10l9 4 9-4V7M12 11v10"/></svg>,
+    chart:   <svg {...s} {...stroke} viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="m7 15 4-5 4 3 5-7"/></svg>,
+    users:   <svg {...s} {...stroke} viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2 21c0-3.5 3-6 7-6s7 2.5 7 6M17 11a3 3 0 1 0 0-6M22 21c0-2.8-2-5-5-5.5"/></svg>,
+    gear:    <svg {...s} {...stroke} viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>,
+    logout:  <svg {...s} {...stroke} viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>,
+    wifi:    <svg {...s} {...stroke} viewBox="0 0 24 24"><path d="M5 12.5a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0"/><circle cx="12" cy="19" r="1" fill="currentColor"/></svg>,
+    wifiOff: <svg {...s} {...stroke} viewBox="0 0 24 24"><path d="M3 3l18 18M9 17a4 4 0 0 1 6 0M5 12.5a10 10 0 0 1 4-2.7M13 8.1a10 10 0 0 1 6 4.4"/><circle cx="12" cy="19" r="1" fill="currentColor"/></svg>,
+    sync:    <svg {...s} {...stroke} viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 15.5-6.3L21 8M21 4v4h-4M21 12a9 9 0 0 1-15.5 6.3L3 16M3 20v-4h4"/></svg>,
+    bell:    <svg {...s} {...stroke} viewBox="0 0 24 24"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 7 3 9H3c0-2 3-2 3-9ZM10 21a2 2 0 0 0 4 0"/></svg>,
+    alert:   <svg {...s} {...stroke} viewBox="0 0 24 24"><path d="M12 3 2 21h20L12 3Z"/><path d="M12 10v4M12 18h.01"/></svg>,
+    filter:  <svg {...s} {...stroke} viewBox="0 0 24 24"><path d="M3 5h18l-7 9v6l-4-2v-4L3 5Z"/></svg>,
+    chevR:   <svg {...s} {...stroke} viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>,
+    chevD:   <svg {...s} {...stroke} viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>,
+    arrowUp: <svg {...s} {...stroke} viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg>,
+    arrowDn: <svg {...s} {...stroke} viewBox="0 0 24 24"><path d="M12 5v14M5 12l7 7 7-7"/></svg>,
+    eye:     <svg {...s} {...stroke} viewBox="0 0 24 24"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>,
+    eyeOff:  <svg {...s} {...stroke} viewBox="0 0 24 24"><path d="m3 3 18 18M9.9 5.1A11 11 0 0 1 12 5c6 0 10 7 10 7a18 18 0 0 1-3.4 4.2M6.6 6.6A18 18 0 0 0 2 12s4 7 10 7c1.3 0 2.5-.3 3.6-.7"/><path d="M9.5 9.6a3 3 0 0 0 4.2 4.3"/></svg>,
+  };
+  return <span className={`inline-flex ${className}`}>{P[name]}</span>;
+};
+
+/* ============================================================
+   LAYOUT — Sidebar + Header
+============================================================ */
+const Sidebar = ({route, setRoute, onLogout}) => {
+  const items = [
+    { id:'pos', label:'Point of Sale', icon:'pos' },
+    { id:'dashboard', label:'Dashboard', icon:'chart' },
+    { id:'products', label:'Products', icon:'box' },
+    { id:'scale', label:'Scale', icon:'barcode' },
+    { id:'sales', label:'Sales', icon:'receipt' },
+    { id:'users', label:'Users', icon:'users' },
+    { id:'settings', label:'Settings', icon:'gear' },
+  ];
+  return (
+    <aside className="w-[220px] shrink-0 bg-white border-r border-neutral-200 flex flex-col">
+      <div className="h-16 px-5 flex items-center gap-2 border-b border-neutral-200">
+        <div className="w-8 h-8 rounded-md bg-brand-500 grid place-items-center text-white font-bold">S</div>
+        <div className="font-semibold text-[15px] tracking-tight">SuperPOS</div>
+      </div>
+      <nav className="p-3 flex-1 flex flex-col gap-0.5">
+        {items.map(it => {
+          const active = route===it.id;
+          return (
+            <button key={it.id} onClick={()=>setRoute(it.id)}
+              className={`h-11 px-3 rounded-md flex items-center gap-3 text-[14px] focus-ring text-start
+                ${active ? 'bg-brand-50 text-brand-700 font-semibold' : 'text-neutral-600 hover:bg-neutral-100'}`}>
+              <Icon name={it.icon} size={20} />
+              <span>{it.label}</span>
+            </button>
+          );
+        })}
+        <div className="mt-auto pt-3 border-t border-neutral-200">
+          <button onClick={onLogout} className="w-full h-11 px-3 rounded-md flex items-center gap-3 text-[14px] text-neutral-600 hover:bg-neutral-100">
+            <Icon name="logout" size={20} /><span>Sign out</span>
+          </button>
+        </div>
+      </nav>
+    </aside>
+  );
+};
+
+const Header = ({title, subtitle, right, online, pendingSync}) => (
+  <header className="h-16 px-6 border-b border-neutral-200 bg-white flex items-center justify-between">
+    <div className="min-w-0">
+      <div className="text-[15px] font-semibold text-neutral-900 truncate">{title}</div>
+      {subtitle && <div className="text-[12px] text-neutral-500 truncate">{subtitle}</div>}
+    </div>
+    <div className="flex items-center gap-3">
+      {right}
+      <div className={`flex items-center gap-2 px-3 h-9 rounded-md border text-[12px] font-medium
+        ${online ? 'bg-success-50 border-success-500/30 text-success-700' : 'bg-warn-50 border-warn-500/30 text-warn-700'}`}>
+        <Icon name={online?'wifi':'wifiOff'} size={14} />
+        {online ? 'Online' : <>Offline · {pendingSync} pending</>}
+      </div>
+      <div className="flex items-center gap-2 pl-3 border-l border-neutral-200">
+        <div className="w-8 h-8 rounded-full bg-neutral-200 grid place-items-center text-[12px] font-semibold text-neutral-700">AH</div>
+        <div className="text-[13px] hidden md:block">
+          <div className="font-semibold leading-tight">Ahmed H.</div>
+          <div className="text-neutral-500 leading-tight">Cashier · POS-01</div>
+        </div>
+      </div>
+    </div>
+  </header>
+);
+
+const OfflineBanner = ({pending}) => (
+  <div className="h-9 bg-warn-50 border-b border-warn-500/30 text-warn-700 px-6 flex items-center gap-2 text-[12.5px]">
+    <Icon name="wifiOff" size={14} />
+    <span className="font-semibold">Offline mode active.</span>
+    <span>Transactions are saved locally and will sync when connection returns.</span>
+    <span className="ml-auto flex items-center gap-2"><Icon name="sync" size={14} /><b>{pending}</b> pending</span>
+  </div>
+);
+
+/* ============================================================
+   LOGIN
+============================================================ */
+const LoginScreen = ({onLogin}) => {
+  const [email, setEmail] = useState('ahmed@superpos.io');
+  const [pw, setPw] = useState('demo1234');
+  const [show, setShow] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const submit = (e) => { e.preventDefault(); setLoading(true); setTimeout(()=>onLogin(),700); };
+  return (
+    <div className="min-h-screen grid place-items-center bg-neutral-100 p-6">
+      <div className="w-full max-w-[420px]">
+        <div className="flex items-center justify-center gap-3 mb-8">
+          <div className="w-11 h-11 rounded-lg bg-brand-500 grid place-items-center text-white font-bold text-xl shadow-md">S</div>
+          <div>
+            <div className="text-[22px] font-semibold tracking-tight leading-none">SuperPOS</div>
+            <div className="text-[12px] text-neutral-500 mt-1">Cloud retail operating system</div>
+          </div>
+        </div>
+        <Card className="p-7">
+          <h1 className="text-[20px] font-semibold mb-1">Sign in to your terminal</h1>
+          <p className="text-[13px] text-neutral-500 mb-6">Use your cashier or admin credentials.</p>
+          <form onSubmit={submit} className="flex flex-col gap-4">
+            <label className="text-[13px] font-semibold text-neutral-700">
+              Email
+              <input type="email" value={email} onChange={e=>setEmail(e.target.value)} required
+                className="mt-1.5 w-full h-10 px-3 rounded-md border border-neutral-300 focus-ring bg-white text-[14px]"/>
+            </label>
+            <label className="text-[13px] font-semibold text-neutral-700">
+              <div className="flex items-center justify-between">
+                <span>Password</span>
+                <a className="text-[12px] text-brand-600 font-medium hover:underline" href="#">Forgot?</a>
+              </div>
+              <div className="mt-1.5 relative">
+                <input type={show?'text':'password'} value={pw} onChange={e=>setPw(e.target.value)} required
+                  className="w-full h-10 px-3 pr-10 rounded-md border border-neutral-300 focus-ring bg-white text-[14px]"/>
+                <button type="button" onClick={()=>setShow(s=>!s)} className="absolute right-2 top-1/2 -translate-y-1/2 w-7 h-7 grid place-items-center rounded text-neutral-500 hover:bg-neutral-100">
+                  <Icon name={show?'eyeOff':'eye'} size={16}/>
+                </button>
+              </div>
+            </label>
+            <label className="flex items-center gap-2 text-[13px] text-neutral-600 select-none">
+              <input type="checkbox" defaultChecked className="w-4 h-4 rounded border-neutral-300 text-brand-500 focus-ring"/>
+              Trust this device for 24 hours
+            </label>
+            <Btn size="lg" type="submit" disabled={loading}>
+              {loading ? <><span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full spin"/> Signing in…</> : 'Sign in'}
+            </Btn>
+          </form>
+          <div className="mt-6 pt-5 border-t border-neutral-200 flex items-center justify-between text-[12px] text-neutral-500">
+            <span>v2.0.4 · Terminal POS-01</span>
+            <span className="flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full bg-success-500"/> Server reachable</span>
+          </div>
+        </Card>
+        <p className="text-center text-[12px] text-neutral-500 mt-5">
+          Need help? Call IT at <b className="text-neutral-700">x4001</b> · Branch <b className="text-neutral-700">Cairo Downtown #03</b>
+        </p>
+      </div>
+    </div>
+  );
+};
+
+/* ============================================================
+   POS — Barcode Input, Cart, Quick Grid
+============================================================ */
+const BarcodeInput = ({value, setValue, onSubmit, error}) => {
+  const ref = useRef(null);
+  // Refocus rules
+  useEffect(()=>{ ref.current?.focus(); },[]);
+  useEffect(()=>{
+    let t;
+    const handler = (e) => {
+      // Don't steal focus from other inputs
+      const tag = (e.target.tagName||'').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'button') {
+        clearTimeout(t);
+        t = setTimeout(()=>{ ref.current?.focus(); }, 1500);
+      }
+    };
+    document.addEventListener('click', handler);
+    document.addEventListener('focusin', handler);
+    return ()=>{ document.removeEventListener('click', handler); document.removeEventListener('focusin', handler); clearTimeout(t); };
+  },[]);
+  return (
+    <div className={`relative rounded-lg border-2 ${error?'border-danger-500 bg-danger-50':'border-brand-500 bg-white'} transition-colors`}>
+      <div className="absolute start-4 top-1/2 -translate-y-1/2 text-brand-500 pointer-events-none">
+        <Icon name="barcode" size={24}/>
+      </div>
+      <input
+        ref={ref}
+        value={value}
+        onChange={e=>setValue(e.target.value)}
+        onKeyDown={e=>{ if(e.key==='Enter'){ e.preventDefault(); onSubmit(value); } }}
+        placeholder="Scan or type barcode…"
+        className="w-full h-14 ps-14 pe-32 text-[20px] font-mono tracking-wider bg-transparent focus:outline-none"
+        spellCheck={false} autoComplete="off"
+      />
+      <span className="absolute end-4 top-1/2 -translate-y-1/2 flex items-center gap-2 text-[12px] text-neutral-500">
+        <span className="caret"/>
+        <kbd className="px-2 py-0.5 rounded border border-neutral-300 bg-neutral-50 font-mono text-[11px]">Enter</kbd>
+      </span>
+    </div>
+  );
+};
+
+const QuickProductCard = ({p, onAdd}) => (
+  <button onClick={()=>onAdd(p)}
+    className="text-start bg-white border border-neutral-200 rounded-lg hover:border-brand-500 hover:shadow-md transition-all p-3 flex flex-col gap-2 focus-ring group">
+    <div className="aspect-square rounded-md grid place-items-center text-white font-bold text-xl" style={{background:p.color}}>
+      {p.name.split(' ').map(w=>w[0]).slice(0,2).join('')}
+    </div>
+    <div className="min-h-[36px]">
+      <div className="text-[13px] font-semibold leading-tight line-clamp-2">{p.name}</div>
+    </div>
+    <div className="flex items-center justify-between">
+      <span className="text-[14px] font-bold tabular-nums">{fmt(p.price)}</span>
+      <span className="text-[11px] text-neutral-500">{p.stock}{p.weighted?'kg':' pcs'}</span>
+    </div>
+  </button>
+);
+
+const CartLine = ({item, idx, onQty, onRemove, editing, setEditing, flash}) => (
+  <div className={`row-zebra group flex items-center gap-3 px-4 py-2.5 border-b border-neutral-100 ${flash?'scan-flash':''}`}>
+    <div className="w-9 h-9 rounded-md grid place-items-center text-white text-[11px] font-bold shrink-0" style={{background:item.color}}>
+      {item.name.split(' ').map(w=>w[0]).slice(0,2).join('')}
+    </div>
+    <div className="flex-1 min-w-0">
+      <div className="text-[13.5px] font-semibold truncate">{item.name}</div>
+      <div className="text-[11.5px] text-neutral-500 flex items-center gap-2">
+        <span className="font-mono">{item.barcode}</span>
+        <span>·</span>
+        <span>{fmt(item.price)}{item.weighted?'/kg':''}</span>
+      </div>
+    </div>
+    {editing===item.lineId ? (
+      <div className="flex items-center gap-1 bg-neutral-100 rounded-md p-1">
+        <button onClick={()=>onQty(item.lineId, -1)} className="w-7 h-7 rounded grid place-items-center bg-white border border-neutral-300 hover:border-brand-500"><Icon name="minus" size={14}/></button>
+        <span className="w-14 text-center font-mono text-[14px] font-semibold tabular-nums">{item.weighted?item.qty.toFixed(3)+'kg':item.qty}</span>
+        <button onClick={()=>onQty(item.lineId, +1)} className="w-7 h-7 rounded grid place-items-center bg-white border border-neutral-300 hover:border-brand-500"><Icon name="plus" size={14}/></button>
+        <button onClick={()=>onRemove(item.lineId)} className="w-7 h-7 rounded grid place-items-center text-danger-600 hover:bg-danger-50"><Icon name="trash" size={14}/></button>
+        <button onClick={()=>setEditing(null)} className="w-7 h-7 rounded grid place-items-center text-neutral-500 hover:bg-neutral-200"><Icon name="check" size={14}/></button>
+      </div>
+    ) : item.weighted ? (
+      <button onClick={()=>setEditing(item.lineId)} className="text-end font-mono text-[12px] leading-tight hover:bg-brand-50 px-2 py-1 rounded">
+        <div className="text-brand-700 font-semibold">{item.qty.toFixed(3)} kg</div>
+        <div className="text-neutral-500">× {fmt(item.price)}/kg</div>
+      </button>
+    ) : (
+      <button onClick={()=>setEditing(item.lineId)} className="text-[13px] font-mono text-neutral-600 hover:text-brand-600 hover:bg-brand-50 px-2 py-1 rounded">
+        ×{item.qty}
+      </button>
+    )}
+    <div className="w-20 text-end font-mono font-semibold text-[14px] tabular-nums">{fmt(item.qty * item.price)}</div>
+    {item.weighted && <span className="absolute end-0 top-0"></span>}
+  </div>
+);
+
+/* ============================================================
+   POS PAGE
+============================================================ */
+const POSPage = ({online, setOnline, pendingSync, setPendingSync, goReceipt}) => {
+  const [barcode, setBarcode] = useState('');
+  const [cart, setCart] = useState([]);
+  const [error, setError] = useState(null);
+  const [flashId, setFlashId] = useState(null);
+  const [editing, setEditing] = useState(null);
+  const [payment, setPayment] = useState(null); // null | 'choose' | 'cash' | 'card'
+  const [lineCounter, setLineCounter] = useState(1);
+
+  const playBeep = () => {
+    try {
+      const a = new (window.AudioContext||window.webkitAudioContext)();
+      const o = a.createOscillator(); const g = a.createGain();
+      o.frequency.value = 880; o.type='sine';
+      g.gain.value = 0.04;
+      o.connect(g); g.connect(a.destination);
+      o.start(); o.stop(a.currentTime + 0.08);
+    } catch(e){}
+  };
+
+  const addProduct = useCallback((p, qty=1) => {
+    setCart(prev => {
+      const existing = !p.weighted && prev.find(x => x.id===p.id);
+      if (existing){
+        setFlashId(existing.lineId);
+        setTimeout(()=>setFlashId(null), 600);
+        return prev.map(x => x.lineId===existing.lineId ? {...x, qty:x.qty+qty} : x);
+      }
+      const lineId = 'L'+lineCounter;
+      setLineCounter(c=>c+1);
+      setFlashId(lineId);
+      setTimeout(()=>setFlashId(null), 600);
+      return [...prev, { ...p, lineId, qty }];
+    });
+    playBeep();
+  }, [lineCounter]);
+
+  const submitBarcode = (raw) => {
+    const code = raw.trim();
+    if (!code) return;
+    setError(null);
+    // Scale barcode: starts with 21, total 11 digits
+    if (/^21\d{9}$/.test(code)){
+      const plu = code.slice(2,7);
+      const weightUnits = parseInt(code.slice(7,12),10);
+      const weightKg = weightUnits / 1000; // grams to kg approximation
+      const prod = PRODUCTS.find(p => p.weighted && p.plu === plu);
+      if (prod){
+        addProduct(prod, +(weightKg).toFixed(3) || 0.5);
+        setBarcode('');
+        return;
+      }
+    }
+    const prod = PRODUCTS.find(p => p.barcode === code);
+    if (prod){
+      addProduct(prod);
+      setBarcode('');
+    } else {
+      setError(`No product found for "${code}"`);
+      setTimeout(()=>setError(null), 2500);
+    }
+  };
+
+  const setQty = (lineId, delta) => setCart(c => c.map(x => x.lineId===lineId ? {...x, qty: Math.max(1, +(x.qty + (x.weighted?delta*0.1:delta)).toFixed(3))} : x));
+  const remove = (lineId) => { setCart(c => c.filter(x => x.lineId!==lineId)); setEditing(null); };
+  const clear = () => { setCart([]); setEditing(null); setBarcode(''); };
+
+  const subtotal = cart.reduce((s,x)=>s + x.qty*x.price, 0);
+  const tax = cart.reduce((s,x)=>s + x.qty*x.price*x.tax, 0);
+  const total = subtotal + tax;
+
+  const completeSale = (method, paid, change) => {
+    if (!online) setPendingSync(n=>n+1);
+    goReceipt({
+      id: 'TXN-' + Math.floor(Math.random()*900000+100000),
+      items: cart, subtotal, tax, total, method, paid, change,
+      ts: new Date(),
+      cashier: 'Ahmed H.',
+      terminal:'POS-01',
+      offline: !online,
+    });
+    clear();
+    setPayment(null);
+  };
+
+  return (
+    <div className="flex-1 flex flex-col min-h-0">
+      <Header title="Point of Sale" subtitle="Branch · Cairo Downtown #03  ·  Shift open 08:12" online={online} pendingSync={pendingSync}
+        right={<>
+          <Btn variant="ghost" size="sm" onClick={()=>setOnline(o=>!o)}>
+            <Icon name={online?'wifi':'wifiOff'} size={14}/> Toggle {online?'offline':'online'}
+          </Btn>
+        </>} />
+      {!online && <OfflineBanner pending={pendingSync}/>}
+
+      <div className="flex-1 grid grid-cols-12 gap-5 p-5 min-h-0 bg-neutral-100">
+
+        {/* LEFT — Scan + grid */}
+        <section className="col-span-7 flex flex-col gap-5 min-h-0">
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-[12px] font-semibold uppercase tracking-wider text-neutral-500">Barcode Scanner <span className="text-neutral-400 normal-case font-medium">· always focused</span></label>
+              {error ? <span className="text-[12px] font-semibold text-danger-600 fade-in flex items-center gap-1"><Icon name="alert" size={12}/> {error}</span>
+                     : <span className="text-[12px] text-neutral-500 flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-success-500 animate-pulse"/> Listening</span>}
+            </div>
+            <BarcodeInput value={barcode} setValue={setBarcode} onSubmit={submitBarcode} error={!!error}/>
+            <div className="flex items-center gap-2 mt-2 text-[12px] text-neutral-500">
+              <span>Try:</span>
+              {['5410188006353','8480000200013','21100401234500','9999999999'].map(b => (
+                <button key={b} onClick={()=>{ setBarcode(b); submitBarcode(b); }}
+                  className="font-mono text-[11.5px] px-2 py-1 rounded border border-neutral-300 bg-white hover:border-brand-500 hover:text-brand-700">{b}</button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex-1 flex flex-col min-h-0">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-[12px] font-semibold uppercase tracking-wider text-neutral-500">Quick select</h3>
+              <div className="flex gap-1 text-[12px]">
+                {['All','Beverages','Bakery','Dairy','Snacks','Produce'].map((c,i)=>(
+                  <button key={c} className={`px-2.5 py-1 rounded-md font-medium ${i===0?'bg-neutral-900 text-white':'text-neutral-600 hover:bg-neutral-200'}`}>{c}</button>
+                ))}
+              </div>
+            </div>
+            <div className="grid grid-cols-4 gap-3 overflow-auto pr-1 pb-1">
+              {QUICK_GRID.map(p => <QuickProductCard key={p.id} p={p} onAdd={addProduct}/>)}
+            </div>
+          </div>
+        </section>
+
+        {/* RIGHT — Cart */}
+        <aside className="col-span-5 flex flex-col min-h-0">
+          <Card className="flex-1 flex flex-col min-h-0 overflow-hidden">
+            <div className="px-5 h-14 border-b border-neutral-200 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <h2 className="text-[15px] font-semibold">Current Sale</h2>
+                <Badge kind="brand">{cart.length} {cart.length===1?'item':'items'}</Badge>
+              </div>
+              {cart.length>0 && (
+                <button onClick={clear} className="text-[12px] font-semibold text-danger-600 hover:underline flex items-center gap-1">
+                  <Icon name="trash" size={14}/> Clear cart
+                </button>
+              )}
+            </div>
+
+            <div className="flex-1 overflow-auto min-h-0">
+              {cart.length===0 ? (
+                <div className="h-full flex flex-col items-center justify-center text-center px-8 py-12">
+                  <div className="w-16 h-16 rounded-full bg-neutral-100 grid place-items-center text-neutral-400 mb-3">
+                    <Icon name="barcode" size={28}/>
+                  </div>
+                  <div className="text-[15px] font-semibold text-neutral-700">Cart is empty</div>
+                  <div className="text-[13px] text-neutral-500 mt-1 max-w-[260px]">Scan a barcode or tap a product on the left to start a new transaction.</div>
+                  <div className="mt-4 flex items-center gap-2 text-[11.5px] text-neutral-500">
+                    <kbd className="px-2 py-0.5 rounded border border-neutral-300 bg-neutral-50 font-mono">F2</kbd>
+                    <span>discount</span>
+                    <kbd className="px-2 py-0.5 rounded border border-neutral-300 bg-neutral-50 font-mono">F8</kbd>
+                    <span>payment</span>
+                  </div>
+                </div>
+              ) : (
+                cart.map((item, i) => (
+                  <CartLine key={item.lineId} item={item} idx={i}
+                    onQty={setQty} onRemove={remove}
+                    editing={editing} setEditing={setEditing}
+                    flash={flashId===item.lineId}/>
+                ))
+              )}
+            </div>
+
+            {/* Totals */}
+            <div className="border-t border-neutral-200 bg-neutral-50">
+              <div className="px-5 py-3 space-y-1 text-[13.5px]">
+                <div className="flex justify-between"><span className="text-neutral-600">Subtotal</span><span className="font-mono tabular-nums">{fmt(subtotal)}</span></div>
+                <div className="flex justify-between"><span className="text-neutral-600">VAT</span><span className="font-mono tabular-nums">{fmt(tax)}</span></div>
+                <div className="flex justify-between"><span className="text-neutral-600">Discount</span><span className="font-mono tabular-nums text-neutral-400">—</span></div>
+              </div>
+              <div className="px-5 py-3 border-t border-neutral-200 flex items-center justify-between">
+                <span className="text-[13px] font-semibold uppercase tracking-wider text-neutral-500">Total</span>
+                <span className="font-mono text-[28px] font-bold tabular-nums">{fmt(total)}</span>
+              </div>
+              <div className="px-4 pb-4">
+                <Btn size="xl" className="w-full text-[15px]" disabled={cart.length===0} onClick={()=>setPayment('choose')}>
+                  Proceed to Payment
+                  <Icon name="chevR" size={18}/>
+                </Btn>
+              </div>
+            </div>
+          </Card>
+        </aside>
+      </div>
+
+      {payment && (
+        <PaymentModal mode={payment} setMode={setPayment} total={total}
+          onComplete={completeSale} online={online}/>
+      )}
+    </div>
+  );
+};
+
+/* ============================================================
+   PAYMENT MODAL — Cash + Card
+============================================================ */
+const Keypad = ({onPress}) => {
+  const keys = ['1','2','3','4','5','6','7','8','9','C','0','⌫'];
+  return (
+    <div className="grid grid-cols-3 gap-2">
+      {keys.map(k => (
+        <button key={k} onClick={()=>onPress(k)}
+          className={`h-[60px] rounded-lg font-semibold text-[20px] focus-ring transition-colors
+            ${k==='C' ? 'bg-warn-50 text-warn-700 hover:bg-warn-500/20' :
+              k==='⌫' ? 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200' :
+              'bg-white border border-neutral-300 hover:border-brand-500 hover:bg-brand-50'}`}>
+          {k}
+        </button>
+      ))}
+    </div>
+  );
+};
+
+const PaymentModal = ({mode, setMode, total, onComplete, online}) => {
+  const [cash, setCash] = useState('');
+  const [cardStage, setCardStage] = useState('waiting'); // waiting | processing | success | declined
+  const cashNum = parseFloat(cash || '0');
+  const change = cashNum - total;
+
+  const press = (k) => {
+    if (k==='C') setCash('');
+    else if (k==='⌫') setCash(c => c.slice(0,-1));
+    else if (k==='.') { if(!cash.includes('.')) setCash(c => (c||'0') + '.'); }
+    else setCash(c => (c + k).replace(/^0+(\d)/,'$1'));
+  };
+  const quickAmts = [total, Math.ceil(total/5)*5, Math.ceil(total/10)*10, Math.ceil(total/20)*20].filter((v,i,a)=>a.indexOf(v)===i);
+
+  useEffect(()=>{
+    if (mode==='card'){
+      setCardStage('waiting');
+      const t1 = setTimeout(()=>setCardStage('processing'), 1500);
+      const t2 = setTimeout(()=>setCardStage('success'), 3800);
+      return ()=>{ clearTimeout(t1); clearTimeout(t2); };
+    }
+  }, [mode]);
+
+  return (
+    <div className="fixed inset-0 z-[1100] bg-black/50 backdrop-blur-sm grid place-items-center p-6 fade-in">
+      <div className="bg-white rounded-xl shadow-lg w-full max-w-[820px] overflow-hidden">
+        <div className="px-6 h-14 border-b border-neutral-200 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <h2 className="text-[16px] font-semibold">
+              {mode==='choose' && 'Select payment method'}
+              {mode==='cash' && 'Cash payment'}
+              {mode==='card' && 'Card payment'}
+            </h2>
+            {!online && mode==='card' && <Badge kind="warn">Offline — card disabled</Badge>}
+          </div>
+          <button onClick={()=>setMode(null)} className="w-9 h-9 grid place-items-center rounded-md hover:bg-neutral-100 text-neutral-500">
+            <Icon name="x" size={18}/>
+          </button>
+        </div>
+
+        {mode==='choose' && (
+          <div className="p-6">
+            <div className="text-center mb-6">
+              <div className="text-[12px] font-semibold uppercase tracking-wider text-neutral-500">Total due</div>
+              <div className="font-mono text-[44px] font-bold tabular-nums leading-none mt-1">{fmt(total)}</div>
+            </div>
+            <div className="grid grid-cols-3 gap-3">
+              {[
+                {id:'cash',label:'Cash',icon:'cash',desc:'Counter receipt',enabled:true},
+                {id:'card',label:'Card',icon:'card',desc:'Tap / chip / swipe',enabled:online},
+                {id:'wallet',label:'Wallet',icon:'wallet',desc:'QR code · Vodafone Cash',enabled:online},
+              ].map(m=>(
+                <button key={m.id} disabled={!m.enabled} onClick={()=>setMode(m.id==='wallet'?'card':m.id)}
+                  className="border-2 border-neutral-200 rounded-lg p-5 text-start hover:border-brand-500 hover:bg-brand-50 transition-colors disabled:opacity-50 disabled:hover:border-neutral-200 disabled:hover:bg-white disabled:cursor-not-allowed">
+                  <div className="w-10 h-10 rounded-md bg-brand-50 text-brand-600 grid place-items-center mb-3"><Icon name={m.icon} size={22}/></div>
+                  <div className="text-[15px] font-semibold">{m.label}</div>
+                  <div className="text-[12px] text-neutral-500 mt-0.5">{m.desc}</div>
+                  {!m.enabled && <div className="mt-2 text-[11px] font-semibold text-warn-700">Requires online</div>}
+                </button>
+              ))}
+            </div>
+            <p className="text-center text-[11.5px] text-neutral-500 mt-5">
+              <kbd className="px-1.5 py-0.5 rounded border border-neutral-300 bg-neutral-50 font-mono">Esc</kbd> to cancel
+            </p>
+          </div>
+        )}
+
+        {mode==='cash' && (
+          <div className="grid grid-cols-2">
+            {/* LEFT — Amount due / quick amounts */}
+            <div className="p-6 border-r border-neutral-200">
+              <div className="text-[12px] font-semibold uppercase tracking-wider text-neutral-500">Amount due</div>
+              <div className="font-mono text-[40px] font-bold tabular-nums leading-none mt-1">{fmt(total)}</div>
+              <div className="mt-6">
+                <div className="text-[12px] font-semibold uppercase tracking-wider text-neutral-500 mb-2">Cash received</div>
+                <div className="h-16 px-4 rounded-lg border-2 border-brand-500 bg-white flex items-center justify-end font-mono text-[32px] font-bold tabular-nums">
+                  {cash || '0'}
+                  <span className="caret"/>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2 mt-4">
+                {quickAmts.map(v => (
+                  <button key={v} onClick={()=>setCash(v.toFixed(2))}
+                    className="h-11 rounded-md border border-neutral-300 bg-white text-[14px] font-semibold hover:border-brand-500 hover:bg-brand-50">
+                    {fmt(v)}
+                  </button>
+                ))}
+              </div>
+              <div className={`mt-5 rounded-lg p-4 ${cashNum>=total ? 'bg-success-50 border border-success-500/30' : 'bg-neutral-50 border border-neutral-200'}`}>
+                <div className="text-[12px] font-semibold uppercase tracking-wider text-neutral-500">Change</div>
+                <div className={`font-mono text-[36px] font-bold tabular-nums leading-none mt-1 ${cashNum>=total?'text-success-700':'text-neutral-400'}`}>
+                  {cashNum>=total ? fmt(change) : '—'}
+                </div>
+              </div>
+            </div>
+            {/* RIGHT — Keypad */}
+            <div className="p-6 flex flex-col">
+              <Keypad onPress={press}/>
+              <div className="mt-4 flex gap-2">
+                <Btn variant="secondary" size="lg" className="flex-1" onClick={()=>setMode('choose')}>Back</Btn>
+                <Btn variant="success" size="lg" className="flex-[2]"
+                  disabled={cashNum < total}
+                  onClick={()=>onComplete('cash', cashNum, change)}>
+                  <Icon name="check" size={18}/> Confirm · {fmt(total)}
+                </Btn>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {mode==='card' && (
+          <div className="p-10 text-center">
+            <div className="mb-2 text-[12px] font-semibold uppercase tracking-wider text-neutral-500">Amount</div>
+            <div className="font-mono text-[40px] font-bold tabular-nums">{fmt(total)}</div>
+
+            <div className="my-8 relative h-40 grid place-items-center">
+              {cardStage==='waiting' && (
+                <div className="relative">
+                  <div className="absolute inset-0 rounded-full bg-brand-500/30 pulse-ring"/>
+                  <div className="relative w-24 h-24 rounded-full bg-brand-500 grid place-items-center text-white shadow-lg">
+                    <Icon name="card" size={36}/>
+                  </div>
+                </div>
+              )}
+              {cardStage==='processing' && (
+                <div className="flex flex-col items-center gap-3">
+                  <div className="w-16 h-16 border-4 border-brand-100 border-t-brand-500 rounded-full spin"/>
+                </div>
+              )}
+              {cardStage==='success' && (
+                <div className="flex flex-col items-center gap-2 fade-in">
+                  <div className="w-24 h-24 rounded-full bg-success-500 grid place-items-center text-white shadow-lg">
+                    <Icon name="check" size={48}/>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="text-[16px] font-semibold">
+              {cardStage==='waiting' && 'Insert, tap, or swipe card'}
+              {cardStage==='processing' && 'Contacting payment processor…'}
+              {cardStage==='success' && 'Approved · Visa ending 4242'}
+            </div>
+            <div className="text-[13px] text-neutral-500 mt-1">
+              {cardStage==='waiting' && 'Connected to terminal · PAX A920'}
+              {cardStage==='processing' && 'Authorization in progress'}
+              {cardStage==='success' && <>Authorization #A8392 · {new Date().toLocaleTimeString()}</>}
+            </div>
+
+            <div className="mt-8 flex gap-2 justify-center">
+              {cardStage==='success' ? (
+                <Btn size="lg" variant="success" onClick={()=>onComplete('card', total, 0)}>
+                  Continue to receipt <Icon name="chevR" size={16}/>
+                </Btn>
+              ) : (
+                <Btn size="lg" variant="secondary" onClick={()=>setMode('choose')}>Cancel</Btn>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+/* ============================================================
+   RECEIPT
+============================================================ */
+const ReceiptScreen = ({txn, onDone}) => {
+  const d = txn.ts;
+  const dStr = d.toLocaleDateString() + ' ' + d.toLocaleTimeString();
+  const [emailed, setEmailed] = useState(false);
+  return (
+    <div className="flex-1 flex flex-col min-h-0 bg-neutral-100">
+      <Header title="Receipt preview" subtitle={`Transaction ${txn.id} · ${txn.offline?'Stored offline':'Synced'}`} online={!txn.offline} pendingSync={txn.offline?1:0}
+        right={<Btn variant="ghost" size="sm" onClick={onDone}><Icon name="x" size={14}/> Close</Btn>} />
+      <div className="flex-1 overflow-auto p-8">
+        <div className="max-w-[920px] mx-auto grid grid-cols-5 gap-6">
+
+          {/* RECEIPT */}
+          <div className="col-span-3">
+            <div className="bg-white shadow-md rounded-md p-7 receipt mx-auto" style={{maxWidth:380}}>
+              <div className="text-center">
+                <div className="text-[16px] font-bold tracking-wide">SUPERPOS MARKET</div>
+                <div className="text-[12px]">Cairo Downtown Branch #03</div>
+                <div className="text-[12px]">23 Tahrir St · +20 2 1234 5678</div>
+                <div className="text-[12px]">VAT: 425-883-129</div>
+              </div>
+              <div className="dashed"/>
+              <div className="text-[12px]">
+                <div className="flex justify-between"><span>{dStr}</span><span>{txn.id}</span></div>
+                <div className="flex justify-between"><span>Cashier: {txn.cashier}</span><span>{txn.terminal}</span></div>
+              </div>
+              <div className="dashed"/>
+              <div className="text-[12px]">
+                <div className="flex font-bold pb-1">
+                  <span className="flex-1">ITEM</span>
+                  <span className="w-10 text-right">QTY</span>
+                  <span className="w-20 text-right">TOTAL</span>
+                </div>
+                {txn.items.map((it,i)=>(
+                  <div key={i} className="py-0.5">
+                    <div className="flex">
+                      <span className="flex-1 truncate pr-1">{it.name.toUpperCase()}</span>
+                      <span className="w-10 text-right">{it.qty}{it.weighted?'kg':''}</span>
+                      <span className="w-20 text-right">{(it.qty*it.price).toFixed(2)}</span>
+                    </div>
+                    <div className="text-[11px] text-[#666] pl-1">@ {it.price.toFixed(2)}{it.weighted?'/kg':''}  ·  VAT {(it.tax*100).toFixed(0)}%</div>
+                  </div>
+                ))}
+              </div>
+              <div className="dashed"/>
+              <div className="text-[12px]">
+                <div className="flex justify-between"><span>Subtotal</span><span>{txn.subtotal.toFixed(2)}</span></div>
+                <div className="flex justify-between"><span>VAT</span><span>{txn.tax.toFixed(2)}</span></div>
+                <div className="flex justify-between font-bold text-[14px] pt-1"><span>TOTAL</span><span>€{txn.total.toFixed(2)}</span></div>
+              </div>
+              <div className="dashed"/>
+              <div className="text-[12px]">
+                <div className="flex justify-between"><span>Paid ({txn.method.toUpperCase()})</span><span>{txn.paid.toFixed(2)}</span></div>
+                {txn.method==='cash' && <div className="flex justify-between"><span>Change</span><span>{txn.change.toFixed(2)}</span></div>}
+              </div>
+              <div className="dashed"/>
+              <div className="text-center text-[12px]">
+                <div>Thank you for shopping!</div>
+                <div>Returns within 14 days w/ receipt</div>
+                <div className="mt-2">superpos.io/r/{txn.id.toLowerCase()}</div>
+                <div className="my-3 grid place-items-center">
+                  {/* QR placeholder */}
+                  <div className="w-20 h-20 grid grid-cols-8 grid-rows-8 gap-px bg-black p-1">
+                    {Array.from({length:64}).map((_,i)=>(
+                      <div key={i} className="bg-white" style={{background: ((i*7+3)%5<2 || i<8 || i>55 || i%8===0 || i%8===7) ? '#000' : '#fff'}}/>
+                    ))}
+                  </div>
+                </div>
+                <div className="text-[10px]">** CUSTOMER COPY **</div>
+              </div>
+            </div>
+          </div>
+
+          {/* ACTIONS */}
+          <div className="col-span-2 flex flex-col gap-3">
+            <Card className="p-5">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-success-50 grid place-items-center text-success-600"><Icon name="check" size={22}/></div>
+                <div>
+                  <div className="text-[15px] font-semibold">Payment complete</div>
+                  <div className="text-[12px] text-neutral-500">Cash drawer opened · Inventory updated{txn.offline?' (queued)':''}</div>
+                </div>
+              </div>
+            </Card>
+            <Card className="p-5">
+              <div className="text-[12px] font-semibold uppercase tracking-wider text-neutral-500 mb-2">Auto print</div>
+              <div className="bg-neutral-50 border border-neutral-200 rounded-md p-3 flex items-center gap-3">
+                <div className="w-9 h-9 rounded grid place-items-center bg-white border border-neutral-200"><Icon name="printer" size={18}/></div>
+                <div className="flex-1">
+                  <div className="text-[13px] font-semibold">Star TSP143III · Ready</div>
+                  <div className="text-[11.5px] text-success-700">Receipt sent · 1 copy</div>
+                </div>
+                <Badge kind="success">OK</Badge>
+              </div>
+              <div className="grid grid-cols-2 gap-2 mt-3">
+                <Btn variant="secondary" size="md"><Icon name="printer" size={16}/> Reprint</Btn>
+                <Btn variant="secondary" size="md" onClick={()=>setEmailed(true)}>
+                  <Icon name="mail" size={16}/> {emailed?'Sent ✓':'Email'}
+                </Btn>
+              </div>
+            </Card>
+            <Card className="p-5">
+              <div className="text-[12px] font-semibold uppercase tracking-wider text-neutral-500 mb-3">Summary</div>
+              <div className="space-y-1.5 text-[13px]">
+                <div className="flex justify-between"><span className="text-neutral-500">Items</span><span className="font-mono tabular-nums">{txn.items.reduce((s,i)=>s+i.qty,0)}</span></div>
+                <div className="flex justify-between"><span className="text-neutral-500">Method</span><span className="font-semibold capitalize">{txn.method}</span></div>
+                <div className="flex justify-between"><span className="text-neutral-500">Total</span><span className="font-mono tabular-nums font-semibold">{fmt(txn.total)}</span></div>
+                {txn.method==='cash' && <div className="flex justify-between"><span className="text-neutral-500">Change</span><span className="font-mono tabular-nums">{fmt(txn.change)}</span></div>}
+              </div>
+            </Card>
+            <Btn size="xl" onClick={onDone}>New transaction <Icon name="chevR" size={18}/></Btn>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+/* ============================================================
+   DASHBOARD
+============================================================ */
+const Spark = ({pts, color='#3B82F6'}) => {
+  const max = Math.max(...pts), min = Math.min(...pts);
+  const w = 120, h = 36;
+  const d = pts.map((v,i)=>{
+    const x = (i/(pts.length-1))*w;
+    const y = h - ((v-min)/(max-min||1))*h;
+    return `${i===0?'M':'L'}${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  return (
+    <svg width={w} height={h} className="overflow-visible">
+      <path d={d} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+      <path d={`${d} L${w},${h} L0,${h} Z`} fill={color} opacity="0.08"/>
+    </svg>
+  );
+};
+
+const Dashboard = ({online, pendingSync, setOnline}) => {
+  const stats = [
+    {label:"Today's revenue", val:'€4,287.40', delta:'+12.4%', up:true, spark:[12,14,13,18,17,22,28,26,31,29,34,38], color:'#3B82F6'},
+    {label:'Transactions', val:'214', delta:'+8.2%', up:true, spark:[6,9,8,12,15,14,18,21,19,24,26,28], color:'#10B981'},
+    {label:'Avg. basket', val:'€20.03', delta:'-2.1%', up:false, spark:[22,21,20,21,22,19,20,21,22,20,19,20], color:'#F59E0B'},
+    {label:'Items sold', val:'1,089', delta:'+15.7%', up:true, spark:[30,35,33,42,48,45,55,58,62,68,72,78], color:'#06B6D4'},
+  ];
+  const topProducts = [
+    {name:'Hacendado Milk 1L',     qty:124, rev:117.80, mgn:52},
+    {name:'Bimbo White Bread 600g',qty:98,  rev:240.10, mgn:55},
+    {name:'Coca-Cola 330ml',       qty:87,  rev:104.40, mgn:58},
+    {name:'Lays Classic 150g',     qty:71,  rev:149.10, mgn:55},
+    {name:'Barilla Spaghetti 500g',qty:63,  rev:116.55, mgn:57},
+    {name:'Nutella 400g',          qty:48,  rev:237.60, mgn:43},
+    {name:'Olive Oil 1L',          qty:42,  rev:331.80, mgn:43},
+    {name:'Beef Steak (kg)',       qty:38,  rev:703.00, mgn:40},
+    {name:'Bananas (kg)',          qty:35,  rev:52.15,  mgn:60},
+    {name:'Cadbury Dairy Milk 80g',qty:29,  rev:47.85,  mgn:58},
+  ];
+  const lowStock = PRODUCTS.filter(p => p.stock < p.reorder);
+
+  return (
+    <div className="flex-1 flex flex-col min-h-0 overflow-auto">
+      <Header title="Dashboard" subtitle="Today · May 11, 2026  ·  Cairo Downtown #03" online={online} pendingSync={pendingSync}
+        right={<>
+          <Btn variant="ghost" size="sm" onClick={()=>setOnline(o=>!o)}><Icon name={online?'wifi':'wifiOff'} size={14}/> Toggle</Btn>
+          <Btn variant="secondary" size="sm"><Icon name="filter" size={14}/> Today</Btn>
+          <Btn size="sm">Export report</Btn>
+        </>} />
+
+      <div className="p-6 space-y-6">
+        {/* Stats */}
+        <div className="grid grid-cols-4 gap-4">
+          {stats.map(s => (
+            <Card key={s.label} className="p-5">
+              <div className="flex items-start justify-between">
+                <div>
+                  <div className="text-[12px] font-semibold uppercase tracking-wider text-neutral-500">{s.label}</div>
+                  <div className="text-[24px] font-bold tabular-nums mt-1.5 font-mono">{s.val}</div>
+                  <div className={`text-[12.5px] font-semibold mt-1 flex items-center gap-1 ${s.up?'text-success-700':'text-danger-600'}`}>
+                    <Icon name={s.up?'arrowUp':'arrowDn'} size={12}/>{s.delta} vs yesterday
+                  </div>
+                </div>
+                <Spark pts={s.spark} color={s.color}/>
+              </div>
+            </Card>
+          ))}
+        </div>
+
+        {/* Main grid */}
+        <div className="grid grid-cols-3 gap-4">
+          {/* Top products */}
+          <Card className="col-span-2 overflow-hidden">
+            <div className="px-5 h-14 border-b border-neutral-200 flex items-center justify-between">
+              <h3 className="text-[15px] font-semibold">Top 10 products today</h3>
+              <button className="text-[12px] font-semibold text-brand-600 hover:underline">View all →</button>
+            </div>
+            <table className="w-full text-[13.5px]">
+              <thead className="bg-neutral-50 text-[11.5px] uppercase tracking-wider text-neutral-500">
+                <tr>
+                  <th className="px-5 py-2.5 text-start font-semibold">#</th>
+                  <th className="text-start font-semibold">Product</th>
+                  <th className="text-end font-semibold">Units</th>
+                  <th className="text-end font-semibold">Revenue</th>
+                  <th className="px-5 text-end font-semibold">Margin</th>
+                </tr>
+              </thead>
+              <tbody>
+                {topProducts.map((p,i)=>(
+                  <tr key={i} className="border-t border-neutral-100 hover:bg-neutral-50">
+                    <td className="px-5 py-2.5 text-neutral-400 font-mono w-10">{i+1}</td>
+                    <td className="py-2.5 font-medium">{p.name}</td>
+                    <td className="text-end font-mono tabular-nums">{p.qty}</td>
+                    <td className="text-end font-mono tabular-nums">{fmt(p.rev)}</td>
+                    <td className="px-5 py-2.5 text-end">
+                      <span className="inline-flex items-center gap-2">
+                        <span className="w-16 h-1.5 rounded-full bg-neutral-100 overflow-hidden inline-block">
+                          <span className="block h-full bg-success-500" style={{width: p.mgn+'%'}}/>
+                        </span>
+                        <span className="font-mono tabular-nums w-9 text-end">{p.mgn}%</span>
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </Card>
+
+          {/* Low stock alerts */}
+          <Card className="overflow-hidden flex flex-col">
+            <div className="px-5 h-14 border-b border-neutral-200 flex items-center justify-between">
+              <h3 className="text-[15px] font-semibold flex items-center gap-2">
+                <Icon name="alert" size={16} className="text-warn-600"/> Low stock alerts
+              </h3>
+              <Badge kind="warn">{lowStock.length}</Badge>
+            </div>
+            <div className="flex-1 divide-y divide-neutral-100">
+              {lowStock.map(p=>{
+                const b = stockBadge(p);
+                return (
+                  <div key={p.id} className="px-5 py-3 flex items-center gap-3 hover:bg-neutral-50">
+                    <div className="w-8 h-8 rounded grid place-items-center text-white text-[10px] font-bold" style={{background:p.color}}>
+                      {p.name.split(' ').map(w=>w[0]).slice(0,2).join('')}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-[13px] font-semibold truncate">{p.name}</div>
+                      <div className="text-[11.5px] text-neutral-500">
+                        <span className="font-mono">{p.stock}</span>/{p.reorder} · reorder point
+                      </div>
+                    </div>
+                    <Badge kind={b.kind}>{b.label}</Badge>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="p-3 border-t border-neutral-200">
+              <Btn size="sm" variant="secondary" className="w-full">Generate purchase order</Btn>
+            </div>
+          </Card>
+        </div>
+
+        {/* Bottom: payment breakdown */}
+        <div className="grid grid-cols-3 gap-4">
+          <Card className="p-5 col-span-2">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-[15px] font-semibold">Payment methods</h3>
+              <span className="text-[12px] text-neutral-500">€4,287.40 total</span>
+            </div>
+            {[
+              {label:'Cash',  pct:42, val:1800.71, color:'#10B981'},
+              {label:'Card',  pct:48, val:2057.95, color:'#3B82F6'},
+              {label:'Wallet',pct:10, val:428.74,  color:'#F59E0B'},
+            ].map(p=>(
+              <div key={p.label} className="mb-3 last:mb-0">
+                <div className="flex justify-between text-[13px] mb-1">
+                  <span className="font-medium">{p.label}</span>
+                  <span className="font-mono tabular-nums text-neutral-600">{fmt(p.val)} <span className="text-neutral-400">· {p.pct}%</span></span>
+                </div>
+                <div className="h-2 rounded-full bg-neutral-100 overflow-hidden"><div className="h-full rounded-full" style={{width:p.pct+'%', background:p.color}}/></div>
+              </div>
+            ))}
+          </Card>
+          <Card className="p-5">
+            <h3 className="text-[15px] font-semibold mb-3">Cashier shift</h3>
+            <div className="space-y-2 text-[13px]">
+              <div className="flex justify-between"><span className="text-neutral-500">Opened</span><span className="font-mono">08:12</span></div>
+              <div className="flex justify-between"><span className="text-neutral-500">Transactions</span><span className="font-mono">87</span></div>
+              <div className="flex justify-between"><span className="text-neutral-500">Avg. time / txn</span><span className="font-mono">38s</span></div>
+              <div className="flex justify-between"><span className="text-neutral-500">Voided</span><span className="font-mono">2</span></div>
+              <div className="flex justify-between border-t pt-2 mt-2 font-semibold"><span>Cash in drawer</span><span className="font-mono">€812.40</span></div>
+            </div>
+          </Card>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+/* ============================================================
+   PRODUCT LIST
+============================================================ */
+const ProductsPage = ({online, pendingSync, setOnline}) => {
+  const [q, setQ] = useState('');
+  const [cat, setCat] = useState('All');
+  const [stock, setStock] = useState('All');
+  const cats = ['All', ...new Set(PRODUCTS.map(p=>p.category))];
+  const filtered = PRODUCTS.filter(p => {
+    if (cat!=='All' && p.category!==cat) return false;
+    if (stock==='In stock' && p.stock===0) return false;
+    if (stock==='Low' && !(p.stock>0 && p.stock<p.reorder)) return false;
+    if (stock==='Out' && p.stock!==0) return false;
+    if (q && !(p.name.toLowerCase().includes(q.toLowerCase()) || p.barcode.includes(q) || p.sku.toLowerCase().includes(q.toLowerCase()))) return false;
+    return true;
+  });
+
+  return (
+    <div className="flex-1 flex flex-col min-h-0 overflow-auto">
+      <Header title="Products" subtitle={`${PRODUCTS.length} SKUs · 12 categories · ${PRODUCTS.filter(p=>p.stock<p.reorder).length} need attention`} online={online} pendingSync={pendingSync}
+        right={<>
+          <Btn variant="secondary" size="sm">Import CSV</Btn>
+          <Btn size="sm"><Icon name="plus" size={14}/> New product</Btn>
+        </>} />
+
+      <div className="p-6 flex flex-col gap-4 flex-1 min-h-0">
+        {/* Filters */}
+        <Card className="p-3 flex items-center gap-2 flex-wrap">
+          <div className="relative flex-1 min-w-[280px]">
+            <Icon name="search" size={16} className="absolute start-3 top-1/2 -translate-y-1/2 text-neutral-400 pointer-events-none"/>
+            <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search by name, SKU or barcode…"
+              className="w-full h-10 ps-9 pe-3 rounded-md border border-neutral-300 bg-white text-[14px] focus-ring"/>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[12px] font-semibold uppercase tracking-wider text-neutral-500">Category</span>
+            <select value={cat} onChange={e=>setCat(e.target.value)} className="h-10 px-3 rounded-md border border-neutral-300 bg-white text-[14px] focus-ring">
+              {cats.map(c=><option key={c}>{c}</option>)}
+            </select>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[12px] font-semibold uppercase tracking-wider text-neutral-500">Stock</span>
+            <div className="flex bg-neutral-100 rounded-md p-0.5">
+              {['All','In stock','Low','Out'].map(s=>(
+                <button key={s} onClick={()=>setStock(s)}
+                  className={`h-9 px-3 text-[13px] rounded ${stock===s?'bg-white shadow-sm font-semibold':'text-neutral-600 hover:text-neutral-900'}`}>
+                  {s}
+                </button>
+              ))}
+            </div>
+          </div>
+        </Card>
+
+        {/* Table */}
+        <Card className="flex-1 min-h-0 overflow-hidden flex flex-col">
+          <div className="overflow-auto flex-1">
+            <table className="w-full text-[13.5px]">
+              <thead className="bg-neutral-50 text-[11.5px] uppercase tracking-wider text-neutral-500 sticky top-0 z-10">
+                <tr>
+                  <th className="px-4 py-3 text-start font-semibold">Product</th>
+                  <th className="text-start font-semibold">SKU</th>
+                  <th className="text-start font-semibold">Barcode</th>
+                  <th className="text-start font-semibold">Category</th>
+                  <th className="text-end font-semibold">Cost</th>
+                  <th className="text-end font-semibold">Price</th>
+                  <th className="text-end font-semibold">Margin</th>
+                  <th className="text-end font-semibold">Stock</th>
+                  <th className="px-4 text-start font-semibold">Status</th>
+                  <th className="px-4 font-semibold"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map(p => {
+                  const b = stockBadge(p);
+                  const margin = ((p.price-p.cost)/p.price*100).toFixed(0);
+                  return (
+                    <tr key={p.id} className="border-t border-neutral-100 hover:bg-neutral-50" style={{height:36}}>
+                      <td className="px-4 py-1.5">
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-7 h-7 rounded grid place-items-center text-white text-[9.5px] font-bold shrink-0" style={{background:p.color}}>
+                            {p.name.split(' ').map(w=>w[0]).slice(0,2).join('')}
+                          </div>
+                          <span className="font-medium truncate">{p.name}</span>
+                          {p.weighted && <Badge kind="info">kg</Badge>}
+                        </div>
+                      </td>
+                      <td className="font-mono text-[12px] text-neutral-600">{p.sku}</td>
+                      <td className="font-mono text-[12px] text-neutral-600">{p.barcode}</td>
+                      <td className="text-neutral-600">{p.category}</td>
+                      <td className="text-end font-mono tabular-nums text-neutral-500">{fmt(p.cost)}</td>
+                      <td className="text-end font-mono tabular-nums font-semibold">{fmt(p.price)}</td>
+                      <td className="text-end font-mono tabular-nums text-neutral-600">{margin}%</td>
+                      <td className="text-end font-mono tabular-nums">
+                        <span className={p.stock===0?'text-danger-600 font-semibold':p.stock<p.reorder?'text-warn-700 font-semibold':''}>{p.stock}</span>
+                      </td>
+                      <td className="px-4"><Badge kind={b.kind}>{b.label}</Badge></td>
+                      <td className="px-4 text-end">
+                        <button className="w-7 h-7 grid place-items-center rounded text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700">⋮</button>
+                      </td>
+                    </tr>
+                  );
+                })}
+                {filtered.length===0 && (
+                  <tr><td colSpan="10" className="py-12 text-center text-neutral-500">No products match these filters.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          <div className="px-4 h-12 border-t border-neutral-200 flex items-center justify-between text-[12.5px] text-neutral-500">
+            <span>Showing <b className="text-neutral-700">{filtered.length}</b> of {PRODUCTS.length}</span>
+            <div className="flex items-center gap-1">
+              <button className="h-8 px-3 rounded border border-neutral-300 bg-white hover:bg-neutral-50">Previous</button>
+              <span className="px-2">Page 1 of 1</span>
+              <button className="h-8 px-3 rounded border border-neutral-300 bg-white hover:bg-neutral-50">Next</button>
+            </div>
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+};
+
+/* ============================================================
+   SALES / TRANSACTIONS
+============================================================ */
+const TRANSACTIONS = [
+  {id:'TXN-481209',ts:'2026-05-11 14:32',cashier:'Ahmed H.',items:4,method:'card',total:38.45,status:'Completed'},
+  {id:'TXN-481208',ts:'2026-05-11 14:28',cashier:'Sara M.', items:7,method:'cash',total:52.10,status:'Completed'},
+  {id:'TXN-481207',ts:'2026-05-11 14:21',cashier:'Ahmed H.',items:2,method:'wallet',total:14.80,status:'Completed'},
+  {id:'TXN-481206',ts:'2026-05-11 14:15',cashier:'Sara M.', items:11,method:'card',total:87.30,status:'Completed'},
+  {id:'TXN-481205',ts:'2026-05-11 14:09',cashier:'Ahmed H.',items:3,method:'cash',total:21.45,status:'Voided'},
+  {id:'TXN-481204',ts:'2026-05-11 14:02',cashier:'Karim O.',items:5,method:'card',total:45.90,status:'Completed'},
+  {id:'TXN-481203',ts:'2026-05-11 13:54',cashier:'Sara M.', items:8,method:'cash',total:63.75,status:'Refunded'},
+  {id:'TXN-481202',ts:'2026-05-11 13:48',cashier:'Ahmed H.',items:1,method:'wallet',total:7.90,status:'Completed'},
+  {id:'TXN-481201',ts:'2026-05-11 13:41',cashier:'Karim O.',items:6,method:'card',total:34.20,status:'Completed'},
+  {id:'TXN-481200',ts:'2026-05-11 13:33',cashier:'Sara M.', items:9,method:'cash',total:71.55,status:'Completed'},
+  {id:'TXN-481199',ts:'2026-05-11 13:24',cashier:'Ahmed H.',items:4,method:'card',total:28.40,status:'Completed'},
+  {id:'TXN-481198',ts:'2026-05-11 13:18',cashier:'Karim O.',items:12,method:'card',total:104.85,status:'Completed'},
+  {id:'TXN-481197',ts:'2026-05-11 13:09',cashier:'Sara M.', items:2,method:'cash',total:12.30,status:'Completed'},
+  {id:'TXN-481196',ts:'2026-05-11 13:01',cashier:'Ahmed H.',items:5,method:'wallet',total:39.50,status:'Completed'},
+  {id:'TXN-481195',ts:'2026-05-11 12:54',cashier:'Karim O.',items:7,method:'card',total:48.65,status:'Completed'},
+];
+const methodIcon = m => m==='cash'?'cash':m==='card'?'card':'wallet';
+const statusBadge = s => s==='Completed'?{kind:'success',label:'Completed'}:s==='Voided'?{kind:'danger',label:'Voided'}:{kind:'warn',label:'Refunded'};
+
+const TxnDetailModal = ({txn, onClose}) => txn && (
+  <div className="fixed inset-0 z-[1100] bg-black/50 backdrop-blur-sm grid place-items-center p-6 fade-in">
+    <div className="bg-white rounded-xl shadow-lg w-full max-w-[680px] max-h-[90vh] flex flex-col overflow-hidden">
+      <div className="px-6 h-14 border-b border-neutral-200 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <h2 className="text-[16px] font-semibold">Transaction {txn.id}</h2>
+          <Badge kind={statusBadge(txn.status).kind}>{statusBadge(txn.status).label}</Badge>
+        </div>
+        <button onClick={onClose} className="w-9 h-9 grid place-items-center rounded-md hover:bg-neutral-100 text-neutral-500"><Icon name="x" size={18}/></button>
+      </div>
+      <div className="p-6 overflow-auto grid grid-cols-5 gap-5">
+        <div className="col-span-3 receipt bg-neutral-50 border border-neutral-200 rounded-md p-5">
+          <div className="text-center">
+            <div className="font-bold">SUPERPOS MARKET</div>
+            <div className="text-[11px]">Cairo Downtown #03</div>
+          </div>
+          <div className="dashed"/>
+          <div className="text-[12px]"><div className="flex justify-between"><span>{txn.ts}</span><span>{txn.id}</span></div><div className="flex justify-between"><span>Cashier: {txn.cashier}</span><span>POS-01</span></div></div>
+          <div className="dashed"/>
+          <div className="text-[12px]">
+            {Array.from({length:txn.items}).map((_,i)=>{const p=PRODUCTS[i%PRODUCTS.length];const q=1+(i%2);return(
+              <div key={i} className="flex"><span className="flex-1 truncate pr-1">{p.name.toUpperCase()}</span><span className="w-8 text-right">{q}</span><span className="w-16 text-right">{(q*p.price).toFixed(2)}</span></div>
+            );})}
+          </div>
+          <div className="dashed"/>
+          <div className="flex justify-between font-bold"><span>TOTAL</span><span>€{txn.total.toFixed(2)}</span></div>
+          <div className="flex justify-between"><span>Paid ({txn.method.toUpperCase()})</span><span>{txn.total.toFixed(2)}</span></div>
+        </div>
+        <div className="col-span-2 flex flex-col gap-3">
+          <Card className="p-4">
+            <div className="text-[12px] font-semibold uppercase tracking-wider text-neutral-500 mb-2">Payment</div>
+            <div className="flex items-center gap-2"><Icon name={methodIcon(txn.method)} size={20} className="text-brand-600"/><span className="capitalize font-semibold">{txn.method}</span></div>
+            <div className="mt-3 space-y-1 text-[13px]">
+              <div className="flex justify-between"><span className="text-neutral-500">Items</span><span className="font-mono">{txn.items}</span></div>
+              <div className="flex justify-between"><span className="text-neutral-500">Subtotal</span><span className="font-mono">{(txn.total/1.1).toFixed(2)}</span></div>
+              <div className="flex justify-between"><span className="text-neutral-500">VAT</span><span className="font-mono">{(txn.total-txn.total/1.1).toFixed(2)}</span></div>
+              <div className="flex justify-between font-semibold pt-1 border-t mt-1"><span>Total</span><span className="font-mono">{fmt(txn.total)}</span></div>
+            </div>
+          </Card>
+          <Btn variant="secondary" size="md"><Icon name="printer" size={16}/> Reprint receipt</Btn>
+          <Btn variant="danger" size="md" disabled={txn.status!=='Completed'}><Icon name="x" size={16}/> Void transaction</Btn>
+        </div>
+      </div>
+    </div>
+  </div>
+);
+
+const SalesPage = ({online, pendingSync}) => {
+  const [q,setQ]=useState(''); const [method,setMethod]=useState('All'); const [cashier,setCashier]=useState('All'); const [open,setOpen]=useState(null);
+  const stats=[{l:"Today's sales",v:'€4,287.40',s:'214 transactions'},{l:'This week',v:'€24,892.00',s:'1,203 transactions'},{l:'This month',v:'€98,450.00',s:'4,891 transactions'},{l:'Avg transaction',v:'€20.03',s:'+8.2% vs last month'}];
+  const filtered = TRANSACTIONS.filter(t => (method==='All'||t.method===method.toLowerCase()) && (cashier==='All'||t.cashier===cashier) && (!q||t.id.toLowerCase().includes(q.toLowerCase())));
+  return (
+    <div className="flex-1 flex flex-col min-h-0 overflow-auto">
+      <Header title="Sales" subtitle="Transaction history · all branches" online={online} pendingSync={pendingSync}
+        right={<><Btn variant="secondary" size="sm">Export CSV</Btn><Btn size="sm">Daily report</Btn></>}/>
+      <div className="p-6 flex flex-col gap-4 flex-1 min-h-0">
+        <div className="grid grid-cols-4 gap-4">
+          {stats.map(s=>(<Card key={s.l} className="p-5"><div className="text-[12px] font-semibold uppercase tracking-wider text-neutral-500">{s.l}</div><div className="text-[24px] font-bold tabular-nums mt-1.5 font-mono">{s.v}</div><div className="text-[12.5px] text-neutral-500 mt-1">{s.s}</div></Card>))}
+        </div>
+        <Card className="p-3 flex items-center gap-2 flex-wrap">
+          <div className="flex items-center gap-2"><span className="text-[12px] font-semibold uppercase tracking-wider text-neutral-500">From</span><input type="date" defaultValue="2026-05-11" className="h-10 px-3 rounded-md border border-neutral-300 bg-white text-[13px] focus-ring"/><span className="text-neutral-400">→</span><input type="date" defaultValue="2026-05-11" className="h-10 px-3 rounded-md border border-neutral-300 bg-white text-[13px] focus-ring"/></div>
+          <select value={method} onChange={e=>setMethod(e.target.value)} className="h-10 px-3 rounded-md border border-neutral-300 bg-white text-[14px] focus-ring"><option>All</option><option>Cash</option><option>Card</option><option>Wallet</option></select>
+          <select value={cashier} onChange={e=>setCashier(e.target.value)} className="h-10 px-3 rounded-md border border-neutral-300 bg-white text-[14px] focus-ring"><option>All</option><option>Ahmed H.</option><option>Sara M.</option><option>Karim O.</option></select>
+          <div className="relative flex-1 min-w-[220px]"><Icon name="search" size={16} className="absolute start-3 top-1/2 -translate-y-1/2 text-neutral-400 pointer-events-none"/><input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search by transaction ID…" className="w-full h-10 ps-9 pe-3 rounded-md border border-neutral-300 bg-white text-[14px] focus-ring"/></div>
+        </Card>
+        <Card className="flex-1 min-h-0 overflow-hidden flex flex-col">
+          <div className="overflow-auto flex-1">
+            <table className="w-full text-[13.5px]">
+              <thead className="bg-neutral-50 text-[11.5px] uppercase tracking-wider text-neutral-500 sticky top-0"><tr><th className="px-4 py-3 text-start font-semibold">ID</th><th className="text-start font-semibold">Date & Time</th><th className="text-start font-semibold">Cashier</th><th className="text-end font-semibold">Items</th><th className="text-start font-semibold ps-4">Method</th><th className="text-end font-semibold">Total</th><th className="px-4 text-start font-semibold">Status</th><th className="px-4 font-semibold"></th></tr></thead>
+              <tbody>{filtered.map(t=>{const b=statusBadge(t.status);return(
+                <tr key={t.id} onClick={()=>setOpen(t)} className="border-t border-neutral-100 hover:bg-neutral-50 cursor-pointer" style={{height:36}}>
+                  <td className="px-4 font-mono text-[12.5px] font-semibold text-brand-700">{t.id}</td>
+                  <td className="font-mono text-[12.5px] text-neutral-600">{t.ts}</td>
+                  <td className="font-medium">{t.cashier}</td>
+                  <td className="text-end font-mono tabular-nums">{t.items}</td>
+                  <td className="ps-4"><span className="inline-flex items-center gap-1.5 capitalize"><Icon name={methodIcon(t.method)} size={14} className="text-neutral-500"/>{t.method}</span></td>
+                  <td className="text-end font-mono tabular-nums font-semibold">{fmt(t.total)}</td>
+                  <td className="px-4"><Badge kind={b.kind}>{b.label}</Badge></td>
+                  <td className="px-4 text-end"><button className="w-7 h-7 grid place-items-center rounded text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700">⋮</button></td>
+                </tr>);})}
+              </tbody>
+            </table>
+          </div>
+          <div className="px-4 h-12 border-t border-neutral-200 flex items-center justify-between text-[12.5px] text-neutral-500"><span>Showing <b className="text-neutral-700">{filtered.length}</b> of {TRANSACTIONS.length}</span><div className="flex items-center gap-1"><button className="h-8 px-3 rounded border border-neutral-300 bg-white hover:bg-neutral-50">Previous</button><span className="px-2">Page 1 of 1</span><button className="h-8 px-3 rounded border border-neutral-300 bg-white hover:bg-neutral-50">Next</button></div></div>
+        </Card>
+      </div>
+      <TxnDetailModal txn={open} onClose={()=>setOpen(null)}/>
+    </div>
+  );
+};
+
+/* ============================================================
+   USERS
+============================================================ */
+const USERS = [
+  {id:'u1',name:'Mohamed Sayed',email:'mohamed@superpos.io',role:'Owner',branch:'All branches',last:'Active now',active:true},
+  {id:'u2',name:'Layla Hassan',email:'layla@superpos.io',role:'Admin',branch:'Cairo Downtown #03',last:'12 min ago',active:true},
+  {id:'u3',name:'Ahmed H.',email:'ahmed@superpos.io',role:'Cashier',branch:'Cairo Downtown #03',last:'Active now',active:true},
+  {id:'u4',name:'Sara Mostafa',email:'sara@superpos.io',role:'Cashier',branch:'Cairo Downtown #03',last:'Active now',active:true},
+  {id:'u5',name:'Karim Othman',email:'karim@superpos.io',role:'Cashier',branch:'Alexandria Port #01',last:'2 hours ago',active:true},
+  {id:'u6',name:'Nadia Farouk',email:'nadia@superpos.io',role:'Manager',branch:'Alexandria Port #01',last:'Yesterday',active:true},
+  {id:'u7',name:'Omar Khaled',email:'omar@superpos.io',role:'Manager',branch:'Giza Pyramids #02',last:'3 days ago',active:false},
+  {id:'u8',name:'Yasmin Ali',email:'yasmin@superpos.io',role:'Cashier',branch:'Giza Pyramids #02',last:'1 week ago',active:false},
+];
+const roleBadge = r => ({Owner:'brand',Admin:'info',Manager:'warn',Cashier:'success'})[r] || 'gray';
+const PERMS = {Owner:[1,1,1,1,1,1],Admin:[1,1,1,1,1,0],Manager:[1,1,1,1,0,0],Cashier:[1,0,0,0,0,0]};
+const PERM_LABELS = ['sales:create','sales:void','products:edit','reports:view','users:manage','settings:edit'];
+
+const UserModal = ({user, mode, onClose}) => {
+  if (!mode) return null;
+  const u = user || {name:'',email:'',role:'Cashier',branch:'Cairo Downtown #03',active:true};
+  return (
+    <div className="fixed inset-0 z-[1100] bg-black/50 backdrop-blur-sm grid place-items-center p-6 fade-in">
+      <div className="bg-white rounded-xl shadow-lg w-full max-w-[560px] overflow-hidden">
+        <div className="px-6 h-14 border-b border-neutral-200 flex items-center justify-between"><h2 className="text-[16px] font-semibold">{mode==='add'?'Add team member':'Edit '+u.name}</h2><button onClick={onClose} className="w-9 h-9 grid place-items-center rounded-md hover:bg-neutral-100 text-neutral-500"><Icon name="x" size={18}/></button></div>
+        <div className="p-6 space-y-4">
+          <div className="grid grid-cols-2 gap-3">
+            <label className="text-[13px] font-semibold text-neutral-700">Full name<input defaultValue={u.name} className="mt-1.5 w-full h-10 px-3 rounded-md border border-neutral-300 focus-ring bg-white text-[14px]"/></label>
+            <label className="text-[13px] font-semibold text-neutral-700">Email<input defaultValue={u.email} type="email" className="mt-1.5 w-full h-10 px-3 rounded-md border border-neutral-300 focus-ring bg-white text-[14px]"/></label>
+            <label className="text-[13px] font-semibold text-neutral-700">Role<select defaultValue={u.role} className="mt-1.5 w-full h-10 px-3 rounded-md border border-neutral-300 focus-ring bg-white text-[14px]"><option>Owner</option><option>Admin</option><option>Manager</option><option>Cashier</option></select></label>
+            <label className="text-[13px] font-semibold text-neutral-700">Branch<select defaultValue={u.branch} className="mt-1.5 w-full h-10 px-3 rounded-md border border-neutral-300 focus-ring bg-white text-[14px]"><option>All branches</option><option>Cairo Downtown #03</option><option>Alexandria Port #01</option><option>Giza Pyramids #02</option></select></label>
+            <label className="text-[13px] font-semibold text-neutral-700 col-span-2">PIN code (4 digits)<input type="password" maxLength="4" placeholder="••••" className="mt-1.5 w-32 h-10 px-3 rounded-md border border-neutral-300 focus-ring bg-white text-[14px] font-mono tracking-[0.5em]"/></label>
+          </div>
+          <label className="flex items-center gap-2 text-[13px]"><input type="checkbox" defaultChecked={u.active} className="w-4 h-4 rounded border-neutral-300 text-brand-500 focus-ring"/>Account active</label>
+          {mode==='edit' && (
+            <div>
+              <div className="text-[12px] font-semibold uppercase tracking-wider text-neutral-500 mb-2">Permissions for {u.role}</div>
+              <div className="grid grid-cols-2 gap-2 bg-neutral-50 rounded-md p-3 border border-neutral-200">
+                {PERM_LABELS.map((p,i)=>(<div key={p} className="flex items-center gap-2 text-[12.5px] font-mono"><span className={PERMS[u.role][i]?'text-success-600':'text-danger-500'}>{PERMS[u.role][i]?'✓':'✗'}</span>{p}</div>))}
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="px-6 py-4 border-t border-neutral-200 flex justify-end gap-2"><Btn variant="secondary" onClick={onClose}>Cancel</Btn><Btn onClick={onClose}>Save</Btn></div>
+      </div>
+    </div>
+  );
+};
+
+const UsersPage = ({online, pendingSync}) => {
+  const [modal,setModal]=useState({mode:null,user:null});
+  const stats=[{l:'Total users',v:'8'},{l:'Active now',v:'3'},{l:'Roles',v:'5'}];
+  return (
+    <div className="flex-1 flex flex-col min-h-0 overflow-auto">
+      <Header title="Users & Team" subtitle="Role-based access control" online={online} pendingSync={pendingSync} right={<Btn size="sm" onClick={()=>setModal({mode:'add',user:null})}><Icon name="plus" size={14}/> Add user</Btn>}/>
+      <div className="p-6 flex flex-col gap-4 flex-1 min-h-0">
+        <div className="grid grid-cols-3 gap-4">{stats.map(s=>(<Card key={s.l} className="p-5"><div className="text-[12px] font-semibold uppercase tracking-wider text-neutral-500">{s.l}</div><div className="text-[28px] font-bold tabular-nums mt-1.5 font-mono">{s.v}</div></Card>))}</div>
+        <Card className="flex-1 min-h-0 overflow-hidden flex flex-col">
+          <div className="overflow-auto flex-1">
+            <table className="w-full text-[13.5px]">
+              <thead className="bg-neutral-50 text-[11.5px] uppercase tracking-wider text-neutral-500 sticky top-0"><tr><th className="px-4 py-3 text-start font-semibold">User</th><th className="text-start font-semibold">Email</th><th className="text-start font-semibold">Role</th><th className="text-start font-semibold">Branch</th><th className="text-start font-semibold">Last login</th><th className="px-4 text-start font-semibold">Status</th><th className="px-4 font-semibold"></th></tr></thead>
+              <tbody>{USERS.map(u=>{const initials=u.name.split(' ').map(w=>w[0]).slice(0,2).join('');return(
+                <tr key={u.id} className="border-t border-neutral-100 hover:bg-neutral-50 cursor-pointer" style={{height:36}} onClick={()=>setModal({mode:'edit',user:u})}>
+                  <td className="px-4"><div className="flex items-center gap-2.5"><div className="w-7 h-7 rounded-full bg-neutral-200 grid place-items-center text-[10px] font-bold text-neutral-700">{initials}</div><span className="font-semibold">{u.name}</span></div></td>
+                  <td className="text-neutral-600 font-mono text-[12.5px]">{u.email}</td>
+                  <td><Badge kind={roleBadge(u.role)}>{u.role}</Badge></td>
+                  <td className="text-neutral-600">{u.branch}</td>
+                  <td className="text-neutral-500 text-[12.5px]">{u.last}</td>
+                  <td className="px-4"><Badge kind={u.active?'success':'gray'}>{u.active?'Active':'Inactive'}</Badge></td>
+                  <td className="px-4 text-end"><button className="w-7 h-7 grid place-items-center rounded text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700">⋮</button></td>
+                </tr>);})}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      </div>
+      <UserModal mode={modal.mode} user={modal.user} onClose={()=>setModal({mode:null,user:null})}/>
+    </div>
+  );
+};
+
+/* ============================================================
+   SETTINGS
+============================================================ */
+const SettingsPage = ({online, pendingSync}) => {
+  const Sec = ({title, icon, children}) => (
+    <Card className="overflow-hidden">
+      <div className="px-5 h-14 border-b border-neutral-200 flex items-center gap-2.5"><div className="w-8 h-8 rounded-md bg-brand-50 text-brand-600 grid place-items-center"><Icon name={icon} size={18}/></div><h3 className="text-[15px] font-semibold">{title}</h3></div>
+      <div className="p-5 space-y-4">{children}</div>
+    </Card>
+  );
+  const Field = ({label, children, hint}) => (<div><label className="text-[13px] font-semibold text-neutral-700 block mb-1.5">{label}</label>{children}{hint&&<div className="text-[12px] text-neutral-500 mt-1">{hint}</div>}</div>);
+  const Input = (p) => <input {...p} className={`w-full h-10 px-3 rounded-md border border-neutral-300 focus-ring bg-white text-[14px] ${p.className||''}`}/>;
+  const Sel = ({children, ...p}) => <select {...p} className="w-full h-10 px-3 rounded-md border border-neutral-300 focus-ring bg-white text-[14px]">{children}</select>;
+  const Toggle = ({label, def=true}) => (<label className="flex items-center justify-between py-1"><span className="text-[14px]">{label}</span><input type="checkbox" defaultChecked={def} className="w-10 h-6 rounded-full appearance-none bg-neutral-300 checked:bg-brand-500 relative cursor-pointer transition before:absolute before:top-0.5 before:left-0.5 before:w-5 before:h-5 before:rounded-full before:bg-white checked:before:translate-x-4 before:transition"/></label>);
+  return (
+    <div className="flex-1 flex flex-col min-h-0 overflow-auto">
+      <Header title="Settings" subtitle="Configure hardware, payments and store info" online={online} pendingSync={pendingSync} right={<Btn size="sm">Save all changes</Btn>}/>
+      <div className="p-6 grid grid-cols-2 gap-4 max-w-[1100px]">
+        <Sec title="Printer configuration" icon="printer">
+          <Field label="Printer name"><Input defaultValue="Star TSP143III"/></Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Connection"><Sel defaultValue="USB"><option>USB</option><option>Network</option><option>Bluetooth</option></Sel></Field>
+            <Field label="IP address" hint="Used for network printers"><Input defaultValue="192.168.1.42" className="font-mono"/></Field>
+          </div>
+          <Btn variant="secondary" size="md"><Icon name="printer" size={16}/> Send test print</Btn>
+        </Sec>
+        <Sec title="Scale configuration" icon="barcode">
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Barcode prefix" hint="Marks scale-printed barcodes"><Input defaultValue="21" className="font-mono"/></Field>
+            <Field label="Connection"><Sel defaultValue="Serial"><option>Serial</option><option>USB</option><option>Network</option></Sel></Field>
+          </div>
+          <Field label="PLU export interval"><Sel defaultValue="Daily"><option>Manual</option><option>Hourly</option><option>Daily</option><option>Weekly</option></Sel></Field>
+        </Sec>
+        <Sec title="Payment methods" icon="card">
+          <Toggle label="Cash"/>
+          <Toggle label="Card"/>
+          <Toggle label="Digital wallet (Vodafone Cash, Fawry)"/>
+          <Field label="Card terminal type"><Sel defaultValue="PAX A920"><option>PAX A920</option><option>Ingenico Move/5000</option><option>Verifone V200c</option></Sel></Field>
+        </Sec>
+        <Sec title="Receipt settings" icon="receipt">
+          <Field label="Store name"><Input defaultValue="SuperPOS Market"/></Field>
+          <Field label="Address"><Input defaultValue="23 Tahrir St, Cairo Downtown #03"/></Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="VAT number"><Input defaultValue="425-883-129" className="font-mono"/></Field>
+            <Field label="Phone"><Input defaultValue="+20 2 1234 5678" className="font-mono"/></Field>
+          </div>
+          <Field label="Footer text"><Input defaultValue="Thank you for shopping! Returns within 14 days w/ receipt"/></Field>
+        </Sec>
+        <Sec title="Localization" icon="gear">
+          <div className="grid grid-cols-3 gap-3">
+            <Field label="Language"><Sel defaultValue="English"><option>English</option><option>العربية</option></Sel></Field>
+            <Field label="Currency"><Sel defaultValue="EUR"><option>EGP</option><option>EUR</option><option>USD</option></Sel></Field>
+            <Field label="Timezone"><Sel defaultValue="Africa/Cairo"><option>Africa/Cairo</option><option>Europe/Madrid</option><option>UTC</option></Sel></Field>
+          </div>
+        </Sec>
+      </div>
+    </div>
+  );
+};
+
+/* ============================================================
+   SCALE / PLU
+============================================================ */
+const PLU_DATA = [
+  {plu:'10040',name:'Beef Steak',price:18.50,updated:'2 days ago',status:'Synced'},
+  {plu:'10041',name:'Bananas',price:1.49,updated:'2 days ago',status:'Synced'},
+  {plu:'10042',name:'Cheese Cheddar',price:12.99,updated:'5 hours ago',status:'Pending sync'},
+  {plu:'10043',name:'Chicken Breast',price:8.99,updated:'2 days ago',status:'Synced'},
+  {plu:'10044',name:'Tomatoes',price:2.99,updated:'1 week ago',status:'Synced'},
+];
+
+const LabelPreview = ({plu, onClose}) => plu && (
+  <div className="fixed inset-0 z-[1100] bg-black/50 backdrop-blur-sm grid place-items-center p-6 fade-in">
+    <div className="bg-white rounded-xl shadow-lg w-full max-w-[440px] overflow-hidden">
+      <div className="px-6 h-14 border-b border-neutral-200 flex items-center justify-between"><h2 className="text-[16px] font-semibold">Shelf label preview</h2><button onClick={onClose} className="w-9 h-9 grid place-items-center rounded-md hover:bg-neutral-100"><Icon name="x" size={18}/></button></div>
+      <div className="p-6">
+        <div className="bg-white border-2 border-black p-5 font-mono">
+          <div className="text-[18px] font-bold uppercase">{plu.name}</div>
+          <div className="text-[10px] mt-0.5">PLU {plu.plu} · per kg</div>
+          <div className="text-[44px] font-bold tabular-nums leading-none mt-3">€{plu.price.toFixed(2)}</div>
+          <div className="flex items-end gap-2 mt-3 pt-3 border-t border-black">
+            <div className="flex gap-px flex-1">{Array.from({length:30}).map((_,i)=><span key={i} className="bg-black" style={{width:i%3?1:2,height:36}}/>)}</div>
+          </div>
+          <div className="text-[10px] tracking-widest mt-1">21{plu.plu}*****</div>
+          <div className="text-[10px] mt-2">Valid from 2026-05-11 · Cairo Downtown #03</div>
+        </div>
+        <div className="flex gap-2 mt-4"><Btn variant="secondary" className="flex-1" onClick={onClose}>Close</Btn><Btn className="flex-1"><Icon name="printer" size={16}/> Print 1 label</Btn></div>
+      </div>
+    </div>
+  </div>
+);
+
+const ScalePage = ({online, pendingSync}) => {
+  const [editing,setEditing]=useState(null); const [labelPlu,setLabelPlu]=useState(null);
+  return (
+    <div className="flex-1 flex flex-col min-h-0 overflow-auto">
+      <Header title="Scale / PLU codes" subtitle="Weighted product price catalog · syncs to electronic scales" online={online} pendingSync={pendingSync}
+        right={<><Btn variant="secondary" size="sm">Import CSV</Btn><Btn variant="secondary" size="sm">Export CSV</Btn><Btn size="sm"><Icon name="plus" size={14}/> New PLU</Btn></>}/>
+      <div className="p-6 flex flex-col gap-4 max-w-[1200px]">
+        <Card className="p-5 bg-brand-50/40 border-brand-500/20">
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-md bg-brand-500 text-white grid place-items-center shrink-0"><Icon name="barcode" size={22}/></div>
+            <div>
+              <h3 className="text-[14px] font-semibold mb-1">Scale barcode format</h3>
+              <p className="text-[13px] text-neutral-600 leading-relaxed">Scale-printed barcodes use the prefix <b className="font-mono">21</b> + a 5-digit PLU code + 5-digit weight in grams.</p>
+              <div className="mt-2 flex items-center gap-1 font-mono text-[13px]">
+                <span className="px-2 py-1 rounded bg-brand-100 text-brand-700 font-semibold">21</span>
+                <span className="px-2 py-1 rounded bg-success-50 text-success-700 font-semibold">10040</span>
+                <span className="px-2 py-1 rounded bg-warn-50 text-warn-700 font-semibold">01250</span>
+                <span className="text-neutral-500 ms-2">→ PLU 10040 (Beef Steak), weight 1.250kg</span>
+              </div>
+            </div>
+          </div>
+        </Card>
+        <Card className="overflow-hidden">
+          <table className="w-full text-[13.5px]">
+            <thead className="bg-neutral-50 text-[11.5px] uppercase tracking-wider text-neutral-500"><tr><th className="px-4 py-3 text-start font-semibold">PLU code</th><th className="text-start font-semibold">Product</th><th className="text-end font-semibold">Price / kg</th><th className="text-start font-semibold ps-6">Last updated</th><th className="text-start font-semibold">Status</th><th className="px-4 text-end font-semibold">Actions</th></tr></thead>
+            <tbody>{PLU_DATA.map(p=>(
+              <tr key={p.plu} className="border-t border-neutral-100 hover:bg-neutral-50" style={{height:36}}>
+                <td className="px-4 font-mono font-semibold text-brand-700">{p.plu}</td>
+                <td className="font-medium">{p.name}</td>
+                <td className="text-end">{editing===p.plu?(
+                  <input defaultValue={p.price.toFixed(2)} autoFocus onBlur={()=>setEditing(null)} onKeyDown={e=>e.key==='Enter'&&setEditing(null)} className="w-24 h-8 px-2 rounded border border-brand-500 text-end font-mono focus-ring"/>
+                ):(
+                  <button onClick={()=>setEditing(p.plu)} className="font-mono font-semibold tabular-nums hover:bg-brand-50 px-2 py-1 rounded">€{p.price.toFixed(2)}</button>
+                )}</td>
+                <td className="ps-6 text-neutral-500 text-[12.5px]">{p.updated}</td>
+                <td><Badge kind={p.status==='Synced'?'success':'warn'}>{p.status}</Badge></td>
+                <td className="px-4 text-end"><div className="inline-flex gap-1"><button onClick={()=>setLabelPlu(p)} className="h-8 px-2.5 rounded text-[12.5px] font-semibold text-brand-600 hover:bg-brand-50">Print label</button><button onClick={()=>setEditing(p.plu)} className="h-8 px-2.5 rounded text-[12.5px] font-semibold text-neutral-600 hover:bg-neutral-100">Edit</button></div></td>
+              </tr>))}
+            </tbody>
+          </table>
+        </Card>
+      </div>
+      <LabelPreview plu={labelPlu} onClose={()=>setLabelPlu(null)}/>
+    </div>
+  );
+};
+
+/* ============================================================
+   APP
+============================================================ */
+function App(){
+  const [authed, setAuthed] = useState(false);
+  const [route, setRoute] = useState('pos');
+  const [online, setOnline] = useState(true);
+  const [pendingSync, setPendingSync] = useState(0);
+  const [receiptTxn, setReceiptTxn] = useState(null);
+
+  if (!authed) return <LoginScreen onLogin={()=>setAuthed(true)}/>;
+
+  return (
+    <div className="h-screen w-screen flex bg-neutral-100 overflow-hidden">
+      <Sidebar route={route} setRoute={(r)=>{ setRoute(r); setReceiptTxn(null); }} onLogout={()=>setAuthed(false)}/>
+      <main className="flex-1 flex flex-col min-h-0">
+        {receiptTxn ? (
+          <ReceiptScreen txn={receiptTxn} onDone={()=>setReceiptTxn(null)}/>
+        ) : route==='pos' ? (
+          <POSPage online={online} setOnline={setOnline}
+            pendingSync={pendingSync} setPendingSync={setPendingSync}
+            goReceipt={setReceiptTxn}/>
+        ) : route==='dashboard' ? (
+          <Dashboard online={online} setOnline={setOnline} pendingSync={pendingSync}/>
+        ) : route==='products' ? (
+          <ProductsPage online={online} setOnline={setOnline} pendingSync={pendingSync}/>
+        ) : route==='sales' ? (
+          <SalesPage online={online} pendingSync={pendingSync}/>
+        ) : route==='users' ? (
+          <UsersPage online={online} pendingSync={pendingSync}/>
+        ) : route==='settings' ? (
+          <SettingsPage online={online} pendingSync={pendingSync}/>
+        ) : route==='scale' ? (
+          <ScalePage online={online} pendingSync={pendingSync}/>
+        ) : null}
+      </main>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

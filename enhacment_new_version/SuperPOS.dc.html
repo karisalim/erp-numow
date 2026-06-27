@@ -1,0 +1,1068 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+  :root{
+    --n50:#FAFBFC;--n100:#F3F4F6;--n200:#E5E7EB;--n300:#D1D5DB;--n400:#9CA3AF;
+    --n500:#6B7280;--n600:#4B5563;--n700:#374151;--n800:#1F2937;--n900:#111827;
+    --pr50:#EFF6FF;--pr100:#DBEAFE;--pr500:#3B82F6;--pr600:#2563EB;--pr700:#1D4ED8;
+    --su50:#ECFDF5;--su500:#10B981;--su600:#059669;--su700:#047857;
+    --er50:#FEF2F2;--er500:#EF4444;--er600:#DC2626;--er700:#B91C1C;
+    --wa50:#FFFBEB;--wa500:#F59E0B;--wa600:#D97706;--wa700:#B45309;
+    --in50:#ECFEFF;--in500:#06B6D4;--in700:#0E7490;
+    --vi50:#F5F3FF;--vi500:#8B5CF6;--vi700:#6D28D9;
+    --font:"Segoe UI",-apple-system,BlinkMacSystemFont,system-ui,sans-serif;
+    --mono:"SF Mono","Monaco","Menlo","Courier New",monospace;
+    --sh-sm:0 1px 2px rgba(0,0,0,.05);--sh-md:0 4px 6px rgba(0,0,0,.08);--sh-lg:0 10px 24px rgba(0,0,0,.14);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;font-family:var(--font);background:var(--n100);color:var(--n900);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  button{font-family:inherit;cursor:pointer;border:none;background:none}
+  input,select,textarea{font-family:inherit;font-size:14px}
+  .mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+  .num{font-variant-numeric:tabular-nums}
+  .muted{color:var(--n500)}
+  .app{display:flex;height:100vh;overflow:hidden}
+  /* sidebar */
+  .sidebar{width:220px;flex:0 0 220px;background:#fff;border-right:1px solid var(--n200);display:flex;flex-direction:column}
+  .side-logo{height:64px;display:flex;align-items:center;gap:10px;padding:0 18px;border-bottom:1px solid var(--n200)}
+  .logo-mark{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--pr500),var(--pr700));display:grid;place-items:center;color:#fff;font-weight:800;font-size:17px;box-shadow:var(--sh-sm)}
+  .side-tenant{font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:var(--n400);font-weight:700}
+  .nav{padding:10px;flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:1px}
+  .nav-sec{font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--n400);font-weight:700;padding:12px 10px 4px}
+  .nav-item{height:38px;padding:0 11px;border-radius:8px;display:flex;align-items:center;gap:11px;font-size:13.5px;color:var(--n600);text-align:left;width:100%}
+  .nav-item:hover{background:var(--n100)}
+  .nav-item.active{background:var(--pr50);color:var(--pr700);font-weight:600}
+  .nav-item svg{flex:0 0 18px}
+  /* main */
+  .main{flex:1;display:flex;flex-direction:column;min-width:0}
+  .header{height:64px;flex:0 0 64px;background:#fff;border-bottom:1px solid var(--n200);display:flex;align-items:center;justify-content:space-between;padding:0 22px;position:relative;z-index:30}
+  .h-title{font-size:16px;font-weight:700;color:var(--n900);line-height:1.15}
+  .h-sub{font-size:12px;color:var(--n500)}
+  .page{flex:1;overflow-y:auto;padding:22px}
+  .page-narrow{max-width:1180px;margin:0 auto}
+  /* pills */
+  .pill{display:inline-flex;align-items:center;gap:6px;height:34px;padding:0 12px;border-radius:8px;border:1px solid var(--n200);font-size:12px;font-weight:600;background:#fff}
+  .pill.ok{background:var(--su50);border-color:rgba(16,185,129,.3);color:var(--su700)}
+  .pill.warn{background:var(--wa50);border-color:rgba(245,158,11,.3);color:var(--wa700)}
+  .pill.info{background:var(--in50);border-color:rgba(6,182,212,.3);color:var(--in700)}
+  .avatar{width:34px;height:34px;border-radius:50%;background:var(--n800);color:#fff;display:grid;place-items:center;font-size:12px;font-weight:700}
+  /* cards */
+  .card{background:#fff;border:1px solid var(--n200);border-radius:10px;box-shadow:var(--sh-sm)}
+  .card-h{height:52px;display:flex;align-items:center;justify-content:space-between;padding:0 16px;border-bottom:1px solid var(--n200)}
+  .card-t{font-size:14px;font-weight:700}
+  .card-b{padding:16px}
+  /* buttons */
+  .btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;height:38px;padding:0 15px;border-radius:8px;font-weight:600;font-size:13.5px;transition:.12s;white-space:nowrap}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .btn-sm{height:32px;padding:0 11px;font-size:12.5px}
+  .btn-lg{height:48px;padding:0 20px;font-size:15px}
+  .btn-xl{height:60px;font-size:17px;border-radius:10px}
+  .btn-pri{background:var(--pr600);color:#fff}.btn-pri:hover{background:var(--pr700)}
+  .btn-sec{background:#fff;color:var(--pr700);border:1px solid var(--n300)}.btn-sec:hover{background:var(--n50)}
+  .btn-ghost{background:transparent;color:var(--n600)}.btn-ghost:hover{background:var(--n100)}
+  .btn-danger{background:var(--er600);color:#fff}.btn-danger:hover{background:var(--er700)}
+  .btn-success{background:var(--su600);color:#fff}.btn-success:hover{background:var(--su700)}
+  .btn-warn{background:var(--wa500);color:#fff}.btn-warn:hover{background:var(--wa600)}
+  .btn-dark{background:var(--n900);color:#fff}.btn-dark:hover{background:var(--n800)}
+  /* badges */
+  .badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700;letter-spacing:.01em}
+  .b-gray{background:var(--n100);color:var(--n700)}
+  .b-blue{background:var(--pr50);color:var(--pr700)}
+  .b-green{background:var(--su50);color:var(--su700)}
+  .b-amber{background:var(--wa50);color:var(--wa700)}
+  .b-red{background:var(--er50);color:var(--er700)}
+  .b-cyan{background:var(--in50);color:var(--in700)}
+  .b-violet{background:var(--vi50);color:var(--vi700)}
+  .dot{width:7px;height:7px;border-radius:50%;display:inline-block}
+  /* inputs */
+  .input,.select{height:40px;width:100%;border:1px solid var(--n300);border-radius:8px;padding:0 12px;background:#fff;color:var(--n900)}
+  .input:focus,.select:focus{outline:2px solid var(--pr500);outline-offset:-1px;border-color:var(--pr500)}
+  .lbl{font-size:12.5px;font-weight:600;color:var(--n700);display:block;margin-bottom:6px}
+  /* tables */
+  .tbl{width:100%;border-collapse:collapse}
+  .tbl th{text-align:left;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--n500);font-weight:700;padding:10px 14px;border-bottom:1px solid var(--n200);background:var(--n50)}
+  .tbl td{padding:12px 14px;border-bottom:1px solid var(--n100);font-size:13.5px}
+  .tbl tr:hover td{background:var(--n50)}
+  .tbl .r{text-align:right}
+  /* kpi */
+  .kpi-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+  .kpi{background:#fff;border:1px solid var(--n200);border-radius:10px;padding:16px;box-shadow:var(--sh-sm)}
+  .kpi-lbl{font-size:12px;color:var(--n500);font-weight:600;display:flex;align-items:center;gap:7px}
+  .kpi-val{font-size:26px;font-weight:800;margin-top:8px;letter-spacing:-.02em}
+  .kpi-sub{font-size:11.5px;margin-top:3px}
+  /* product tiles */
+  .tile{border:1px solid var(--n200);border-radius:10px;background:#fff;padding:12px;text-align:left;display:flex;flex-direction:column;gap:6px;min-height:96px;transition:.1s;box-shadow:var(--sh-sm)}
+  .tile:hover{border-color:var(--pr400);box-shadow:var(--sh-md);transform:translateY(-1px)}
+  .tile:active{transform:translateY(0)}
+  .tile-ic{width:36px;height:36px;border-radius:9px;display:grid;place-items:center;font-size:18px}
+  /* table tiles */
+  .ttile{border-radius:12px;padding:14px;text-align:left;border:1.5px solid var(--n200);background:#fff;min-height:108px;display:flex;flex-direction:column;justify-content:space-between;transition:.12s;position:relative;box-shadow:var(--sh-sm)}
+  .ttile:hover{box-shadow:var(--sh-md);transform:translateY(-2px)}
+  .ttile-name{font-size:18px;font-weight:800;letter-spacing:-.01em}
+  .ts-available{border-color:var(--n200);background:#fff}
+  .ts-occupied{border-color:var(--pr500);background:var(--pr50)}
+  .ts-kitchen{border-color:var(--wa500);background:var(--wa50)}
+  .ts-bill{border-color:var(--in500);background:var(--in50)}
+  .ts-clearing{border-color:var(--su500);background:var(--su50)}
+  .ts-oos{border-color:var(--n200);background:repeating-linear-gradient(45deg,var(--n50),var(--n50) 7px,#fff 7px,#fff 14px);color:var(--n400)}
+  /* modal */
+  .overlay{position:fixed;inset:0;background:rgba(17,24,39,.55);backdrop-filter:blur(2px);display:grid;place-items:center;z-index:100;padding:24px;animation:fade .15s ease-out}
+  .modal{background:#fff;border-radius:14px;box-shadow:var(--sh-lg);width:100%;max-height:92vh;overflow:hidden;display:flex;flex-direction:column;animation:pop .18s ease-out}
+  .modal-h{padding:18px 22px;border-bottom:1px solid var(--n200);display:flex;align-items:center;justify-content:space-between}
+  .modal-b{padding:22px;overflow-y:auto}
+  .modal-f{padding:16px 22px;border-top:1px solid var(--n200);display:flex;gap:10px;justify-content:flex-end;background:var(--n50)}
+  @keyframes fade{from{opacity:0}to{opacity:1}}
+  @keyframes pop{from{opacity:0;transform:scale(.97) translateY(6px)}to{opacity:1;transform:none}}
+  @keyframes flash{0%{background:var(--su50)}100%{background:transparent}}
+  .flash{animation:flash .7s ease-out}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .spin{animation:spin 1s linear infinite}
+  @keyframes blink{50%{opacity:.25}}
+  .live{animation:blink 1.4s steps(1) infinite}
+  /* dropdown */
+  .dropdown{position:absolute;top:58px;right:18px;width:320px;background:#fff;border:1px solid var(--n200);border-radius:12px;box-shadow:var(--sh-lg);z-index:40;overflow:hidden;animation:pop .15s ease-out}
+  .scroll-x{overflow-x:auto}
+  .seg{display:inline-flex;background:var(--n100);border-radius:9px;padding:3px}
+  .seg button{height:32px;padding:0 14px;border-radius:7px;font-size:13px;font-weight:600;color:var(--n600)}
+  .seg button.on{background:#fff;color:var(--n900);box-shadow:var(--sh-sm)}
+  .toggle{width:42px;height:24px;border-radius:99px;background:var(--n300);position:relative;transition:.15s;flex:0 0 42px}
+  .toggle.on{background:var(--su500)}
+  .toggle::after{content:"";position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:#fff;transition:.15s;box-shadow:var(--sh-sm)}
+  .toggle.on::after{left:20px}
+  .chip{height:30px;padding:0 12px;border-radius:8px;border:1px solid var(--n300);background:#fff;font-size:12.5px;font-weight:600;color:var(--n600);display:inline-flex;align-items:center;gap:6px}
+  .chip.on{background:var(--n900);color:#fff;border-color:var(--n900)}
+  .empty{padding:40px;text-align:center;color:var(--n400)}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:var(--n300);border-radius:6px;border:2px solid var(--n100)}
+</style>
+</helmet>
+<div data-screen-label="SuperPOS">{{ app }}</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1440,&quot;height&quot;:900}}">
+class Component extends DCLogic {
+  h = React.createElement;
+
+  PRODUCTS = [
+    { id:'p1', name:'Iced Mocha', cat:'Iced Drinks', price:55, type:'recipe', color:'#7c3f1d', emoji:'🧋' },
+    { id:'p2', name:'Iced Latte', cat:'Iced Drinks', price:50, type:'recipe', color:'#a16207', emoji:'🥤' },
+    { id:'p3', name:'Coffee', cat:'Hot Coffee', price:35, type:'recipe', color:'#6b4423', emoji:'☕' },
+    { id:'p4', name:'Espresso', cat:'Hot Coffee', price:30, type:'recipe', color:'#3f2a18', emoji:'☕' },
+    { id:'p5', name:'Cake', cat:'Desserts', price:45, type:'stock', color:'#be185d', emoji:'🍰' },
+    { id:'p6', name:'Water Bottle', cat:'Cold', price:15, type:'stock', color:'#0ea5e9', emoji:'💧' },
+  ];
+  INGREDIENTS = [
+    { id:'i1', name:'Milk', unit:'L', stock:8.5, type:'ingredient' },
+    { id:'i2', name:'Coffee Beans', unit:'kg', stock:4.2, type:'ingredient' },
+    { id:'i3', name:'Chocolate Sauce', unit:'L', stock:0.0, type:'ingredient' },
+    { id:'i4', name:'Cup 500ml', unit:'pc', stock:240, type:'stock' },
+  ];
+  SECTIONS = ['Indoor','Outdoor','VIP'];
+
+  TABLE_STATES = {
+    available:{label:'Available', cls:'ts-available', badge:'b-gray', dot:'var(--n400)'},
+    occupied:{label:'Occupied', cls:'ts-occupied', badge:'b-blue', dot:'var(--pr500)'},
+    kitchen:{label:'Sent to Kitchen', cls:'ts-kitchen', badge:'b-amber', dot:'var(--wa500)'},
+    bill:{label:'Needs Bill', cls:'ts-bill', badge:'b-cyan', dot:'var(--in500)'},
+    clearing:{label:'Paid / Clearing', cls:'ts-clearing', badge:'b-green', dot:'var(--su500)'},
+    oos:{label:'Out of Service', cls:'ts-oos', badge:'b-gray', dot:'var(--n400)'},
+  };
+
+  state = {
+    screen:'login',
+    route:'pos',
+    posView:'tables',
+    activeTable:null,
+    profileOpen:false,
+    modal:null,
+    modalData:null,
+    flashLine:null,
+    invFilter:'all',
+    settingsTab:'pos',
+    shift:{ open:true, openedAt:'08:12', terminal:'POS-01', cashbox:'Main Drawer', opening:500 },
+    settings:{
+      autoSendKitchen:false,
+      allowNegativeStock:true,
+      requireApprovalNeg:true,
+      blockShiftCloseOpenTables:true,
+      showNegWarning:true,
+      negScope:'Products and ingredients',
+      negCosting:'Last known average cost',
+    },
+    tables: this.seedTables(),
+    orders: this.seedOrders(),
+    invoices: this.seedInvoices(),
+    kitchen: this.seedKitchen(),
+    nextInv: 1043,
+    nextOrder: 28,
+    toast:null,
+  };
+
+  seedTables(){
+    const t=[];
+    const layout = {
+      Indoor:['available','available','kitchen','available','occupied','available','available','bill','available','available'],
+      Outdoor:['available','clearing','available','available','available','available'],
+      VIP:['occupied','available','available','oos'],
+    };
+    let n=1;
+    Object.keys(layout).forEach(sec=>{
+      layout[sec].forEach(st=>{ t.push({ id:'T'+n, name:'T'+n, section:sec, state:st }); n++; });
+    });
+    return t;
+  }
+  seedOrders(){
+    return {
+      T5:{ id:'OO-0026', table:'T5', section:'Indoor', openedAt:'19:24', guests:2, lines:[
+        { id:'l1', pid:'p1', name:'Iced Mocha', qty:2, price:55, status:'sent', note:'' },
+      ]},
+      T3:{ id:'OO-0024', table:'T3', section:'Indoor', openedAt:'19:40', guests:4, lines:[
+        { id:'l1', pid:'p3', name:'Coffee', qty:2, price:35, status:'sent', note:'Extra hot' },
+        { id:'l2', pid:'p5', name:'Cake', qty:1, price:45, status:'sent', note:'' },
+      ]},
+      T8:{ id:'OO-0021', table:'T8', section:'Indoor', openedAt:'18:55', guests:3, lines:[
+        { id:'l1', pid:'p2', name:'Iced Latte', qty:3, price:50, status:'prepared', note:'' },
+        { id:'l2', pid:'p5', name:'Cake', qty:2, price:45, status:'prepared', note:'' },
+      ]},
+      T17:{ id:'OO-0025', table:'T17', section:'VIP', openedAt:'19:30', guests:6, lines:[
+        { id:'l1', pid:'p1', name:'Iced Mocha', qty:4, price:55, status:'prepared', note:'' },
+        { id:'l2', pid:'p4', name:'Espresso', qty:2, price:30, status:'sent', note:'' },
+      ]},
+    };
+  }
+  seedKitchen(){
+    return [
+      { id:'K-209', table:'T3', station:'Bar', items:[{n:'Coffee',q:2},{n:'Cake',q:1}], status:'preparing', time:'19:41', age:'4m' },
+      { id:'K-208', table:'T17', station:'Bar', items:[{n:'Iced Mocha',q:4}], status:'ready', time:'19:33', age:'11m' },
+      { id:'K-207', table:'T5', station:'Bar', items:[{n:'Iced Mocha',q:2}], status:'ready', time:'19:25', age:'19m' },
+      { id:'K-206', table:'T8', station:'Bar', items:[{n:'Iced Latte',q:3},{n:'Cake',q:2}], status:'served', time:'18:57', age:'48m' },
+    ];
+  }
+  seedInvoices(){
+    return [
+      { no:'INV-1042', table:'T2', time:'19:38', cashier:'Ahmed H.', total:170, method:'Cash', posting:'Posted', payment:'Paid', ret:'Not Returned', approval:'Not Required', sync:'Synced', lines:[{name:'Iced Latte',qty:2,price:50},{name:'Coffee',qty:2,price:35}], route:'Cashbox' },
+      { no:'INV-1041', table:'T11', time:'19:12', cashier:'Ahmed H.', total:220, method:'Card', posting:'Posted', payment:'Paid', ret:'Not Returned', approval:'Not Required', sync:'Synced', lines:[{name:'Iced Mocha',qty:4}], route:'Card Settlement' },
+      { no:'INV-1040', table:'Takeaway', time:'18:50', cashier:'Sara M.', total:90, method:'Wallet', posting:'Posted', payment:'Paid', ret:'Not Returned', approval:'Not Required', sync:'Pending Sync', lines:[{name:'Coffee',qty:1},{name:'Cake',qty:1}], route:'Wallet Account' },
+      { no:'INV-1039', table:'T6', time:'18:22', cashier:'Ahmed H.', total:300, method:'Credit', posting:'Posted', payment:'Unpaid', ret:'Not Returned', approval:'Approved', sync:'Synced', lines:[{name:'Iced Mocha',qty:3},{name:'Cake',qty:3}], route:'Customer AR', customer:'Nour Hotel' },
+      { no:'INV-1038', table:'T9', time:'17:40', cashier:'Sara M.', total:135, method:'Cash', posting:'Cancelled', payment:'N/A', ret:'Not Returned', approval:'Approved', sync:'Synced', lines:[{name:'Iced Latte',qty:1},{name:'Cake',qty:1}], route:'—' },
+    ];
+  }
+
+  // ---------- helpers ----------
+  money(n){ return Number(n).toFixed(2)+' EGP'; }
+  go(route){ this.setState({ route, profileOpen:false, posView:'tables' }); }
+  toast(msg,kind){ this.setState({toast:{msg,kind:kind||'ok'}}); clearTimeout(this._tt); this._tt=setTimeout(()=>this.setState({toast:null}),2600); }
+  openModal(modal,data){ this.setState({modal,modalData:data||null}); }
+  closeModal(){ this.setState({modal:null,modalData:null}); }
+
+  orderTotal(o){ if(!o) return 0; return o.lines.filter(l=>l.status!=='cancelled').reduce((s,l)=>s+l.qty*l.price,0); }
+  tableLabel(st){ return this.TABLE_STATES[st].label; }
+
+  renderVals(){ return { app: this.renderApp() }; }
+
+  renderApp(){
+    const h=this.h;
+    if(this.state.screen==='login') return this.renderLogin();
+    return h('div',{className:'app'},
+      this.renderSidebar(),
+      h('div',{className:'main'},
+        this.renderHeader(),
+        h('div',{className:'page'}, this.renderRoute())
+      ),
+      this.state.profileOpen && this.renderProfileDropdown(),
+      this.state.modal && this.renderModal(),
+      this.state.toast && this.renderToast(),
+    );
+  }
+
+  renderToast(){
+    const h=this.h, t=this.state.toast;
+    const col={ok:'var(--su600)',warn:'var(--wa600)',err:'var(--er600)',info:'var(--in700)'}[t.kind];
+    return h('div',{style:{position:'fixed',bottom:24,left:'50%',transform:'translateX(-50%)',background:'var(--n900)',color:'#fff',padding:'12px 20px',borderRadius:10,boxShadow:'var(--sh-lg)',zIndex:200,fontWeight:600,fontSize:13.5,display:'flex',gap:10,alignItems:'center',animation:'pop .18s ease-out'}},
+      h('span',{style:{width:8,height:8,borderRadius:'50%',background:col}}), t.msg);
+  }
+
+  icon(name,size){
+    const h=this.h, s=size||18;
+    const p={fill:'none',stroke:'currentColor',strokeWidth:2,strokeLinecap:'round',strokeLinejoin:'round',width:s,height:s,viewBox:'0 0 24 24'};
+    const paths={
+      pos:'M3 4h18v14H3zM3 9h18M7 14h4',
+      grid:'M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z',
+      chart:'M3 3v18h18 M7 15l4-5 4 3 5-7',
+      receipt:'M5 3h14v18l-2-1.5L15 21l-2-1.5L11 21l-2-1.5L7 21 5 19.5zM8 8h8M8 12h8M8 16h5',
+      cart:'M3 4h2l2.4 12.3a1 1 0 0 0 1 .7h8.7a1 1 0 0 0 1-.8L21 8H6 M9 21h.01M18 21h.01',
+      box:'M3 7l9-4 9 4-9 4zM3 7v10l9 4 9-4V7M12 11v10',
+      layers:'M12 3l9 5-9 5-9-5zM3 13l9 5 9-5',
+      users:'M9 8a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM2 21c0-3.5 3-6 7-6s7 2.5 7 6M17 11a3 3 0 1 0 0-6M22 21c0-2.8-2-5-5-5.5',
+      truck:'M3 6h11v9H3zM14 9h4l3 3v3h-7zM7 18a2 2 0 1 0 0-1M18 18a2 2 0 1 0 0-1',
+      bank:'M3 9l9-5 9 5M4 9v9M20 9v9M3 19h18M8 13v3M12 13v3M16 13v3',
+      gear:'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 13a1.7 1.7 0 0 0 .3 1.8M4.6 11a1.7 1.7 0 0 0-.3-1.8M12 2v3M12 19v3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1L7 17M17 7l2.1-2.1',
+      cube:'M21 16V8l-9-5-9 5v8l9 5z M3 8l9 5 9-5M12 13v9',
+      wifi:'M5 12.5a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0M12 19h.01',
+      flame:'M12 3s4 4 4 8a4 4 0 0 1-8 0c0-2 2-3 2-3s-1 3 1 4',
+      clock:'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 7v5l3 2',
+      check:'M5 12l5 5L20 7',
+      x:'M6 6l12 12M18 6L6 18',
+      plus:'M12 5v14M5 12h14',
+      minus:'M5 12h14',
+      chevD:'M6 9l6 6 6-6',
+      chevR:'M9 6l6 6-6 6',
+      chevL:'M15 6l-6 6 6 6',
+      bell:'M6 8a6 6 0 1 1 12 0c0 7 3 7 3 9H3c0-2 3-2 3-9M10 21a2 2 0 0 0 4 0',
+      alert:'M12 3L2 21h20zM12 10v4M12 18h.01',
+      send:'M22 2L11 13M22 2l-7 20-4-9-9-4z',
+      printer:'M7 8V3h10v5M7 18H5a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M7 14h10v7H7z',
+      lock:'M5 11h14v10H5zM8 11V7a4 4 0 0 1 8 0v4',
+      user:'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21c0-4 4-6 8-6s8 2 8 6',
+      logout:'M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9',
+      coffee:'M3 8h14v5a5 5 0 0 1-5 5H8a5 5 0 0 1-5-5zM17 9h2a2 2 0 0 1 0 6h-2M6 2v2M10 2v2M14 2v2',
+      money:'M3 6h18v12H3zM12 12a2.5 2.5 0 1 0 0-1M6 9h.01M18 15h.01',
+      card:'M3 6h18v12H3zM3 10h18',
+      wallet:'M3 7h15a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM3 7V5a2 2 0 0 1 2-2h11M16.5 13h.01',
+      doc:'M6 2h8l4 4v16H6zM14 2v4h4M9 13h6M9 17h6',
+      tag:'M3 3h7l11 11-7 7L3 10zM7 7h.01',
+      shield:'M12 2l8 3v6c0 5-3.5 8-8 11-4.5-3-8-6-8-11V5z',
+      transfer:'M4 7h16l-3-3M20 17H4l3 3',
+      eye:'M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12zM12 15a3 3 0 1 0 0-6',
+      split:'M3 3v18h18M9 9l3-3 3 3M12 6v12',
+    };
+    return h('svg',p, h('path',{d:paths[name]||paths.box}));
+  }
+
+  // ---------- login ----------
+  renderLogin(){
+    const h=this.h;
+    return h('div',{style:{minHeight:'100vh',display:'grid',placeItems:'center',background:'var(--n100)',padding:24}},
+      h('div',{style:{width:'100%',maxWidth:420}},
+        h('div',{style:{display:'flex',alignItems:'center',justifyContent:'center',gap:12,marginBottom:26}},
+          h('div',{className:'logo-mark',style:{width:44,height:44,fontSize:22}},'C'),
+          h('div',null,
+            h('div',{style:{fontSize:22,fontWeight:800,letterSpacing:'-.02em'}},'SuperPOS'),
+            h('div',{className:'muted',style:{fontSize:12}},'ERP Lite · Come Back Café'))),
+        h('div',{className:'card',style:{padding:28}},
+          h('h1',{style:{fontSize:20,fontWeight:800,margin:'0 0 4px'}},'Sign in to your terminal'),
+          h('p',{className:'muted',style:{fontSize:13,margin:'0 0 22px'}},'Come Back Café · Main Branch · POS-01'),
+          h('label',{className:'lbl'},'Email'),
+          h('input',{className:'input',defaultValue:'ahmed@comeback.cafe',style:{marginBottom:16}}),
+          h('label',{className:'lbl'},'Password'),
+          h('input',{className:'input',type:'password',defaultValue:'demo1234',style:{marginBottom:20}}),
+          h('button',{className:'btn btn-pri btn-lg',style:{width:'100%'},onClick:()=>this.setState({screen:'app',route:'pos'})},'Sign in'),
+          h('div',{style:{marginTop:22,paddingTop:18,borderTop:'1px solid var(--n200)',display:'flex',justifyContent:'space-between',fontSize:12},className:'muted'},
+            h('span',null,'v3.6 · Terminal POS-01'),
+            h('span',{style:{display:'flex',alignItems:'center',gap:6}}, h('span',{style:{width:7,height:7,borderRadius:'50%',background:'var(--su500)'}}),'Server reachable'))),
+        h('p',{className:'muted',style:{textAlign:'center',fontSize:12,marginTop:18}},'EGP · Main Branch · Africa/Cairo')));
+  }
+
+  // ---------- sidebar ----------
+  renderSidebar(){
+    const h=this.h;
+    const groups=[
+      { items:[ ['pos','Point of Sale','pos'], ['dashboard','Dashboard','chart'], ['kitchen','Kitchen / Bar','flame'] ]},
+      { label:'Operations', items:[ ['sales','Sales','receipt'], ['purchases','Purchases','truck'], ['customers','Customers','users'], ['suppliers','Suppliers','box'] ]},
+      { label:'Catalog & Stock', items:[ ['products','Products','tag'], ['inventory','Inventory','layers'] ]},
+      { label:'Finance', items:[ ['treasury','Treasury / Finance','bank'], ['assets','Fixed Assets','cube'], ['reports','Reports','doc'] ]},
+      { label:'Admin', items:[ ['users','Users & Permissions','shield'], ['settings','Settings','gear'] ]},
+    ];
+    return h('aside',{className:'sidebar'},
+      h('div',{className:'side-logo'},
+        h('div',{className:'logo-mark'},'C'),
+        h('div',null,
+          h('div',{style:{fontWeight:800,fontSize:15,letterSpacing:'-.01em',lineHeight:1.1}},'Come Back'),
+          h('div',{className:'side-tenant'},'Café · Main'))),
+      h('nav',{className:'nav'},
+        groups.map((g,gi)=>h(React.Fragment,{key:gi},
+          g.label && h('div',{className:'nav-sec'},g.label),
+          g.items.map(([id,label,ic])=>h('button',{key:id,className:'nav-item'+(this.state.route===id?' active':''),onClick:()=>this.go(id)},
+            this.icon(ic,18), h('span',null,label)))
+        ))));
+  }
+
+  // ---------- header ----------
+  headerMeta(){
+    const m={
+      pos:['Point of Sale','Come Back Café · POS-01 · '+(this.state.shift.open?'Shift open '+this.state.shift.openedAt:'No active shift')],
+      dashboard:['Dashboard','Main Branch · Today · '+new Date().toLocaleDateString()],
+      kitchen:['Kitchen / Bar Display','Bar Station · Live tickets'],
+      sales:['Sales','Main Branch · Sales invoices & returns'],
+      purchases:['Purchases','Main Branch · Purchase invoices'],
+      customers:['Customers','Accounts receivable & price tiers'],
+      suppliers:['Suppliers','Accounts payable'],
+      products:['Products','Menu items, recipes & ingredients'],
+      inventory:['Inventory','Warehouses · Stock movements'],
+      treasury:['Treasury / Finance','Cashbox · Card Settlement · Wallet'],
+      assets:['Fixed Assets','Asset register'],
+      reports:['Reports','Ledger-driven reports'],
+      users:['Users & Permissions','Roles & access'],
+      settings:['Settings','Tenant configuration'],
+    };
+    return m[this.state.route]||['',''];
+  }
+  renderHeader(){
+    const h=this.h, [title,sub]=this.headerMeta(), sh=this.state.shift;
+    return h('header',{className:'header'},
+      h('div',{style:{minWidth:0}},
+        h('div',{className:'h-title'},title),
+        h('div',{className:'h-sub'},sub)),
+      h('div',{style:{display:'flex',alignItems:'center',gap:12}},
+        sh.open
+          ? h('div',{className:'pill ok'}, this.icon('clock',14), 'Shift open · '+sh.openedAt+' · '+sh.cashbox)
+          : h('button',{className:'btn btn-warn btn-sm',onClick:()=>this.openModal('shiftOpen')},'Open Shift'),
+        h('div',{className:'pill ok'}, this.icon('wifi',14),'Online'),
+        h('div',{style:{position:'relative'}},
+          h('button',{onClick:()=>this.setState(s=>({profileOpen:!s.profileOpen})),style:{display:'flex',alignItems:'center',gap:9,paddingLeft:10,borderLeft:'1px solid var(--n200)'}},
+            h('div',{className:'avatar'},'AH'),
+            h('div',{style:{textAlign:'left'}},
+              h('div',{style:{fontWeight:700,fontSize:13,lineHeight:1.15}},'Ahmed H.'),
+              h('div',{className:'muted',style:{fontSize:11.5}},'Cashier · POS-01')),
+            this.icon('chevD',15)))));
+  }
+
+  renderProfileDropdown(){
+    const h=this.h, sh=this.state.shift;
+    const openTables=this.state.tables.filter(t=>['occupied','kitchen','bill'].includes(t.state)).length;
+    return h('div',{className:'dropdown'},
+      h('div',{style:{padding:'14px 16px',borderBottom:'1px solid var(--n200)',display:'flex',gap:11,alignItems:'center'}},
+        h('div',{className:'avatar',style:{width:40,height:40}},'AH'),
+        h('div',null,
+          h('div',{style:{fontWeight:700}},'Ahmed Hassan'),
+          h('div',{className:'muted',style:{fontSize:12}},'Cashier · Main Branch · POS-01'))),
+      sh.open
+        ? h('div',{style:{padding:'12px 16px',borderBottom:'1px solid var(--n200)'}},
+            h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}},
+              h('span',{className:'badge b-green'},'● Shift open'),
+              h('span',{className:'muted',style:{fontSize:12}},'since '+sh.openedAt)),
+            h('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,fontSize:12.5}},
+              this.miniStat('Cash sales','1,240 EGP'),
+              this.miniStat('Card sales','680 EGP'),
+              this.miniStat('Open tables',String(openTables)),
+              this.miniStat('Pending sync','1')),
+            h('div',{style:{display:'flex',gap:8,marginTop:12}},
+              h('button',{className:'btn btn-sec btn-sm',style:{flex:1},onClick:()=>{this.go('reports');}},'View Summary'),
+              h('button',{className:'btn btn-danger btn-sm',style:{flex:1},onClick:()=>this.openModal('shiftClose')},'Close Shift')))
+        : h('div',{style:{padding:'12px 16px',borderBottom:'1px solid var(--n200)'}},
+            h('div',{className:'badge b-amber',style:{marginBottom:8}},'No active shift'),
+            h('button',{className:'btn btn-pri btn-sm',style:{width:'100%'},onClick:()=>this.openModal('shiftOpen')},'Open Shift')),
+      h('button',{className:'nav-item',style:{margin:6,width:'auto'},onClick:()=>this.setState({screen:'login',profileOpen:false})}, this.icon('logout',17),'Sign out'));
+  }
+  miniStat(l,v){ const h=this.h; return h('div',{style:{background:'var(--n50)',borderRadius:8,padding:'7px 9px'}}, h('div',{className:'muted',style:{fontSize:11}},l), h('div',{style:{fontWeight:700,marginTop:2}},v)); }
+
+  renderRoute(){
+    switch(this.state.route){
+      case 'pos': return this.state.posView==='tables'? this.renderTables() : this.renderOrder();
+      case 'dashboard': return this.renderDashboard();
+      case 'kitchen': return this.renderKitchen();
+      case 'sales': return this.renderSales();
+      case 'settings': return this.renderSettings();
+      default: return this.renderModulePlaceholder();
+    }
+  }
+
+  moduleData(){
+    return {
+      purchases:{kpis:[['Open POs','3'],['This month','12,400 EGP'],['AP balance','4,200 EGP'],['Pending receive','2']],
+        cols:['Purchase','Supplier','Date','Total','Posting','Payment','Stock'],
+        rows:[['PUR-318','Cairo Roasters','Jun 24','3,200.00',['b-green','Posted'],['b-green','Paid'],['b-blue','Stock in']],
+          ['PUR-317','Nile Dairy','Jun 22','1,450.00',['b-green','Posted'],['b-amber','Unpaid'],['b-blue','Stock in']],
+          ['PUR-316','Pyramid Pkg','Jun 20','880.00',['b-green','Posted'],['b-green','Paid'],['b-amber','Covers neg']]]},
+      products:{kpis:[['Menu items','6'],['Ingredients','4'],['Recipes','4'],['Out of stock','1']],
+        cols:['Product','Type','Category','Price','Stock','Status'],
+        rows:[['Iced Mocha',['b-blue','Recipe'],'Iced Drinks','55.00','—',['b-amber','Neg ingredient']],
+          ['Iced Latte',['b-blue','Recipe'],'Iced Drinks','50.00','—',['b-green','OK']],
+          ['Coffee',['b-blue','Recipe'],'Hot Coffee','35.00','—',['b-green','OK']],
+          ['Espresso',['b-blue','Recipe'],'Hot Coffee','30.00','—',['b-green','OK']],
+          ['Cake',['b-gray','Stock'],'Desserts','45.00','18',['b-green','In stock']],
+          ['Water Bottle',['b-gray','Stock'],'Cold','15.00','64',['b-green','In stock']]]},
+      inventory:{kpis:[['Warehouses','2'],['Stock value','14,800 EGP'],['Negative items','1'],['Low stock','1']],
+        cols:['Item','Warehouse','On hand','Unit','Movement','Status'],
+        rows:[['Milk','Bar Storage','8.50','L','RECIPE_CONSUME',['b-green','OK']],
+          ['Coffee Beans','Bar Storage','4.20','kg','RECIPE_CONSUME',['b-amber','Low']],
+          ['Chocolate Sauce','Bar Storage','0.00','L','SALE_OUT',['b-red','Negative']],
+          ['Cup 500ml','Bar Storage','240','pc','SALE_OUT',['b-green','OK']],
+          ['Cake','Main','18','pc','PURCHASE_IN',['b-green','In stock']]]},
+      customers:{kpis:[['Customers','142'],['AR balance','4,900 EGP'],['Over limit','1'],['VIP tier','12']],
+        cols:['Customer','Phone','Tier','AR balance','Limit','Status'],
+        rows:[['Nour Hotel','0100 222 1188',['b-violet','Municipality'],'300.00','5,000',['b-green','Active']],
+          ['Walk-in','—',['b-gray','Default'],'0.00','—',['b-gray','—']],
+          ['Sami Group','0122 909 4471',['b-blue','VIP'],'4,600.00','4,000',['b-red','Over limit']]]},
+      suppliers:{kpis:[['Suppliers','18'],['AP balance','4,200 EGP'],['Advances','600 EGP'],['Active','15']],
+        cols:['Supplier','Phone','AP balance','Advance','Last purchase'],
+        rows:[['Cairo Roasters','0101 555 7788','1,200.00','0.00','Jun 24'],
+          ['Nile Dairy','0128 444 9090','1,450.00','0.00','Jun 22'],
+          ['Pyramid Packaging','0100 717 1212','0.00','600.00','Jun 20']]},
+      treasury:{kpis:[['Cashbox','1,340 EGP'],['Card Settlement','680 EGP'],['Wallet Account','90 EGP'],['Main Safe','12,000 EGP']],
+        cols:['Account','Type','Balance','Pending','Status'],
+        rows:[['Main Drawer',['b-green','Cashbox'],'1,340.00','—',['b-green','Shift open']],
+          ['Card Settlement',['b-cyan','Card'],'680.00','680.00',['b-amber','Unsettled batch']],
+          ['Wallet Account',['b-violet','Wallet'],'90.00','90.00',['b-amber','Pending transfer']],
+          ['Main Safe',['b-gray','Safe'],'12,000.00','—',['b-green','OK']]]},
+      assets:{kpis:[['Assets','9'],['Acq. cost','86,000 EGP'],['Book value','71,400 EGP'],['Maintenance due','1']],
+        cols:['Code','Asset','Category','Acq. cost','Book value','Status'],
+        rows:[['FA-01','Espresso Machine','Equipment','45,000.00','38,200.00',['b-green','In use']],
+          ['FA-02','Receipt Printer','Equipment','3,000.00','2,100.00',['b-green','In use']],
+          ['FA-03','Café Tables (×20)','Furniture','24,000.00','20,400.00',['b-green','In use']],
+          ['FA-04','Display Fridge','Equipment','14,000.00','10,700.00',['b-amber','Service due']]]},
+      reports:{group:true},
+      users:{kpis:[['Users','7'],['Roles','4'],['Active now','2'],['Pending invites','1']],
+        cols:['User','Role','Branch','Terminal','Status'],
+        rows:[['Ahmed Hassan',['b-blue','Cashier'],'Main','POS-01',['b-green','Online']],
+          ['Sara Mostafa',['b-blue','Cashier'],'Main','POS-02',['b-gray','Offline']],
+          ['Layla Adel',['b-violet','Manager'],'Main','—',['b-green','Online']],
+          ['Owner',['b-amber','Admin'],'All','—',['b-gray','Offline']]]},
+    }[this.state.route];
+  }
+  renderModulePlaceholder(){
+    const h=this.h, d=this.moduleData();
+    if(!d) return h('div',{className:'empty'},'Module');
+    if(d.group){
+      const groups={Sales:['Sales Summary','P&L','Shift Report'],Treasury:['Cashbox Movement','Card Settlement','Wallet Settlement'],Inventory:['Inventory Movement','Stock Valuation','Damage / Wastage'],'Negative Stock':['Negative Stock Alerts','Estimated Cost Sales','COGS Adjustment'],Parties:['Customer Statement','Supplier Statement'],Logs:['Audit Log','Access Log','Operations Log']};
+      return h('div',{className:'page-narrow'},h('div',{style:{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:16}},
+        Object.keys(groups).map(g=>h('div',{key:g,className:'card'},h('div',{className:'card-h'},h('span',{className:'card-t'},g)),
+          h('div',{style:{padding:'6px 0'}},groups[g].map(r=>h('button',{key:r,className:'nav-item',style:{width:'auto',margin:'0 6px',borderRadius:6},onClick:()=>this.toast('Opening '+r+' (ledger-driven)','info')},this.icon('doc',16),r)))))));
+    }
+    return h('div',{className:'page-narrow'},
+      d.kpis&&h('div',{className:'kpi-grid',style:{marginBottom:16}},d.kpis.map(([l,v])=>h('div',{key:l,className:'kpi'},h('div',{className:'kpi-lbl'},l),h('div',{className:'kpi-val',style:{fontSize:22}},v)))),
+      h('div',{style:{display:'flex',justifyContent:'flex-end',marginBottom:12}},h('button',{className:'btn btn-pri btn-sm',onClick:()=>this.toast('New record (demo)','info')},this.icon('plus',15),'New')),
+      h('div',{className:'card',style:{overflow:'hidden'}},h('div',{className:'scroll-x'},h('table',{className:'tbl'},
+        h('thead',null,h('tr',null,d.cols.map((c,i)=>h('th',{key:c,className:i>=3&&/Total|cost|value|balance|Price/i.test(c)?'r':''},c)))),
+        h('tbody',null,d.rows.map((r,ri)=>h('tr',{key:ri,style:{cursor:'pointer'},onClick:()=>this.toast(r[0]+' — detail (demo)','info')},
+          r.map((cell,ci)=>h('td',{key:ci,className:(typeof cell==='string'&&/^[\d,]+\.\d/.test(cell))?'r mono':''},
+            Array.isArray(cell)?h('span',{className:'badge '+cell[0]},cell[1]):cell)))))))));
+  }
+
+  modalShell(w,title,sub,body,footer,accent){
+    const h=this.h;
+    return h('div',{className:'overlay',onClick:(e)=>{if(e.target===e.currentTarget)this.closeModal();}},
+      h('div',{className:'modal',style:{maxWidth:w}},
+        h('div',{className:'modal-h'},
+          h('div',null,
+            h('div',{style:{fontSize:16,fontWeight:800,display:'flex',alignItems:'center',gap:8}},accent,title),
+            sub&&h('div',{className:'muted',style:{fontSize:12.5,marginTop:2}},sub)),
+          h('button',{className:'btn btn-ghost btn-sm',style:{width:32,padding:0},onClick:()=>this.closeModal()},this.icon('x',16))),
+        h('div',{className:'modal-b'},body),
+        footer&&h('div',{className:'modal-f'},footer)));
+  }
+  renderModal(){
+    switch(this.state.modal){
+      case 'openTable': return this.mOpenTable();
+      case 'payment': return this.mPayment();
+      case 'shiftOpen': return this.mShiftOpen();
+      case 'shiftClose': return this.mShiftClose();
+      case 'approval': return this.mApproval();
+      case 'cancelLine': return this.mCancelLine();
+      case 'negStock': return this.mNegStock();
+      case 'invoice': return this.mInvoice();
+      default: return null;
+    }
+  }
+  mOpenTable(){
+    const h=this.h, t=this.state.modalData;
+    return this.modalShell(440,'Open Table '+t.id, t.section+' · create a new open order',
+      h('div',null,
+        h('p',{style:{fontSize:13.5,marginTop:0}},'A new ',h('b',null,'OpenOrder'),' will be created and linked to this table. Items can be added over time until the cashier takes one final payment.'),
+        h('label',{className:'lbl'},'Number of guests'),
+        h('div',{className:'seg',style:{marginBottom:6}}, [1,2,3,4,6].map(n=>h('button',{key:n,className:n===2?'on':'',onClick:()=>{}},String(n))))),
+      [ h('button',{className:'btn btn-sec',onClick:()=>this.closeModal()},'Cancel'),
+        h('button',{className:'btn btn-pri',onClick:()=>this.openTable(t)},this.icon('check',16),'Open Table & Start Order') ],
+      this.icon('grid',18));
+  }
+  mPayment(){
+    const h=this.h, d=this.state.modalData;
+    const routes=[['Cash','Cashbox / Drawer','money','b-green'],['Card / Visa','Card Settlement','card','b-cyan'],['Wallet','Wallet Account','wallet','b-violet'],['Credit','Customer AR balance','user','b-amber']];
+    const sel=this._payMethod||'Cash';
+    return this.modalShell(560,'Take Payment · Table '+d.table,'Converts the OpenOrder into one final Sales Invoice',
+      h('div',null,
+        h('div',{style:{background:'var(--n900)',color:'#fff',borderRadius:12,padding:'16px 18px',marginBottom:16,display:'flex',justifyContent:'space-between',alignItems:'center'}},
+          h('div',null,h('div',{style:{fontSize:12,opacity:.7}},'Amount due'),h('div',{className:'muted',style:{fontSize:11}},d.subtotal.toFixed(2)+' + VAT '+d.tax.toFixed(2))),
+          h('div',{className:'mono',style:{fontSize:30,fontWeight:800}},d.total.toFixed(2)+' EGP')),
+        h('label',{className:'lbl'},'Payment method'),
+        h('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:14}},
+          routes.map(([m,dest,ic,bc])=>h('button',{key:m,onClick:()=>{this._payMethod=m;this.forceUpdate();},style:{textAlign:'left',padding:'12px 14px',borderRadius:10,border:'1.5px solid '+(sel===m?'var(--pr500)':'var(--n200)'),background:sel===m?'var(--pr50)':'#fff',display:'flex',gap:11,alignItems:'center'}},
+            h('span',{style:{color:'var(--n700)'}},this.icon(ic,20)),
+            h('div',null,h('div',{style:{fontWeight:700,fontSize:13.5}},m),h('div',null,h('span',{className:'badge '+bc,style:{marginTop:3}},'→ '+dest)))))),
+        h('div',{style:{padding:'10px 12px',background:'var(--in50)',borderRadius:8,fontSize:12,color:'var(--in700)',display:'flex',gap:8}},
+          this.icon('alert',15), sel==='Cash'?'Cash increases the Cashbox drawer balance.':sel==='Card / Visa'?'Card routes to Card Settlement — it does NOT enter the cashbox.':sel==='Wallet'?'Wallet routes to the Wallet Account, not the cashbox.':'Credit is not money received now — it increases the customer AR balance.')),
+      [ h('button',{className:'btn btn-sec',onClick:()=>this.closeModal()},'Cancel'),
+        h('button',{className:'btn btn-success btn-lg',onClick:()=>this.completePayment(d,sel)},this.icon('check',17),'Confirm Payment') ],
+      this.icon('money',18));
+  }
+  completePayment(d,method){
+    const t=d.table, o=this.state.orders[t];
+    const no='INV-'+this.state.nextInv;
+    const routeMap={'Cash':'Cashbox','Card / Visa':'Card Settlement','Wallet':'Wallet Account','Credit':'Customer AR'};
+    const inv={ no, table:t, time:new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}), cashier:'Ahmed H.', total:Math.round(d.total), method:method.replace(' / Visa',''), posting:'Posted', payment:method==='Credit'?'Unpaid':'Paid', ret:'Not Returned', approval:'Not Required', sync:'Synced', lines:o.lines.filter(l=>l.status!=='cancelled').map(l=>({name:l.name,qty:l.qty,price:l.price})), route:routeMap[method], from:o.id };
+    const orders={...this.state.orders}; delete orders[t];
+    const tables=this.state.tables.map(x=>x.id===t?{...x,state:'clearing'}:x);
+    this._payMethod='Cash';
+    this.setState({invoices:[inv,...this.state.invoices],orders,tables,nextInv:this.state.nextInv+1,modal:'invoice',modalData:inv,activeTable:null});
+    setTimeout(()=>{ this.setState(s=>({tables:s.tables.map(x=>x.id===t?{...x,state:'available'}:x)})); },4000);
+  }
+  mInvoice(){
+    const h=this.h, inv=this.state.modalData;
+    return this.modalShell(440,'Payment complete','OpenOrder converted to final invoice',
+      h('div',{style:{textAlign:'center'}},
+        h('div',{style:{width:54,height:54,borderRadius:'50%',background:'var(--su50)',color:'var(--su600)',display:'grid',placeItems:'center',margin:'0 auto 12px'}},this.icon('check',28)),
+        h('div',{style:{fontSize:18,fontWeight:800}},inv.no),
+        h('div',{className:'mono',style:{fontSize:24,fontWeight:800,margin:'6px 0'}},inv.total+'.00 EGP'),
+        h('div',{style:{display:'flex',gap:6,justifyContent:'center',flexWrap:'wrap',margin:'10px 0'}},
+          h('span',{className:'badge b-green'},'Posted'),
+          h('span',{className:'badge '+(inv.payment==='Paid'?'b-green':'b-amber')},inv.payment),
+          h('span',{className:'badge b-blue'},inv.method+' → '+inv.route)),
+        h('div',{className:'muted',style:{fontSize:12.5}},'Table '+inv.table+' freed · receipt printed')),
+      [ h('button',{className:'btn btn-sec',onClick:()=>{this.closeModal();this.setState({posView:'tables'});}},'Back to Tables'),
+        h('button',{className:'btn btn-pri',onClick:()=>{this.closeModal();this.go('sales');}},'View in Sales') ],
+      this.icon('receipt',18));
+  }
+  mShiftOpen(){
+    const h=this.h, denom=[[200,2],[100,3],[50,4],[20,5]];
+    const total=denom.reduce((s,[v,c])=>s+v*c,0);
+    return this.modalShell(520,'Open Shift','POS-01 · Main Drawer · Ahmed H.',
+      h('div',null,
+        h('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:14}},
+          h('div',null,h('label',{className:'lbl'},'Branch'),h('input',{className:'input',defaultValue:'Main Branch',readOnly:true})),
+          h('div',null,h('label',{className:'lbl'},'Terminal'),h('input',{className:'input',defaultValue:'POS-01',readOnly:true}))),
+        h('label',{className:'lbl'},'Opening cash — denomination count'),
+        h('div',{className:'card',style:{padding:0,marginBottom:12}},
+          h('table',{className:'tbl'},
+            h('thead',null,h('tr',null,h('th',null,'Denomination'),h('th',{className:'r'},'Count'),h('th',{className:'r'},'Total'))),
+            h('tbody',null, denom.map(([v,c])=>h('tr',{key:v},h('td',null,v+' EGP'),h('td',{className:'r mono'},c),h('td',{className:'r mono'},v*c)))))),
+        h('div',{style:{display:'flex',justifyContent:'space-between',padding:'10px 12px',background:'var(--su50)',borderRadius:8}},
+          h('span',{style:{fontWeight:700,color:'var(--su700)'}},'Counted opening cash'),
+          h('span',{className:'mono',style:{fontWeight:800,color:'var(--su700)'}},total+'.00 EGP'))),
+      [ h('button',{className:'btn btn-sec',onClick:()=>this.closeModal()},'Cancel'),
+        h('button',{className:'btn btn-pri',onClick:()=>{this.setState({shift:{...this.state.shift,open:true,openedAt:new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})},modal:null});this.toast('Shift opened · drawer '+total+' EGP');}},'Open Shift') ],
+      this.icon('clock',18));
+  }
+  mShiftClose(){
+    const h=this.h;
+    const openTables=this.state.tables.filter(t=>['occupied','kitchen','bill'].includes(t.state));
+    const blocked=this.state.settings.blockShiftCloseOpenTables && openTables.length>0;
+    const rows=[['Opening cash','+500.00'],['Cash sales','+1,240.00'],['Customer cash receipts','+150.00'],['Cash returns','-60.00'],['Cash expenses','-90.00'],['Cash drop','-400.00']];
+    const expected=1340;
+    return this.modalShell(560,'Close Shift','Expected drawer reconciliation',
+      h('div',null,
+        blocked && h('div',{style:{padding:'12px 14px',background:'var(--er50)',border:'1px solid rgba(239,68,68,.3)',borderRadius:10,marginBottom:14,display:'flex',gap:10}},
+          h('span',{style:{color:'var(--er600)'}},this.icon('alert',18)),
+          h('div',null,h('div',{style:{fontWeight:700,color:'var(--er700)'}},openTables.length+' open table(s) still active'),
+            h('div',{style:{fontSize:12.5,color:'var(--er700)',marginTop:2}},'Settle '+openTables.map(t=>t.id).join(', ')+' before closing. Shift close is blocked by settings.'))),
+        h('div',{className:'card',style:{padding:14,marginBottom:12}},
+          rows.map(([l,v])=>h('div',{key:l,style:{display:'flex',justifyContent:'space-between',padding:'4px 0',fontSize:13}},h('span',{className:'muted'},l),h('span',{className:'mono'},v+' EGP'))),
+          h('div',{style:{display:'flex',justifyContent:'space-between',padding:'8px 0 0',marginTop:6,borderTop:'1px solid var(--n200)',fontWeight:800}},h('span',null,'Expected drawer cash'),h('span',{className:'mono'},expected.toFixed(2)+' EGP'))),
+        h('label',{className:'lbl'},'Actual counted cash'),
+        h('input',{className:'input',defaultValue:'1340.00',style:{marginBottom:6}}),
+        h('div',{className:'muted',style:{fontSize:11.5}},'Wastage, card, wallet & credit sales are excluded from drawer cash.')),
+      [ h('button',{className:'btn btn-sec',onClick:()=>this.closeModal()},'Cancel'),
+        h('button',{className:'btn '+(blocked?'btn-danger':'btn-pri'),disabled:blocked,onClick:()=>{this.setState({shift:{...this.state.shift,open:false},modal:null});this.toast('Shift closed · variance 0.00 EGP');}},blocked?'Blocked — open tables':'Close Shift & Post') ],
+      this.icon('clock',18));
+  }
+  mApproval(){
+    const h=this.h, d=this.state.modalData;
+    return this.modalShell(480,'Manager Approval Required', d.reason||'This action needs a manager PIN',
+      h('div',null,
+        h('div',{style:{padding:'12px 14px',background:'var(--wa50)',borderRadius:10,marginBottom:14,fontSize:13}},d.detail),
+        h('label',{className:'lbl'},'Reason'),
+        h('input',{className:'input',placeholder:'e.g. Customer changed order',style:{marginBottom:12}}),
+        h('label',{className:'lbl'},'Manager PIN'),
+        h('input',{className:'input',type:'password',placeholder:'••••',defaultValue:'1234'})),
+      [ h('button',{className:'btn btn-sec',onClick:()=>this.closeModal()},'Cancel'),
+        h('button',{className:'btn btn-warn',onClick:d.onApprove},this.icon('shield',16),'Approve') ],
+      h('span',{style:{color:'var(--wa600)'}},this.icon('shield',18)));
+  }
+  mCancelLine(){
+    const h=this.h, d=this.state.modalData, line=d.line;
+    const prepared=line.status==='prepared';
+    return this.modalShell(480,'Cancel Sent Item', line.name+' × '+line.qty+' · already sent to Bar',
+      h('div',null,
+        h('div',{style:{padding:'12px 14px',background:prepared?'var(--er50)':'var(--wa50)',borderRadius:10,marginBottom:14,fontSize:13,display:'flex',gap:10}},
+          this.icon('alert',16),
+          prepared?'This item is already prepared. Removing it from the bill must be classified as Wastage / Complimentary / Inventory Loss — it cannot be silently deleted.':'This item was sent but not yet prepared. Stock reversal may be allowed per rules.'),
+        h('label',{className:'lbl'},'Disposition'),
+        h('div',{className:'seg',style:{marginBottom:12,flexWrap:'wrap'}},
+          (prepared?['Wastage','Complimentary','Inventory Loss']:['Stock reversal','Wastage']).map((x,i)=>h('button',{key:x,className:i===0?'on':''},x))),
+        h('label',{className:'lbl'},'Reason (required)'),
+        h('input',{className:'input',placeholder:'Reason for cancellation',style:{marginBottom:12}}),
+        h('label',{className:'lbl'},'Manager PIN'),
+        h('input',{className:'input',type:'password',defaultValue:'1234'})),
+      [ h('button',{className:'btn btn-sec',onClick:()=>this.closeModal()},'Keep item'),
+        h('button',{className:'btn btn-danger',onClick:()=>this.confirmCancelLine(d)},this.icon('shield',16),'Approve & Remove') ],
+      h('span',{style:{color:'var(--er600)'}},this.icon('alert',18)));
+  }
+  confirmCancelLine(d){
+    const t=d.table, o=this.state.orders[t];
+    const lines=o.lines.map(l=>l.id===d.line.id?{...l,status:'cancelled'}:l);
+    this.setState({orders:{...this.state.orders,[t]:{...o,lines}},modal:null});
+    this.toast(d.line.name+' cancelled · logged as inventory loss','warn');
+  }
+  mNegStock(){
+    const h=this.h, d=this.state.modalData;
+    const needApproval=this.state.settings.requireApprovalNeg;
+    return this.modalShell(500,'Negative Stock Warning','Iced Mocha requires Chocolate Sauce',
+      h('div',null,
+        h('div',{style:{padding:'14px',background:'var(--wa50)',borderRadius:10,marginBottom:14}},
+          h('div',{style:{fontWeight:700,color:'var(--wa700)',marginBottom:8}},'This sale will create negative stock'),
+          h('div',{style:{display:'grid',gridTemplateColumns:'1fr auto',gap:'4px 16px',fontSize:13}},
+            h('span',null,'Ingredient'),h('span',{className:'mono r',style:{textAlign:'right'}},'Chocolate Sauce'),
+            h('span',null,'Available'),h('span',{className:'mono',style:{textAlign:'right'}},'0.000 L'),
+            h('span',null,'Required'),h('span',{className:'mono',style:{textAlign:'right'}},'0.030 L'),
+            h('span',null,'Resulting balance'),h('span',{className:'mono',style:{textAlign:'right',color:'var(--er600)',fontWeight:700}},'-0.030 L'),
+            h('span',null,'Cost status'),h('span',{style:{textAlign:'right'}},h('span',{className:'badge b-amber'},'Estimated cost')))),
+        h('div',{className:'muted',style:{fontSize:12}},'Costing: '+this.state.settings.negCosting+'. A negative-stock alert will be raised for the manager.')),
+      [ h('button',{className:'btn btn-sec',onClick:()=>this.closeModal()},'Cancel'),
+        needApproval
+          ? h('button',{className:'btn btn-warn',onClick:()=>this.openModal('approval',{reason:'Negative stock sale',detail:'Approve selling Iced Mocha with Chocolate Sauce at -0.030 L (estimated cost).',onApprove:()=>{this.commitAdd(d.p.id);this.toast('Approved · sold with estimated cost','warn');}})},this.icon('shield',16),'Request Approval')
+          : h('button',{className:'btn btn-warn',onClick:()=>this.commitAdd(d.p.id)},'Continue with estimated cost') ],
+      h('span',{style:{color:'var(--wa600)'}},this.icon('alert',18)));
+  }
+
+  kpi(lbl,val,sub,subcol,ic,icbg){
+    const h=this.h;
+    return h('div',{className:'kpi'},
+      h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'flex-start'}},
+        h('div',{className:'kpi-lbl'},lbl),
+        h('div',{style:{width:30,height:30,borderRadius:8,background:icbg,display:'grid',placeItems:'center',color:'#fff'}},this.icon(ic,16))),
+      h('div',{className:'kpi-val'},val),
+      h('div',{className:'kpi-sub',style:{color:subcol||'var(--n500)'}},sub));
+  }
+  renderDashboard(){
+    const h=this.h;
+    const openTables=this.state.tables.filter(t=>['occupied','kitchen','bill'].includes(t.state));
+    const openValue=openTables.reduce((s,t)=>s+this.orderTotal(this.state.orders[t.id]),0);
+    const negItems=this.INGREDIENTS.filter(i=>i.stock<=0);
+    return h('div',{className:'page-narrow'},
+      h('div',{className:'kpi-grid',style:{marginBottom:16}},
+        this.kpi('Today net sales','1,920 EGP','+12% vs yesterday','var(--su600)','chart','var(--pr600)'),
+        this.kpi('Invoices paid','24','Avg 80 EGP / ticket',null,'receipt','var(--su600)'),
+        this.kpi('Open tables',String(openTables.length),openValue.toFixed(0)+' EGP unbilled','var(--in700)','grid','var(--in500)'),
+        this.kpi('Cash in drawer','1,340 EGP','Shift open 08:12',null,'money','var(--n800)')),
+      h('div',{style:{display:'grid',gridTemplateColumns:'1.6fr 1fr',gap:16}},
+        h('div',{className:'card'},
+          h('div',{className:'card-h'},h('span',{className:'card-t'},'Open tables right now'),h('button',{className:'btn btn-sec btn-sm',onClick:()=>this.go('pos')},'Go to POS')),
+          h('div',{style:{padding:'4px 0'}},
+            openTables.length? openTables.map(t=>{const o=this.state.orders[t.id];return h('div',{key:t.id,style:{display:'flex',alignItems:'center',gap:12,padding:'10px 16px',borderBottom:'1px solid var(--n100)'}},
+              h('span',{className:'badge '+this.TABLE_STATES[t.state].badge},this.TABLE_STATES[t.state].label),
+              h('span',{style:{fontWeight:700}},'Table '+t.id),
+              h('span',{className:'muted',style:{fontSize:12}},t.section+' · '+(o?o.guests+' guests · '+o.openedAt:'')),
+              h('span',{className:'mono',style:{marginLeft:'auto',fontWeight:700}},this.orderTotal(o).toFixed(0)+' EGP'),
+              h('button',{className:'btn btn-ghost btn-sm',onClick:()=>this.setState({route:'pos',activeTable:t.id,posView:'order'})},this.icon('chevR',16)));}) : h('div',{className:'empty'},'No open tables'))),
+        h('div',{style:{display:'flex',flexDirection:'column',gap:16}},
+          h('div',{className:'card'},
+            h('div',{className:'card-h'},h('span',{className:'card-t'},'Alerts')),
+            h('div',{className:'card-b',style:{display:'flex',flexDirection:'column',gap:10}},
+              negItems.map(i=>h('div',{key:i.id,style:{display:'flex',gap:9,alignItems:'center',fontSize:13}},h('span',{className:'badge b-amber'},'Neg stock'),h('span',null,i.name+' · '+i.stock.toFixed(2)+' '+i.unit))),
+              h('div',{style:{display:'flex',gap:9,alignItems:'center',fontSize:13}},h('span',{className:'badge b-cyan'},'Sync'),h('span',null,'1 invoice pending sync')),
+              h('div',{style:{display:'flex',gap:9,alignItems:'center',fontSize:13}},h('span',{className:'badge b-red'},'Low'),h('span',null,'Coffee Beans below reorder')))),
+          h('div',{className:'card'},
+            h('div',{className:'card-h'},h('span',{className:'card-t'},'Payment mix · today')),
+            h('div',{className:'card-b',style:{display:'flex',flexDirection:'column',gap:9}},
+              [['Cash','Cashbox',1240,'var(--su500)'],['Card','Card Settlement',680,'var(--in500)'],['Wallet','Wallet Account',90,'var(--vi500)'],['Credit','Customer AR',300,'var(--wa500)']].map(([m,dest,v,c])=>
+                h('div',{key:m},
+                  h('div',{style:{display:'flex',justifyContent:'space-between',fontSize:12.5,marginBottom:3}},h('span',null,h('b',null,m),h('span',{className:'muted'},' → '+dest)),h('span',{className:'mono',style:{fontWeight:700}},v+' EGP')),
+                  h('div',{style:{height:7,background:'var(--n100)',borderRadius:4}},h('div',{style:{height:7,borderRadius:4,background:c,width:(v/1240*100)+'%'}})))))))));
+  }
+  openTable(t){
+    const id='OO-00'+this.state.nextOrder;
+    const orders={...this.state.orders, [t.id]:{ id, table:t.id, section:t.section, openedAt:new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}), guests:2, lines:[] }};
+    const tables=this.state.tables.map(x=>x.id===t.id?{...x,state:'occupied'}:x);
+    this.setState({orders,tables,nextOrder:this.state.nextOrder+1,modal:null,activeTable:t.id,posView:'order'});
+    this.toast('Table '+t.id+' opened · '+id+' created');
+  }
+  tableClick(t){
+    if(t.state==='available') return this.openModal('openTable',t);
+    if(t.state==='oos') return this.toast('Table '+t.id+' is out of service','warn');
+    if(t.state==='clearing') return this.toast('Table '+t.id+' is being cleared','info');
+    this.setState({activeTable:t.id,posView:'order'});
+  }
+  renderTables(){
+    const h=this.h, tables=this.state.tables;
+    const counts={}; Object.keys(this.TABLE_STATES).forEach(k=>counts[k]=tables.filter(t=>t.state===k).length);
+    const legend=h('div',{style:{display:'flex',gap:14,flexWrap:'wrap',alignItems:'center'}},
+      Object.keys(this.TABLE_STATES).map(k=>{const s=this.TABLE_STATES[k];return h('div',{key:k,style:{display:'flex',alignItems:'center',gap:6,fontSize:12.5,fontWeight:600,color:'var(--n600)'}},
+        h('span',{className:'dot',style:{background:s.dot}}), s.label, h('span',{className:'muted',style:{fontWeight:700}},counts[k]));}));
+    return h('div',null,
+      h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:18,gap:16,flexWrap:'wrap'}},
+        h('div',null,
+          h('div',{className:'seg',style:{marginBottom:12}},
+            h('button',{className:'on'},'Dine-in'),
+            h('button',null,'Takeaway'),
+            h('button',null,'Delivery')),
+          legend),
+        h('div',{style:{display:'flex',gap:10}},
+          h('button',{className:'btn btn-sec',onClick:()=>this.toast('Takeaway order — no table required','info')}, this.icon('cart',16),'New Takeaway'),
+          h('button',{className:'btn btn-pri',onClick:()=>this.go('kitchen')}, this.icon('flame',16),'Kitchen Display'))),
+      this.SECTIONS.map(sec=>{
+        const list=tables.filter(t=>t.section===sec);
+        return h('div',{key:sec,style:{marginBottom:24}},
+          h('div',{style:{display:'flex',alignItems:'center',gap:10,marginBottom:12}},
+            h('span',{style:{fontSize:13,fontWeight:800,letterSpacing:'.03em',textTransform:'uppercase',color:'var(--n700)'}},sec),
+            h('span',{className:'muted',style:{fontSize:12}},list.length+' tables'),
+            sec==='VIP' && h('span',{className:'badge b-violet'},'Premium')),
+          h('div',{style:{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(150px,1fr))',gap:12}},
+            list.map(t=>this.tableTile(t))));
+      }));
+  }
+  tableTile(t){
+    const h=this.h, s=this.TABLE_STATES[t.state], o=this.state.orders[t.id];
+    const total=this.orderTotal(o);
+    return h('button',{key:t.id,className:'ttile '+s.cls,onClick:()=>this.tableClick(t)},
+      h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'flex-start'}},
+        h('div',{className:'ttile-name'},t.name),
+        h('span',{className:'dot',style:{background:s.dot,marginTop:6}})),
+      h('div',null,
+        h('div',{style:{fontSize:11.5,fontWeight:700,marginBottom:4},className:t.state==='oos'?'muted':''},s.label),
+        o
+          ? h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'baseline'}},
+              h('span',{className:'muted',style:{fontSize:11}},o.guests+'p · '+o.openedAt),
+              h('span',{className:'mono',style:{fontSize:13,fontWeight:800}},total>0?total.toFixed(0):''))
+          : h('div',{className:'muted',style:{fontSize:11}}, t.state==='oos'?'Maintenance':'Tap to open')));
+  }
+  addItem(pid){
+    const t=this.state.activeTable, o=this.state.orders[t]; if(!o) return;
+    const p=this.PRODUCTS.find(x=>x.id===pid);
+    if(p.id==='p1' && this.INGREDIENTS.find(i=>i.id==='i3').stock<=0){
+      // chocolate sauce out -> negative stock path on Iced Mocha
+      if(this.state.settings.showNegWarning){ return this.openModal('negStock',{p,o,table:t}); }
+    }
+    this.commitAdd(pid);
+  }
+  commitAdd(pid){
+    const t=this.state.activeTable;
+    const p=this.PRODUCTS.find(x=>x.id===pid);
+    const o=this.state.orders[t];
+    const ex=o.lines.find(l=>l.pid===pid && l.status==='draft');
+    let lines;
+    if(ex){ lines=o.lines.map(l=>l===ex?{...l,qty:l.qty+1}:l); }
+    else { lines=[...o.lines,{id:'l'+Date.now(), pid, name:p.name, qty:1, price:p.price, status:'draft', note:''}]; }
+    this.setState({orders:{...this.state.orders,[t]:{...o,lines}},flashLine:pid,modal:null});
+    setTimeout(()=>this.setState({flashLine:null}),700);
+  }
+  changeQty(lid,d){
+    const t=this.state.activeTable, o=this.state.orders[t];
+    let lines=o.lines.map(l=>l.id===lid?{...l,qty:Math.max(0,l.qty+d)}:l).filter(l=>!(l.id===lid&&l.qty===0));
+    this.setState({orders:{...this.state.orders,[t]:{...o,lines}}});
+  }
+  removeLine(lid){
+    const t=this.state.activeTable, o=this.state.orders[t];
+    const line=o.lines.find(l=>l.id===lid);
+    if(line.status!=='draft'){ return this.openModal('cancelLine',{line,table:t}); }
+    this.setState({orders:{...this.state.orders,[t]:{...o,lines:o.lines.filter(l=>l.id!==lid)}}});
+  }
+  sendKitchen(){
+    const t=this.state.activeTable, o=this.state.orders[t];
+    const drafts=o.lines.filter(l=>l.status==='draft');
+    if(!drafts.length) return this.toast('No unsent items to send','warn');
+    const lines=o.lines.map(l=>l.status==='draft'?{...l,status:'sent'}:l);
+    const tk={ id:'K-'+(210+this.state.kitchen.length), table:t, station:'Bar', items:drafts.map(l=>({n:l.name,q:l.qty})), status:'preparing', time:new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}), age:'now' };
+    const tables=this.state.tables.map(x=>x.id===t?{...x,state:'kitchen'}:x);
+    this.setState({orders:{...this.state.orders,[t]:{...o,lines}},kitchen:[tk,...this.state.kitchen],tables});
+    this.toast(drafts.reduce((s,l)=>s+l.qty,0)+' item(s) sent to Bar · ticket '+tk.id+' printed');
+  }
+  renderOrder(){
+    const h=this.h, t=this.state.activeTable, o=this.state.orders[t];
+    if(!o) return h('div',{className:'empty'},'No open order. ',h('button',{className:'btn btn-sec btn-sm',onClick:()=>this.setState({posView:'tables'})},'Back to tables'));
+    const tbl=this.state.tables.find(x=>x.id===t);
+    const active=o.lines.filter(l=>l.status!=='cancelled');
+    const drafts=active.filter(l=>l.status==='draft');
+    const subtotal=active.reduce((s,l)=>s+l.qty*l.price,0);
+    const tax=subtotal*0.14, total=subtotal+tax;
+    const cats=[...new Set(this.PRODUCTS.map(p=>p.cat))];
+    // LEFT: menu
+    const menu=h('div',{style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',gap:16}},
+      h('div',{style:{display:'flex',alignItems:'center',gap:10}},
+        h('button',{className:'btn btn-ghost btn-sm',onClick:()=>this.setState({posView:'tables'})}, this.icon('chevL',16),'Tables'),
+        h('div',{className:'badge b-blue'},'Dine-in'),
+        h('span',{className:'muted',style:{fontSize:12.5}},'Tap a product to add a draft line')),
+      cats.map(c=>h('div',{key:c},
+        h('div',{style:{fontSize:12,fontWeight:800,textTransform:'uppercase',letterSpacing:'.04em',color:'var(--n500)',marginBottom:10}},c),
+        h('div',{style:{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(140px,1fr))',gap:10}},
+          this.PRODUCTS.filter(p=>p.cat===c).map(p=>{
+            const negOut=p.id==='p1'&&this.INGREDIENTS.find(i=>i.id==='i3').stock<=0;
+            return h('button',{key:p.id,className:'tile'+(this.state.flashLine===p.id?' flash':''),onClick:()=>this.addItem(p.id)},
+              h('div',{className:'tile-ic',style:{background:p.color+'22'}},p.emoji),
+              h('div',{style:{fontWeight:700,fontSize:13.5}},p.name),
+              h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:'auto'}},
+                h('span',{className:'mono',style:{fontWeight:800}},p.price+' EGP'),
+                negOut?h('span',{className:'badge b-amber'},'Neg'):(p.type==='recipe'?h('span',{className:'muted',style:{fontSize:10.5}},'recipe'):null)));
+          }))) ));
+    // RIGHT: order panel
+    const lineRow=(l)=>{
+      const st={draft:['b-gray','Draft'],sent:['b-amber','Sent'],prepared:['b-blue','Prepared']}[l.status];
+      return h('div',{key:l.id,style:{padding:'10px 0',borderBottom:'1px solid var(--n100)',display:'flex',gap:10,alignItems:'flex-start'}},
+        h('div',{style:{flex:1,minWidth:0}},
+          h('div',{style:{display:'flex',gap:7,alignItems:'center'}},
+            h('span',{style:{fontWeight:700,fontSize:13.5}},l.name),
+            h('span',{className:'badge '+st[0]},st[1]),
+            l.status!=='draft'&&this.icon('lock',12)),
+          l.note&&h('div',{className:'muted',style:{fontSize:11.5,marginTop:2}},'“'+l.note+'”'),
+          h('div',{className:'muted',style:{fontSize:11.5,marginTop:2}},l.price+' EGP each')),
+        l.status==='draft'
+          ? h('div',{style:{display:'flex',alignItems:'center',gap:4}},
+              h('button',{className:'btn btn-ghost btn-sm',style:{width:28,padding:0},onClick:()=>this.changeQty(l.id,-1)},this.icon('minus',14)),
+              h('span',{className:'mono',style:{width:20,textAlign:'center',fontWeight:700}},l.qty),
+              h('button',{className:'btn btn-ghost btn-sm',style:{width:28,padding:0},onClick:()=>this.changeQty(l.id,1)},this.icon('plus',14)))
+          : h('span',{className:'mono',style:{fontWeight:700,width:36,textAlign:'center'}},'×'+l.qty),
+        h('span',{className:'mono',style:{width:62,textAlign:'right',fontWeight:800}},(l.qty*l.price).toFixed(0)),
+        h('button',{className:'btn btn-ghost btn-sm',style:{width:28,padding:0,color:'var(--er600)'},onClick:()=>this.removeLine(l.id)},this.icon(l.status==='draft'?'x':'lock',13)));
+    };
+    const panel=h('div',{style:{width:420,flex:'0 0 420px',display:'flex',flexDirection:'column'}},
+      h('div',{className:'card',style:{display:'flex',flexDirection:'column',maxHeight:'calc(100vh - 130px)'}},
+        h('div',{style:{padding:'16px',borderBottom:'1px solid var(--n200)'}},
+          h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center'}},
+            h('div',null,
+              h('div',{style:{fontSize:19,fontWeight:800}},'Table '+t+' · '+tbl.section),
+              h('div',{className:'muted mono',style:{fontSize:12}},o.id+' · '+o.guests+' guests · opened '+o.openedAt)),
+            h('span',{className:'badge '+this.TABLE_STATES[tbl.state].badge},this.TABLE_STATES[tbl.state].label)),
+          h('div',{style:{marginTop:10,padding:'8px 10px',background:'var(--in50)',borderRadius:8,fontSize:11.5,color:'var(--in700)',display:'flex',gap:7}},
+            this.icon('alert',14),'Open Order — not a sales invoice. Excluded from reports until paid.')),
+        h('div',{style:{flex:1,overflowY:'auto',padding:'4px 16px'}},
+          active.length? active.map(lineRow) : h('div',{className:'empty',style:{padding:24}},'No items yet. Add from the menu.')),
+        drafts.length>0 && h('div',{style:{padding:'10px 16px',background:'var(--wa50)',borderTop:'1px solid var(--n200)',display:'flex',justifyContent:'space-between',alignItems:'center'}},
+          h('div',{style:{fontSize:12,fontWeight:700,color:'var(--wa700)'}},drafts.reduce((s,l)=>s+l.qty,0)+' unsent draft item(s)'),
+          h('button',{className:'btn btn-warn btn-sm',onClick:()=>this.sendKitchen()},this.icon('send',15),'Send to Kitchen / Bar')),
+        h('div',{style:{padding:'14px 16px',borderTop:'1px solid var(--n200)',background:'var(--n50)'}},
+          this.totRow('Subtotal',subtotal.toFixed(2)+' EGP'),
+          this.totRow('VAT 14% (not revenue)',tax.toFixed(2)+' EGP',true),
+          h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:8,paddingTop:10,borderTop:'1px solid var(--n200)'}},
+            h('span',{style:{fontWeight:800,fontSize:15}},'Total'),
+            h('span',{className:'mono',style:{fontWeight:800,fontSize:22}},total.toFixed(2)+' EGP')),
+          drafts.length>0 && h('div',{className:'muted',style:{fontSize:11.5,marginTop:8,textAlign:'center'}},'Send draft items before taking payment'),
+          h('button',{className:'btn btn-success btn-xl',style:{width:'100%',marginTop:12},disabled:active.length===0||drafts.length>0,onClick:()=>this.openModal('payment',{table:t,total,subtotal,tax})},
+            this.icon('money',18),'Pay & Close Table · '+total.toFixed(0)+' EGP'))));
+    return h('div',{style:{display:'flex',gap:20,alignItems:'flex-start'}}, menu, panel);
+  }
+  totRow(l,v,muted){ const h=this.h; return h('div',{style:{display:'flex',justifyContent:'space-between',fontSize:12.5,padding:'3px 0',color:muted?'var(--n500)':'var(--n700)'}}, h('span',null,l), h('span',{className:'mono'},v)); }
+  bumpTicket(id,to){
+    this.setState({kitchen:this.state.kitchen.map(k=>k.id===id?{...k,status:to,age:'now'}:k)});
+    if(to==='ready') this.toast('Ticket '+id+' ready to serve');
+  }
+  renderKitchen(){
+    const h=this.h;
+    const cols=[['preparing','Preparing','b-amber','var(--wa500)'],['ready','Ready to serve','b-green','var(--su500)'],['served','Served','b-gray','var(--n400)']];
+    return h('div',null,
+      h('div',{style:{display:'flex',justifyContent:'space-between',marginBottom:16,alignItems:'center'}},
+        h('div',{style:{display:'flex',gap:10,alignItems:'center'}},h('span',{className:'badge b-amber live'},'● LIVE'),h('span',{className:'muted',style:{fontSize:13}},'Bar Station · auto-refresh')),
+        h('button',{className:'btn btn-sec btn-sm',onClick:()=>this.go('pos')},this.icon('chevL',16),'Back to tables')),
+      h('div',{style:{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:16,alignItems:'start'}},
+        cols.map(([st,label,bc,col])=>{
+          const tickets=this.state.kitchen.filter(k=>k.status===st);
+          return h('div',{key:st},
+            h('div',{style:{display:'flex',alignItems:'center',gap:8,marginBottom:12}},h('span',{className:'dot',style:{background:col}}),h('span',{style:{fontWeight:800}},label),h('span',{className:'muted'},tickets.length)),
+            h('div',{style:{display:'flex',flexDirection:'column',gap:12}},
+              tickets.length?tickets.map(k=>h('div',{key:k.id,className:'card',style:{borderTop:'3px solid '+col,padding:14}},
+                h('div',{style:{display:'flex',justifyContent:'space-between',marginBottom:8}},
+                  h('div',null,h('span',{style:{fontWeight:800,fontSize:15}},'Table '+k.table),h('span',{className:'muted mono',style:{fontSize:11.5,marginLeft:8}},k.id)),
+                  h('span',{className:'badge '+bc},k.age)),
+                h('div',{style:{display:'flex',flexDirection:'column',gap:4,margin:'4px 0 10px'}},
+                  k.items.map((it,i)=>h('div',{key:i,style:{display:'flex',justifyContent:'space-between',fontSize:13.5}},h('span',{style:{fontWeight:600}},it.n),h('span',{className:'mono',style:{fontWeight:700}},'×'+it.q)))),
+                st==='preparing'&&h('button',{className:'btn btn-success btn-sm',style:{width:'100%'},onClick:()=>this.bumpTicket(k.id,'ready')},this.icon('check',15),'Mark ready'),
+                st==='ready'&&h('button',{className:'btn btn-sec btn-sm',style:{width:'100%'},onClick:()=>this.bumpTicket(k.id,'served')},'Mark served'))):h('div',{className:'empty',style:{fontSize:12}},'No tickets')));
+        })));
+  }
+  badgeFor(kind,val){
+    const map={
+      posting:{Posted:'b-green',Draft:'b-gray',Cancelled:'b-red',Void:'b-red'},
+      payment:{Paid:'b-green','Partially Paid':'b-amber',Unpaid:'b-amber',Overpaid:'b-cyan','N/A':'b-gray'},
+      ret:{'Not Returned':'b-gray','Partially Returned':'b-amber',Returned:'b-red'},
+      approval:{'Not Required':'b-gray',Pending:'b-amber',Approved:'b-green',Rejected:'b-red'},
+      sync:{Synced:'b-green','Pending Sync':'b-amber',Failed:'b-red'},
+    };
+    return this.h('span',{className:'badge '+((map[kind]||{})[val]||'b-gray')},val);
+  }
+  renderSales(){
+    const h=this.h, sel=this.state.selInv, inv=this.state.invoices.find(i=>i.no===sel);
+    if(inv) return this.renderInvoiceDetail(inv);
+    return h('div',null,
+      h('div',{style:{display:'flex',gap:10,marginBottom:16,flexWrap:'wrap'}},
+        ['all','Paid','Unpaid','Cancelled'].map(f=>h('button',{key:f,className:'chip'+((this.state.invFilter||'all')===f?' on':''),onClick:()=>this.setState({invFilter:f})},f==='all'?'All invoices':f))),
+      h('div',{className:'card',style:{overflow:'hidden'}},
+        h('div',{className:'scroll-x'},
+          h('table',{className:'tbl'},
+            h('thead',null,h('tr',null,['Invoice','Table','Time','Total','Posting','Payment','Returns','Approval','Sync',''].map(c=>h('th',{key:c,className:c==='Total'?'r':''},c)))),
+            h('tbody',null,
+              this.state.invoices.filter(i=>{const f=this.state.invFilter||'all';return f==='all'||(f==='Paid'&&i.payment==='Paid')||(f==='Unpaid'&&i.payment==='Unpaid')||(f==='Cancelled'&&i.posting==='Cancelled');}).map(i=>
+                h('tr',{key:i.no,style:{cursor:'pointer'},onClick:()=>this.setState({selInv:i.no})},
+                  h('td',null,h('span',{className:'mono',style:{fontWeight:700}},i.no),i.from&&h('div',{className:'muted',style:{fontSize:11}},'from '+i.from)),
+                  h('td',null,i.table),
+                  h('td',{className:'muted'},i.time),
+                  h('td',{className:'r mono',style:{fontWeight:700}},i.total+'.00'),
+                  h('td',null,this.badgeFor('posting',i.posting)),
+                  h('td',null,this.badgeFor('payment',i.payment)),
+                  h('td',null,this.badgeFor('ret',i.ret)),
+                  h('td',null,this.badgeFor('approval',i.approval)),
+                  h('td',null,this.badgeFor('sync',i.sync)),
+                  h('td',null,this.icon('chevR',16)))))))));
+  }
+  renderInvoiceDetail(inv){
+    const h=this.h;
+    const sub=inv.lines.reduce((s,l)=>s+(l.price?l.qty*l.price:0),0)||inv.total;
+    return h('div',{className:'page-narrow'},
+      h('button',{className:'btn btn-ghost btn-sm',style:{marginBottom:14},onClick:()=>this.setState({selInv:null})},this.icon('chevL',16),'Back to Sales'),
+      h('div',{className:'card',style:{marginBottom:16}},
+        h('div',{style:{padding:'18px 20px',borderBottom:'1px solid var(--n200)',display:'flex',justifyContent:'space-between',alignItems:'flex-start',flexWrap:'wrap',gap:12}},
+          h('div',null,
+            h('div',{style:{fontSize:20,fontWeight:800}},inv.no),
+            h('div',{className:'muted',style:{fontSize:12.5,marginTop:2}},'Table '+inv.table+' · '+inv.time+' · '+inv.cashier+(inv.customer?' · '+inv.customer:'')+(inv.from?' · from '+inv.from:''))),
+          h('div',{style:{display:'flex',gap:6,flexWrap:'wrap'}},
+            this.badgeFor('posting',inv.posting),this.badgeFor('payment',inv.payment),this.badgeFor('ret',inv.ret),this.badgeFor('approval',inv.approval),this.badgeFor('sync',inv.sync))),
+        h('div',{style:{padding:'8px 20px'}},
+          inv.lines.map((l,i)=>h('div',{key:i,style:{display:'flex',justifyContent:'space-between',padding:'9px 0',borderBottom:'1px solid var(--n100)'}},
+            h('span',null,h('b',null,l.name),h('span',{className:'muted'},' × '+l.qty)),
+            h('span',{className:'mono'},(l.price?(l.qty*l.price).toFixed(2):'—')+' EGP'))),
+          h('div',{style:{display:'flex',justifyContent:'space-between',padding:'10px 0 4px',marginTop:4,borderTop:'1px solid var(--n200)'}},h('span',{className:'muted'},'Subtotal (excl. tax)'),h('span',{className:'mono'},sub.toFixed(2)+' EGP')),
+          h('div',{style:{display:'flex',justifyContent:'space-between',padding:'2px 0'}},h('span',{className:'muted'},'VAT 14% (Tax Payable, not revenue)'),h('span',{className:'mono'},(sub*0.14).toFixed(2)+' EGP')),
+          h('div',{style:{display:'flex',justifyContent:'space-between',padding:'8px 0',fontWeight:800,fontSize:16}},h('span',null,'Total'),h('span',{className:'mono'},inv.total+'.00 EGP')))),
+      h('div',{className:'card'},
+        h('div',{className:'card-h'},h('span',{className:'card-t'},'Movement effects'),h('span',{className:'muted',style:{fontSize:11.5}},'ledger-driven')),
+        h('div',{className:'card-b',style:{display:'flex',flexDirection:'column',gap:10}},
+          h('div',{style:{display:'flex',gap:10,alignItems:'center'}},h('span',{className:'badge b-blue'},'Payment'),h('span',null,inv.method+' '+inv.total+'.00 EGP → '),h('b',null,inv.route)),
+          h('div',{style:{display:'flex',gap:10,alignItems:'center'}},h('span',{className:'badge b-gray'},'Stock'),h('span',null,'SALE_OUT / RECIPE_CONSUME for '+inv.lines.length+' line(s)')),
+          h('div',{style:{display:'flex',gap:10,alignItems:'center'}},h('span',{className:'badge b-amber'},'Tax'),h('span',null,'Tax Payable +'+(sub*0.14).toFixed(2)+' EGP')),
+          inv.method==='Credit'&&h('div',{style:{display:'flex',gap:10,alignItems:'center'}},h('span',{className:'badge b-amber'},'AR'),h('span',null,'CustomerARMovement +'+inv.total+'.00 EGP')))));
+  }
+  renderSettings(){
+    const h=this.h, tab=this.state.settingsTab, S=this.state.settings;
+    const tabs=[['pos','POS'],['tables','Table Management'],['negstock','Negative Stock'],['payments','Payment Methods'],['general','General']];
+    const tg=(k,label,desc)=>h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',gap:16,padding:'12px 0',borderBottom:'1px solid var(--n100)'}},
+      h('div',null,h('div',{style:{fontWeight:600,fontSize:13.5}},label),desc&&h('div',{className:'muted',style:{fontSize:12,marginTop:2}},desc)),
+      h('button',{className:'toggle'+(S[k]?' on':''),onClick:()=>this.setState({settings:{...S,[k]:!S[k]}})}));
+    let body;
+    if(tab==='pos') body=h('div',{className:'card-b'},
+      tg('autoSendKitchen','Auto-send to Kitchen on item add','OFF by default — items stay as Draft until the cashier presses Send to Kitchen / Bar.'),
+      h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'12px 0',borderBottom:'1px solid var(--n100)'}},h('div',{style:{fontWeight:600,fontSize:13.5}},'Default order type'),h('div',{className:'seg'},['Dine-in','Takeaway','Delivery'].map((x,i)=>h('button',{key:x,className:i===0?'on':''},x)))),
+      tg('blockShiftCloseOpenTables','Block shift close while tables are open','Recommended for table service — cashier must settle all open orders first.'),
+      h('div',{style:{padding:'12px 0'}},h('div',{style:{fontWeight:600,fontSize:13.5}},'Require active shift before sale'),h('div',{className:'muted',style:{fontSize:12,marginTop:2}},'On — POS is blocked until a shift is opened.')));
+    else if(tab==='tables') body=h('div',{className:'card-b'},
+      h('div',{style:{fontWeight:700,marginBottom:6}},'Sections & tables'),
+      h('div',{style:{display:'flex',gap:10,flexWrap:'wrap',marginBottom:16}},
+        this.SECTIONS.map(s=>{const n=this.state.tables.filter(t=>t.section===s).length;return h('div',{key:s,className:'card',style:{padding:'12px 16px',minWidth:140}},h('div',{style:{fontWeight:700}},s),h('div',{className:'muted',style:{fontSize:12}},n+' tables'));})),
+      h('div',{style:{padding:'10px 12px',background:'var(--in50)',borderRadius:8,fontSize:12.5,color:'var(--in700)',marginBottom:14}},'Table Service + Open Orders are enabled in MVP Core for this tenant. Each table opens an OpenOrder that accumulates items until one final payment.'),
+      tg('blockShiftCloseOpenTables','Block shift close while tables are open'),
+      h('div',{style:{padding:'12px 0'}},h('div',{style:{fontWeight:600,fontSize:13.5}},'Table numbering'),h('div',{className:'muted',style:{fontSize:12,marginTop:2}},'T1–T20 · Indoor T1–T10, Outdoor T11–T16, VIP T17–T20')));
+    else if(tab==='negstock') body=h('div',{className:'card-b'},
+      h('div',{style:{padding:'10px 12px',background:'var(--wa50)',borderRadius:8,fontSize:12.5,color:'var(--wa700)',marginBottom:8}},'Negative Stock Sale ≠ Credit Sale. Allowing negative stock keeps sales moving but may require later cost review.'),
+      tg('allowNegativeStock','Allow negative stock sale'),
+      tg('requireApprovalNeg','Require manager approval'),
+      tg('showNegWarning','Show cashier warning'),
+      h('div',{style:{padding:'12px 0',borderBottom:'1px solid var(--n100)'}},h('div',{style:{fontWeight:600,fontSize:13.5,marginBottom:6}},'Scope'),h('div',{className:'seg'},['Products only','Ingredients only','Products and ingredients'].map(x=>h('button',{key:x,className:x===S.negScope?'on':'',onClick:()=>this.setState({settings:{...S,negScope:x}})},x)))),
+      h('div',{style:{padding:'12px 0'}},h('div',{style:{fontWeight:600,fontSize:13.5,marginBottom:6}},'Costing method'),h('div',{className:'seg'},['Last known average cost','Default purchase price','Zero cost + adjust later'].map(x=>h('button',{key:x,className:x===S.negCosting?'on':'',onClick:()=>this.setState({settings:{...S,negCosting:x}})},x)))));
+    else if(tab==='payments') body=h('div',{style:{padding:0}},h('table',{className:'tbl'},
+      h('thead',null,h('tr',null,['Method','Routes to','Requires reference','Enabled'].map(c=>h('th',{key:c},c)))),
+      h('tbody',null,[['Cash','Cashbox / Drawer','No'],['Card / Visa','Card Settlement','Yes'],['Wallet','Wallet Account','Yes'],['Credit','Customer AR','Customer required']].map(([m,r,ref])=>
+        h('tr',{key:m},h('td',null,h('b',null,m)),h('td',null,h('span',{className:'badge b-blue'},r)),h('td',{className:'muted'},ref),h('td',null,h('span',{className:'toggle on'})))))));
+    else body=h('div',{className:'card-b'},
+      h('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14}},
+        [['Tenant','Come Back Café'],['Branch','Main Branch'],['Currency','EGP — Egyptian Pound'],['Timezone','Africa/Cairo'],['VAT rate','14%'],['Terminal','POS-01']].map(([l,v])=>h('div',{key:l},h('label',{className:'lbl'},l),h('input',{className:'input',defaultValue:v,readOnly:true})))));
+    return h('div',{className:'page-narrow'},
+      h('div',{style:{display:'flex',gap:6,marginBottom:16,flexWrap:'wrap'}},
+        tabs.map(([k,l])=>h('button',{key:k,className:'chip'+(tab===k?' on':''),onClick:()=>this.setState({settingsTab:k})},l))),
+      h('div',{className:'card'},h('div',{className:'card-h'},h('span',{className:'card-t'},tabs.find(t=>t[0]===tab)[1]+' settings')),body));
+  }
+/*END*/}
+</script>
+</body>
+</html>

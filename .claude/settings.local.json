@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install *)",
+      "Bash(npx tsc *)",
+      "Bash(sed -n '65,75p' src/types/index.ts)",
+      "Bash(sed -n '4,30p' src/components/layout/Sidebar.tsx)",
+      "Bash(sed -n '4,15p' src/components/layout/OfflineBanner.tsx)",
+      "Bash(npx vite *)",
+      "Bash(pip install *)",
+      "Bash(python -c \"import django; print\\(django.__version__\\)\")",
+      "Bash(python manage.py makemigrations)",
+      "Bash(python manage.py migrate)",
+      "Bash(python manage.py check)",
+      "Bash(python manage.py shell -c \"import sys; print\\(sys.executable\\)\")",
+      "Bash(powershell *)",
+      "Bash(python *)",
+      "Bash(xxd)"
+    ]
+  }
+}

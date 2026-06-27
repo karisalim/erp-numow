@@ -1,0 +1,301 @@
+{
+  "total": 42,
+  "passed": 42,
+  "failed": 0,
+  "results": [
+    {
+      "label": "Cashier: GET /products/",
+      "expected": 200,
+      "actual": 200,
+      "passed": true,
+      "extra": ""
+    },
+    {
+      "label": "Cashier: DELETE /products/1/",
+      "expected": 403,
+      "actual": 403,
+      "passed": true,
+      "extra": ""
+    },
+    {
+      "label": "Cashier: GET /dashboard/summary",
+      "expected": 403,
+      "actual": 403,
+      "passed": true,
+      "extra": ""
+    },
+    {
+      "label": "Cashier: POST /products/",
+      "expected": 403,
+      "actual": 403,
+      "passed": true,
+      "extra": ""
+    },
+    {
+      "label": "Cashier: GET /auth/users/",
+      "expected": 403,
+      "actual": 403,
+      "passed": true,
+      "extra": ""
+    },
+    {
+      "label": "Cashier: POST /inventory/purchase",
+      "expected": 403,
+      "actual": 403,
+      "passed": true,
+      "extra": ""
+    },
+    {
+      "label": "Manager: POST /products/",
+      "expected": 201,
+      "actual": 201,
+      "passed": true,
+      "extra": ""
+    },
+    {
+      "label": "Manager: POST /inventory/purchase/",
+      "expected": 201,
+      "actual": 201,
+      "passed": true,
+      "extra": ""
+    },
+    {
+      "label": "Manager: GET /dashboard/summary/",
+      "expected": 200,
+      "actual": 200,
+      "passed": true,
+      "extra": ""
+    },
+    {
+      "label": "Manager: GET /auth/users/",
+      "expected": 200,
+      "actual": 200,
+      "passed": true,
+      "extra": ""
+    },
+    {
+      "label": "Owner: GET /products/",
+      "expected": 200,
+      "actual": 200,
+      "passed": true,
+      "extra": ""
+    },
+    {
+      "label": "Owner: GET /dashboard/summary/",
+      "expected": 200,
+      "actual": 200,
+      "passed": true,
+      "extra": ""
+    },
+    {
+      "label": "Owner: GET /auth/users/",
+      "expected": 200,
+      "actual": 200,
+      "passed": true,
+      "extra": ""
+    },
+    {
+      "label": "Owner: GET /inventory/alerts/",
+      "expected": 200,
+      "actual": 200,
+      "passed": true,
+      "extra": ""
+    },
+    {
+      "label": "Normal sale create",
+      "expected": 201,
+      "actual": 201,
+      "passed": true,
+      "extra": "warnings=0"
+    },
+    {
+      "label": "Normal sale: no warnings",
+      "expected": 0,
+      "actual": 0,
+      "passed": true,
+      "extra": ""
+    },
+    {
+      "label": "Oversell sale create",
+      "expected": 201,
+      "actual": 201,
+      "passed": true,
+      "extra": "warnings=1"
+    },
+    {
+      "label": "Oversell: warnings present",
+      "expected": true,
+      "actual": true,
+      "passed": true,
+      "extra": "sample=Only 1 in stock. Sold 99999 of \"Burger\"."
+    },
+    {
+      "label": "Discount percent sale",
+      "expected": 201,
+      "actual": 201,
+      "passed": true,
+      "extra": "total=20.80"
+    },
+    {
+      "label": "Discount fixed sale",
+      "expected": 201,
+      "actual": 201,
+      "passed": true,
+      "extra": "total=2.98"
+    },
+    {
+      "label": "Validation: qty=0",
+      "expected": 400,
+      "actual": 400,
+      "passed": true,
+      "extra": ""
+    },
+    {
+      "label": "Validation: qty=1.5 piece product",
+      "expected": 400,
+      "actual": 400,
+      "passed": true,
+      "extra": ""
+    },
+    {
+      "label": "Validation: paid < total",
+      "expected": 400,
+      "actual": 400,
+      "passed": true,
+      "extra": ""
+    },
+    {
+      "label": "Validation: discount 150%",
+      "expected": 400,
+      "actual": 400,
+      "passed": true,
+      "extra": ""
+    },
+    {
+      "label": "Dashboard summary (no date)",
+      "expected": 200,
+      "actual": 200,
+      "passed": true,
+      "extra": "today_total=475491.7"
+    },
+    {
+      "label": "Dashboard daily-stats (today)",
+      "expected": 200,
+      "actual": 200,
+      "passed": true,
+      "extra": "date=2026-05-15"
+    },
+    {
+      "label": "Dashboard daily-stats (yesterday filter)",
+      "expected": 200,
+      "actual": 200,
+      "passed": true,
+      "extra": "total=326.18"
+    },
+    {
+      "label": "Dashboard daily-stats (last week filter)",
+      "expected": 200,
+      "actual": 200,
+      "passed": true,
+      "extra": "total=443.65"
+    },
+    {
+      "label": "Dashboard daily-stats (invalid date)",
+      "expected": 400,
+      "actual": 400,
+      "passed": true,
+      "extra": ""
+    },
+    {
+      "label": "Dashboard top-products",
+      "expected": 200,
+      "actual": 200,
+      "passed": true,
+      "extra": "count=10"
+    },
+    {
+      "label": "Dashboard low-stock",
+      "expected": 200,
+      "actual": 200,
+      "passed": true,
+      "extra": "count=1"
+    },
+    {
+      "label": "GET sale by UUID",
+      "expected": 200,
+      "actual": 200,
+      "passed": true,
+      "extra": "id=22"
+    },
+    {
+      "label": "GET sale by PK",
+      "expected": 200,
+      "actual": 200,
+      "passed": true,
+      "extra": ""
+    },
+    {
+      "label": "POST void sale by UUID",
+      "expected": 200,
+      "actual": 200,
+      "passed": true,
+      "extra": "status=voided"
+    },
+    {
+      "label": "POST void already-voided sale",
+      "expected": 400,
+      "actual": 400,
+      "passed": true,
+      "extra": ""
+    },
+    {
+      "label": "GET sale 404 (PK)",
+      "expected": 404,
+      "actual": 404,
+      "passed": true,
+      "extra": ""
+    },
+    {
+      "label": "GET sale 404 (UUID)",
+      "expected": 404,
+      "actual": 404,
+      "passed": true,
+      "extra": ""
+    },
+    {
+      "label": "GET product 404",
+      "expected": 404,
+      "actual": 404,
+      "passed": true,
+      "extra": ""
+    },
+    {
+      "label": "No token: GET /products/",
+      "expected": 401,
+      "actual": 401,
+      "passed": true,
+      "extra": ""
+    },
+    {
+      "label": "No token: GET /dashboard/summary/",
+      "expected": 401,
+      "actual": 401,
+      "passed": true,
+      "extra": ""
+    },
+    {
+      "label": "No token: POST /sales/",
+      "expected": 401,
+      "actual": 401,
+      "passed": true,
+      "extra": ""
+    },
+    {
+      "label": "Bad token: GET /products/",
+      "expected": 401,
+      "actual": 401,
+      "passed": true,
+      "extra": ""
+    }
+  ]
+}
