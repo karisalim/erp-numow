@@ -4,7 +4,15 @@ from django.contrib.auth import get_user_model
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
-from .models import Branch, BranchSettings, BranchUserAssignment, Tenant
+from .models import (
+    Branch,
+    BranchPaymentMethod,
+    BranchSettings,
+    BranchUserAssignment,
+    FinancialAccount,
+    PaymentMethod,
+    Tenant,
+)
 
 User = get_user_model()
 
@@ -282,6 +290,234 @@ class TenantSettingsSerializer(serializers.ModelSerializer):
             'updated_at',
         ]
         read_only_fields = ['id', 'plan', 'trial_ends_at', 'updated_at']
+
+
+# ── Finance master data (Phase 1.5 Slice C) ──────────────────────────────────
+
+
+class FinancialAccountSerializer(serializers.ModelSerializer):
+    """Tenant-scoped financial destination.
+
+    `tenant` is set by the view from the authenticated user; `branch` (when
+    provided) must belong to the same tenant. Cross-tenant linkage is the
+    most common multi-tenant footgun, so we validate it explicitly rather
+    than relying on PK uniqueness.
+    """
+
+    class Meta:
+        model  = FinancialAccount
+        fields = [
+            'id', 'tenant', 'branch',
+            'code', 'name', 'account_type',
+            'currency', 'opening_balance',
+            'is_active',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'tenant', 'created_at', 'updated_at']
+
+    def validate_branch(self, branch):
+        if branch is None:
+            return branch
+        tenant = self.context.get('tenant')
+        if tenant is not None and branch.tenant_id != tenant.id:
+            raise serializers.ValidationError(
+                'Branch must belong to the caller\'s tenant.',
+            )
+        return branch
+
+    def validate_code(self, code):
+        """Surface the DB partial-UNIQUE (tenant, code) as a clean 400.
+
+        Without this, a duplicate code would explode as IntegrityError → 500
+        and (on Postgres) poison the request's transaction.
+        """
+        if not code:
+            return code
+        tenant = self.context.get('tenant')
+        if tenant is None:
+            return code
+        qs = FinancialAccount.objects.filter(tenant=tenant, code=code)
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError(
+                f'A financial account with code {code!r} already exists in this tenant.',
+            )
+        return code
+
+
+class PaymentMethodSerializer(serializers.ModelSerializer):
+    """Tenant-defined payment method.
+
+    `requires_customer` is auto-true for `credit` on create unless the
+    caller explicitly set it — credit sales always need a customer, so
+    forgetting the flag silently would break Pay validation later.
+    """
+
+    class Meta:
+        model  = PaymentMethod
+        fields = [
+            'id', 'tenant',
+            'name', 'method_type', 'provider_name',
+            'requires_customer', 'is_active',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'tenant', 'created_at', 'updated_at']
+
+    def validate_name(self, name):
+        """Surface the DB UNIQUE (tenant, name) as a clean 400."""
+        tenant = self.context.get('tenant')
+        if tenant is None:
+            return name
+        qs = PaymentMethod.objects.filter(tenant=tenant, name=name)
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError(
+                f'A payment method named {name!r} already exists in this tenant.',
+            )
+        return name
+
+    def validate(self, attrs):
+        # `credit` methods always require a customer — overriding the user's
+        # `requires_customer` value rather than 400-ing keeps the API
+        # forgiving while the model.save() enforces the same invariant for
+        # direct ORM writes. Applies on both create and PATCH.
+        method_type = attrs.get(
+            'method_type',
+            getattr(self.instance, 'method_type', None),
+        )
+        if method_type == PaymentMethod.MethodType.CREDIT:
+            attrs['requires_customer'] = True
+        return attrs
+
+
+# Compatibility matrix enforced by `BranchPaymentMethodSerializer.validate`.
+# A method_type may only route into specific account_type(s); `custom` is
+# unconstrained so tenants can model unusual scenarios.
+#
+# Cash → cashbox only. `main_safe` is intentionally NOT a valid direct POS
+# destination: a main safe receives cash via cash-drops/internal transfers,
+# never as the first landing point for a customer payment.
+_METHOD_TO_DEST_ACCOUNT_TYPES = {
+    PaymentMethod.MethodType.CASH:   {FinancialAccount.AccountType.CASHBOX},
+    PaymentMethod.MethodType.CARD:   {FinancialAccount.AccountType.CARD_SETTLEMENT},
+    PaymentMethod.MethodType.WALLET: {FinancialAccount.AccountType.WALLET},
+    PaymentMethod.MethodType.CREDIT: {FinancialAccount.AccountType.CUSTOMER_AR},
+}
+
+
+class BranchPaymentMethodSerializer(serializers.ModelSerializer):
+    """Per-branch enabled payment + routing config.
+
+    Server-side validation enforces the contract intent: every FK must live
+    in the caller's tenant, and the destination account type must be
+    compatible with the method type (cash → cashbox/main_safe, card →
+    card_settlement, wallet → wallet, credit → customer_ar). `custom`
+    method type accepts any destination.
+
+    `tenant` and `branch` are set by the view from the URL/auth context;
+    the request body must not be allowed to spoof them.
+    """
+
+    payment_method_name        = serializers.CharField(source='payment_method.name',        read_only=True)
+    payment_method_type        = serializers.CharField(source='payment_method.method_type', read_only=True)
+    destination_account_name   = serializers.CharField(source='destination_account.name',   read_only=True)
+    destination_account_type   = serializers.CharField(source='destination_account.account_type', read_only=True)
+
+    class Meta:
+        model  = BranchPaymentMethod
+        fields = [
+            'id', 'tenant', 'branch',
+            'payment_method', 'payment_method_name', 'payment_method_type',
+            'destination_account', 'destination_account_name', 'destination_account_type',
+            'settlement_bank_account',
+            'commission_percent', 'fixed_fee',
+            'commission_expense_account',
+            'is_default', 'is_active',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'tenant', 'branch', 'created_at', 'updated_at']
+
+    # ── Per-field tenant scoping ──────────────────────────────────────────────
+
+    def _check_tenant(self, obj, label):
+        tenant = self.context.get('tenant')
+        if tenant is not None and obj is not None and obj.tenant_id != tenant.id:
+            raise serializers.ValidationError(
+                f'{label} must belong to the caller\'s tenant.',
+            )
+        return obj
+
+    def validate_payment_method(self, v):
+        return self._check_tenant(v, 'payment_method')
+
+    def validate_destination_account(self, v):
+        return self._check_tenant(v, 'destination_account')
+
+    def validate_settlement_bank_account(self, v):
+        return self._check_tenant(v, 'settlement_bank_account')
+
+    def validate_commission_expense_account(self, v):
+        return self._check_tenant(v, 'commission_expense_account')
+
+    # ── Cross-field rules ─────────────────────────────────────────────────────
+
+    def validate(self, attrs):
+        tenant = self.context.get('tenant')
+        branch = self.context.get('branch') or getattr(self.instance, 'branch', None)
+
+        # Resolve the effective method + destination after a possible PATCH.
+        method = attrs.get('payment_method') or getattr(self.instance, 'payment_method', None)
+        dest   = attrs.get('destination_account') or getattr(self.instance, 'destination_account', None)
+
+        # Branch+method uniqueness — surface DB constraint as a clean 400.
+        if tenant is not None and branch is not None and method is not None:
+            qs = BranchPaymentMethod.objects.filter(
+                tenant=tenant, branch=branch, payment_method=method,
+            )
+            if self.instance is not None:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise serializers.ValidationError({
+                    'payment_method': (
+                        'This payment method is already enabled on this branch.'
+                    ),
+                })
+
+        if method is None or dest is None:
+            return attrs
+
+        allowed = _METHOD_TO_DEST_ACCOUNT_TYPES.get(method.method_type)
+        # `custom` (or unknown) → no restriction; tenants opt into whatever
+        # routing makes sense for their business.
+        if allowed and dest.account_type not in allowed:
+            raise serializers.ValidationError({
+                'destination_account': (
+                    f'method_type={method.method_type!r} cannot route to '
+                    f'account_type={dest.account_type!r}; allowed: '
+                    f'{sorted(allowed)}'
+                ),
+            })
+
+        # Settlement bank is only meaningful for card methods.
+        settle = attrs.get('settlement_bank_account') or getattr(self.instance, 'settlement_bank_account', None)
+        if settle is not None and settle.account_type != FinancialAccount.AccountType.BANK:
+            raise serializers.ValidationError({
+                'settlement_bank_account': (
+                    'settlement_bank_account must be a bank account (account_type=bank).'
+                ),
+            })
+
+        commission = attrs.get('commission_expense_account') or getattr(self.instance, 'commission_expense_account', None)
+        if commission is not None and commission.account_type != FinancialAccount.AccountType.EXPENSE:
+            raise serializers.ValidationError({
+                'commission_expense_account': (
+                    'commission_expense_account must be an expense account (account_type=expense).'
+                ),
+            })
+
+        return attrs
 
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):

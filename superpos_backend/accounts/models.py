@@ -316,3 +316,189 @@ class BranchUserAssignment(models.Model):
 
     def __str__(self):
         return f'{self.user} @ {self.branch} ({self.role_at_branch})'
+
+
+# ── Finance master data (Phase 1.5 Slice C) ──────────────────────────────────
+
+class FinancialAccount(models.Model):
+    """Tenant-scoped financial destination for money movements.
+
+    Implements MASTER_DATA_CONTRACT.md §1.3 (FinancialAccount). Every
+    `FinancialAccountMovement` in later slices points at one of these rows;
+    `BranchPaymentMethod.destination_account` resolves the routing target so
+    payment posting never guesses based on method name.
+
+    Branch is optional: a tenant can keep tenant-wide accounts (e.g. a
+    single bank account shared across branches) or define per-branch
+    cashboxes. Account-type ↔ method-type compatibility is enforced at the
+    `BranchPaymentMethod` serializer layer, not here, so an account row can
+    be repurposed without rewriting history.
+    """
+
+    class AccountType(models.TextChoices):
+        CASHBOX         = 'cashbox',         'Cashbox'
+        MAIN_SAFE       = 'main_safe',       'Main Safe'
+        BANK            = 'bank',            'Bank'
+        CARD_SETTLEMENT = 'card_settlement', 'Card Settlement'
+        WALLET          = 'wallet',          'Wallet'
+        CUSTOMER_AR     = 'customer_ar',     'Customer AR'
+        SUPPLIER_AP     = 'supplier_ap',     'Supplier AP'
+        EXPENSE         = 'expense',         'Expense'
+        OPENING_BALANCE = 'opening_balance', 'Opening Balance'
+        OTHER           = 'other',           'Other'
+
+    tenant = models.ForeignKey(
+        Tenant, on_delete=models.CASCADE,
+        related_name='financial_accounts', db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch, on_delete=models.PROTECT,
+        null=True, blank=True, related_name='financial_accounts',
+    )
+    code            = models.CharField(max_length=40, blank=True, default='', db_index=True)
+    name            = models.CharField(max_length=120)
+    account_type    = models.CharField(
+        max_length=20, choices=AccountType.choices, db_index=True,
+    )
+    currency        = models.CharField(max_length=8,  blank=True, default='')
+    opening_balance = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    is_active       = models.BooleanField(default=True)
+    created_at      = models.DateTimeField(auto_now_add=True)
+    updated_at      = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name']
+        constraints = [
+            # Per-tenant codes are unique when set. Empty default '' is
+            # allowed across many rows so existing fixtures don't collide.
+            models.UniqueConstraint(
+                fields=['tenant', 'code'],
+                condition=~models.Q(code=''),
+                name='accounts_financial_account_tenant_code_uniq',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['tenant', 'account_type'], name='accounts_facct_type_idx'),
+        ]
+
+    def __str__(self):
+        return f'{self.name} [{self.account_type}]'
+
+
+class PaymentMethod(models.Model):
+    """Tenant-defined payment method (Cash / Card / Wallet / Credit / Custom).
+
+    MASTER_DATA_CONTRACT.md §1.3 (PaymentMethod). A tenant can carry several
+    methods of the same `method_type` (e.g. separate "Visa", "MasterCard",
+    "Meeza" card methods that each settle into different accounts).
+
+    Branch-specific destination routing lives on `BranchPaymentMethod`.
+    """
+
+    class MethodType(models.TextChoices):
+        CASH   = 'cash',   'Cash'
+        CARD   = 'card',   'Card'
+        WALLET = 'wallet', 'Wallet'
+        CREDIT = 'credit', 'Credit'
+        CUSTOM = 'custom', 'Custom'
+
+    tenant = models.ForeignKey(
+        Tenant, on_delete=models.CASCADE,
+        related_name='payment_methods', db_index=True,
+    )
+    name              = models.CharField(max_length=80)
+    method_type       = models.CharField(
+        max_length=10, choices=MethodType.choices, db_index=True,
+    )
+    provider_name     = models.CharField(max_length=80, blank=True, default='')
+    # Credit defaults to requiring a customer; other types default to False.
+    # Serializer auto-applies on create unless caller overrides explicitly.
+    requires_customer = models.BooleanField(default=False)
+    is_active         = models.BooleanField(default=True)
+    created_at        = models.DateTimeField(auto_now_add=True)
+    updated_at        = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['tenant', 'name'],
+                name='accounts_payment_method_tenant_name_uniq',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.name} ({self.method_type})'
+
+    def save(self, *args, **kwargs):
+        # `credit` payment methods MUST always require a customer — a credit
+        # sale without a customer has no AR target. Enforce at the model
+        # layer so direct ORM writes (signals, fixtures, future services)
+        # can't slip through the serializer-only check.
+        if self.method_type == self.MethodType.CREDIT:
+            self.requires_customer = True
+        super().save(*args, **kwargs)
+
+
+class BranchPaymentMethod(models.Model):
+    """Per-branch enablement + routing for a payment method.
+
+    MASTER_DATA_CONTRACT.md §1.3 (BranchPaymentMethod) — the **source of
+    truth** for "where does this payment land?". A branch can enable a
+    given `PaymentMethod` exactly once (unique per branch+method); the
+    `destination_account` decides the FinancialAccount the money lands in.
+    Card settlements may additionally point at a `settlement_bank_account`
+    (where the acquirer ultimately pays out) and a
+    `commission_expense_account` (where card fees post).
+
+    All FK linkages must stay within the same tenant — enforced at the
+    serializer layer, not via a DB CHECK, because Django would have to
+    materialize the joined tenant id which is awkward without triggers.
+    """
+
+    tenant = models.ForeignKey(
+        Tenant, on_delete=models.CASCADE,
+        related_name='branch_payment_methods', db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch, on_delete=models.CASCADE,
+        related_name='payment_methods',
+    )
+    payment_method = models.ForeignKey(
+        PaymentMethod, on_delete=models.PROTECT,
+        related_name='branch_links',
+    )
+    destination_account = models.ForeignKey(
+        FinancialAccount, on_delete=models.PROTECT,
+        related_name='inbound_payment_methods',
+    )
+    settlement_bank_account = models.ForeignKey(
+        FinancialAccount, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='settlement_payment_methods',
+    )
+    commission_percent = models.DecimalField(
+        max_digits=5, decimal_places=2, default=0,
+    )
+    fixed_fee = models.DecimalField(
+        max_digits=10, decimal_places=2, default=0,
+    )
+    commission_expense_account = models.ForeignKey(
+        FinancialAccount, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='commission_payment_methods',
+    )
+    is_default = models.BooleanField(default=False)
+    is_active  = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['branch_id', 'payment_method_id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['tenant', 'branch', 'payment_method'],
+                name='accounts_branch_payment_uniq',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.branch} :: {self.payment_method} -> {self.destination_account}'

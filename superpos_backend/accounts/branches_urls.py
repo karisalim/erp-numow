@@ -10,6 +10,9 @@ from django.urls import path
 
 from .views import (
     BranchDeactivateView,
+    BranchPaymentMethodDeactivateView,
+    BranchPaymentMethodDetailView,
+    BranchPaymentMethodListCreateView,
     BranchSettingsView,
     BranchUsersView,
     BranchV2DetailView,
@@ -23,4 +26,9 @@ urlpatterns = [
     path('<int:pk>/deactivate/',   BranchDeactivateView.as_view(),   name='branch-v2-deactivate'),
     path('<int:pk>/settings/',     BranchSettingsView.as_view(),     name='branch-v2-settings'),
     path('<int:pk>/users/',        BranchUsersView.as_view(),        name='branch-v2-users'),
+
+    # Phase 1.5 Slice C — per-branch payment-method routing.
+    path('<int:branch_pk>/payment-methods/',                     BranchPaymentMethodListCreateView.as_view(), name='branch-payment-method-list'),
+    path('<int:branch_pk>/payment-methods/<int:pk>/',            BranchPaymentMethodDetailView.as_view(),     name='branch-payment-method-detail'),
+    path('<int:branch_pk>/payment-methods/<int:pk>/deactivate/', BranchPaymentMethodDeactivateView.as_view(), name='branch-payment-method-deactivate'),
 ]
