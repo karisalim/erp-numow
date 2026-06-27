@@ -630,3 +630,88 @@ class FinancialAccountMovement(models.Model):
     def __str__(self):
         side = f'+{self.debit}' if self.debit else f'-{self.credit}'
         return f'Mvmt[{self.account_id}] {self.movement_type} {side} → {self.balance_after}'
+
+
+# ── Customer + Supplier master data (Phase 1.5 Slice E) ──────────────────────
+
+class _PartyBase(models.Model):
+    """Shared columns for tenant-scoped party records (Customer / Supplier).
+
+    Both parties are master data, not transactional records — the
+    `opening_balance` field here is just a stored hint for future
+    AR/AP slices and does NOT create any movement on its own.
+    `default_branch` clears (SET_NULL) when the branch is removed so a
+    branch deactivation never blocks party records.
+    """
+
+    tenant = models.ForeignKey(
+        Tenant, on_delete=models.CASCADE,
+        related_name='%(class)ss', db_index=True,
+    )
+    code = models.CharField(max_length=40, blank=True, default='', db_index=True)
+    name = models.CharField(max_length=160)
+    phone      = models.CharField(max_length=50, blank=True, default='')
+    email      = models.EmailField(blank=True, default='')
+    tax_number = models.CharField(max_length=64, blank=True, default='')
+    default_branch = models.ForeignKey(
+        Branch, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    opening_balance = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    is_active  = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        abstract = True
+        ordering = ['name']
+
+
+class Customer(_PartyBase):
+    """Tenant-scoped customer record.
+
+    `credit_limit` and `price_tier_id` are stored hints for later slices
+    (credit sales, price tier resolution) — neither is enforced yet.
+    `price_tier_id` is a forward-declared plain BigInt because PriceTier
+    doesn't exist as a model in this slice; a later migration can swap
+    the column for a proper FK without data loss.
+    """
+
+    credit_limit  = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    price_tier_id = models.BigIntegerField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['name']
+        constraints = [
+            # Per-tenant code uniqueness when set. Empty default '' is
+            # allowed across many rows so walk-in / unnamed parties don't
+            # collide.
+            models.UniqueConstraint(
+                fields=['tenant', 'code'],
+                condition=~models.Q(code=''),
+                name='accounts_customer_tenant_code_uniq',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.name} (Customer)'
+
+
+class Supplier(_PartyBase):
+    """Tenant-scoped supplier record. Same shape as Customer minus
+    credit/price-tier hints (suppliers don't have credit limits in our
+    direction — that's the tenant's AP exposure, modeled by the
+    `supplier_ap` FinancialAccount type)."""
+
+    class Meta:
+        ordering = ['name']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['tenant', 'code'],
+                condition=~models.Q(code=''),
+                name='accounts_supplier_tenant_code_uniq',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.name} (Supplier)'

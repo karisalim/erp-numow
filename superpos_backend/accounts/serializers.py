@@ -9,9 +9,11 @@ from .models import (
     BranchPaymentMethod,
     BranchSettings,
     BranchUserAssignment,
+    Customer,
     FinancialAccount,
     FinancialAccountMovement,
     PaymentMethod,
+    Supplier,
     Tenant,
 )
 
@@ -519,6 +521,79 @@ class BranchPaymentMethodSerializer(serializers.ModelSerializer):
             })
 
         return attrs
+
+
+# ── Customer + Supplier master data (Phase 1.5 Slice E) ─────────────────────
+
+
+class _PartySerializerMixin:
+    """Shared tenant scoping + code uniqueness for Customer/Supplier.
+
+    Both party serializers expect `self.context['tenant']` to be set by
+    the view (via `_TenantContextMixin` in views.py). Mixing in here keeps
+    the per-field validation out of two identical implementations.
+    """
+
+    party_model = None  # subclasses override
+
+    def validate_default_branch(self, branch):
+        if branch is None:
+            return branch
+        tenant = self.context.get('tenant')
+        if tenant is not None and branch.tenant_id != tenant.id:
+            raise serializers.ValidationError(
+                'default_branch must belong to the caller\'s tenant.',
+            )
+        return branch
+
+    def validate_code(self, code):
+        """Per-tenant uniqueness (partial — '' is allowed across rows)."""
+        if not code:
+            return code
+        tenant = self.context.get('tenant')
+        if tenant is None:
+            return code
+        qs = self.party_model.objects.filter(tenant=tenant, code=code)
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError(
+                f'A {self.party_model.__name__.lower()} with code {code!r} '
+                f'already exists in this tenant.',
+            )
+        return code
+
+
+class CustomerSerializer(_PartySerializerMixin, serializers.ModelSerializer):
+    party_model = Customer
+
+    class Meta:
+        model  = Customer
+        fields = [
+            'id', 'tenant',
+            'code', 'name', 'phone', 'email', 'tax_number',
+            'default_branch', 'price_tier_id',
+            'credit_limit', 'opening_balance',
+            'is_active',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'tenant', 'created_at', 'updated_at']
+
+
+class SupplierSerializer(_PartySerializerMixin, serializers.ModelSerializer):
+    party_model = Supplier
+
+    class Meta:
+        model  = Supplier
+        fields = [
+            'id', 'tenant',
+            'code', 'name', 'phone', 'email', 'tax_number',
+            'default_branch',
+            'opening_balance',
+            'is_active',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'tenant', 'created_at', 'updated_at']
 
 
 class FinancialAccountMovementSerializer(serializers.ModelSerializer):

@@ -8,9 +8,11 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/auth/',     include('accounts.urls')),
     path('api/accounts/', include('accounts.urls')),
-    path('api/branches/', include('accounts.branches_urls')),
-    path('api/finance/',  include('accounts.finance_urls')),
-    path('api/',          include('pos.urls')),
+    path('api/branches/',  include('accounts.branches_urls')),
+    path('api/finance/',   include('accounts.finance_urls')),
+    path('api/customers/', include('accounts.customers_urls')),
+    path('api/suppliers/', include('accounts.suppliers_urls')),
+    path('api/',           include('pos.urls')),
 
     # OpenAPI schema + Swagger UI
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),

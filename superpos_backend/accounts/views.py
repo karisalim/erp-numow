@@ -13,9 +13,11 @@ from .models import (
     BranchPaymentMethod,
     BranchSettings,
     BranchUserAssignment,
+    Customer,
     FinancialAccount,
     FinancialAccountMovement,
     PaymentMethod,
+    Supplier,
 )
 from .permissions import IsCashierOrAbove, IsManagerOrAbove
 from .serializers import (
@@ -24,10 +26,12 @@ from .serializers import (
     BranchSettingsSerializer,
     BranchUserAssignmentSerializer,
     BranchV2Serializer,
+    CustomerSerializer,
     CustomTokenObtainPairSerializer,
     FinancialAccountMovementSerializer,
     FinancialAccountSerializer,
     PaymentMethodSerializer,
+    SupplierSerializer,
     TenantSettingsSerializer,
     UserSerializer,
     UserCreateSerializer,
@@ -686,6 +690,104 @@ class FinancialAccountStatementView(_AccountScopedView):
             occurred_to=params.get('occurred_to') or None,
         )
         return Response(FinancialAccountMovementSerializer(qs, many=True).data)
+
+
+# ── Customer + Supplier endpoints (Phase 1.5 Slice E) ───────────────────────
+
+class _PartyListCreateView(_TenantContextMixin, generics.ListCreateAPIView):
+    """Generic list/create for a tenant-scoped party (Customer/Supplier).
+
+    Subclass overrides `model` + `serializer_class` (and `search_fields`).
+    Cashier+ can list; manager+ can write. Inactive rows surface in the
+    list — clients filter via `?is_active=true` if they want only live
+    records.
+    """
+
+    model = None
+    ordering = ['name']
+
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+    def get_queryset(self):
+        tenant = _tenant_or_404(self.request)
+        qs = self.model.objects.filter(tenant=tenant)
+        is_active = self.request.query_params.get('is_active')
+        if is_active in ('true', '1'):
+            qs = qs.filter(is_active=True)
+        elif is_active in ('false', '0'):
+            qs = qs.filter(is_active=False)
+        return qs
+
+    def perform_create(self, serializer):
+        serializer.save(tenant=_tenant_or_404(self.request))
+
+
+class _PartyDetailView(_TenantContextMixin, generics.RetrieveUpdateAPIView):
+    """GET/PATCH only — DELETE is intentionally absent (use deactivate)."""
+
+    model = None
+    permission_classes = [IsManagerOrAbove]
+    http_method_names  = ['get', 'patch', 'head', 'options']
+
+    def get_queryset(self):
+        return self.model.objects.filter(tenant=_tenant_or_404(self.request))
+
+
+class _PartyDeactivateView(APIView):
+    """POST /.../{id}/deactivate/ — idempotent flip of `is_active=False`."""
+
+    model = None
+    permission_classes = [IsManagerOrAbove]
+    serializer_class = None
+
+    def post(self, request, pk):
+        tenant = _tenant_or_404(request)
+        obj = self.model.objects.filter(tenant=tenant, pk=pk).first()
+        if obj is None:
+            raise NotFound(f'{self.model.__name__} not found.')
+        if obj.is_active:
+            obj.is_active = False
+            obj.save(update_fields=['is_active', 'updated_at'])
+        return Response(self.serializer_class(obj).data)
+
+
+# Customer concrete views ────────────────────────────────────────────────────
+
+class CustomerListCreateView(_PartyListCreateView):
+    model            = Customer
+    serializer_class = CustomerSerializer
+    search_fields    = ['name', 'code', 'phone', 'email', 'tax_number']
+
+
+class CustomerDetailView(_PartyDetailView):
+    model            = Customer
+    serializer_class = CustomerSerializer
+
+
+class CustomerDeactivateView(_PartyDeactivateView):
+    model            = Customer
+    serializer_class = CustomerSerializer
+
+
+# Supplier concrete views ────────────────────────────────────────────────────
+
+class SupplierListCreateView(_PartyListCreateView):
+    model            = Supplier
+    serializer_class = SupplierSerializer
+    search_fields    = ['name', 'code', 'phone', 'email', 'tax_number']
+
+
+class SupplierDetailView(_PartyDetailView):
+    model            = Supplier
+    serializer_class = SupplierSerializer
+
+
+class SupplierDeactivateView(_PartyDeactivateView):
+    model            = Supplier
+    serializer_class = SupplierSerializer
 
 
 class FinancialAccountBalanceView(_AccountScopedView):
