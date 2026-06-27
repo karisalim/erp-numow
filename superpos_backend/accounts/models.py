@@ -715,3 +715,162 @@ class Supplier(_PartyBase):
 
     def __str__(self):
         return f'{self.name} (Supplier)'
+
+
+# ── Customer AR + Supplier AP Movement Ledgers (Phase 1.5 Slice F) ──────────
+
+class _PartyMovementBase(models.Model):
+    """Shared columns for party-balance ledgers (CustomerARMovement /
+    SupplierAPMovement).
+
+    Same sign convention as `FinancialAccountMovement`:
+        * `debit`  >= 0
+        * `credit` >= 0
+        * exactly one is > 0 per row (DB CHECK + service-layer guard)
+
+    Direction (asset vs liability) is *not* encoded on the row — the
+    service layer decides via `balance_delta()` so the column meaning
+    stays consistent across all ledgers and reports.
+
+    `source_document_type` / `source_document_id` are opaque pointers
+    the future posting engine sets (SalesInvoice, CustomerReceipt,
+    PurchaseInvoice, SupplierPayment, …). Stored as plain strings/ints
+    rather than a generic content-type FK to keep this table cheap.
+    """
+
+    tenant = models.ForeignKey(
+        Tenant, on_delete=models.CASCADE,
+        related_name='+', db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch, on_delete=models.PROTECT,
+        related_name='+', db_index=True,
+        null=True, blank=True,
+    )
+    source_document_type = models.CharField(max_length=80, blank=True, default='')
+    source_document_id   = models.BigIntegerField(null=True, blank=True)
+    movement_type        = models.CharField(max_length=40, db_index=True)
+    debit         = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    credit        = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    balance_after = models.DecimalField(max_digits=18, decimal_places=2)
+    currency      = models.CharField(max_length=8, blank=True, default='')
+    actor_user    = models.ForeignKey(
+        'accounts.User', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    occurred_at   = models.DateTimeField(db_index=True)
+    notes         = models.CharField(max_length=255, blank=True, default='')
+    created_at    = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        abstract = True
+        ordering = ['id']
+
+
+class CustomerARMovement(_PartyMovementBase):
+    """Append-only AR ledger row for one customer.
+
+    Asset-like rule (encoded in `accounts.services._party_ledger`):
+        debit  → increases customer balance (customer owes more)
+        credit → decreases customer balance (customer paid or settled)
+
+    Writes go through `accounts.services.customer_ar` exclusively in this
+    slice — no public POST API.
+    """
+
+    class MovementType(models.TextChoices):
+        OPENING_BALANCE     = 'opening_balance',     'Opening Balance'
+        SALES_CREDIT        = 'sales_credit',        'Sales Credit'
+        CUSTOMER_RECEIPT    = 'customer_receipt',    'Customer Receipt'
+        SALES_RETURN        = 'sales_return',        'Sales Return'
+        WRITE_OFF           = 'write_off',           'Write Off'
+        ADJUSTMENT          = 'adjustment',          'Adjustment'
+        OVERPAYMENT_REFUND  = 'overpayment_refund',  'Overpayment Refund'
+        OTHER               = 'other',               'Other'
+
+    customer = models.ForeignKey(
+        Customer, on_delete=models.PROTECT,
+        related_name='ar_movements',
+    )
+
+    class Meta:
+        ordering = ['customer_id', 'id']
+        indexes = [
+            models.Index(fields=['tenant', 'customer', 'id'], name='ar_mvmt_t_c_id_idx'),
+            models.Index(fields=['tenant', 'branch', 'occurred_at'], name='ar_mvmt_t_b_occ_idx'),
+            models.Index(
+                fields=['source_document_type', 'source_document_id'],
+                name='ar_mvmt_src_idx',
+            ),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(debit__gte=0) & models.Q(credit__gte=0),
+                name='ar_mvmt_nonneg',
+            ),
+            models.CheckConstraint(
+                check=~(models.Q(debit__gt=0) & models.Q(credit__gt=0)),
+                name='ar_mvmt_one_side_only',
+            ),
+            models.CheckConstraint(
+                check=~(models.Q(debit=0) & models.Q(credit=0)),
+                name='ar_mvmt_nonzero',
+            ),
+        ]
+
+    def __str__(self):
+        side = f'+{self.debit}' if self.debit else f'-{self.credit}'
+        return f'AR[{self.customer_id}] {self.movement_type} {side} → {self.balance_after}'
+
+
+class SupplierAPMovement(_PartyMovementBase):
+    """Append-only AP ledger row for one supplier.
+
+    Liability-like rule (encoded in `accounts.services._party_ledger`):
+        credit → increases supplier balance (we owe more)
+        debit  → decreases supplier balance (we paid or returned)
+    """
+
+    class MovementType(models.TextChoices):
+        OPENING_BALANCE   = 'opening_balance',   'Opening Balance'
+        PURCHASE_CREDIT   = 'purchase_credit',   'Purchase Credit'
+        SUPPLIER_PAYMENT  = 'supplier_payment',  'Supplier Payment'
+        PURCHASE_RETURN   = 'purchase_return',   'Purchase Return'
+        SUPPLIER_ADVANCE  = 'supplier_advance',  'Supplier Advance'
+        WRITE_OFF         = 'write_off',         'Write Off'
+        ADJUSTMENT        = 'adjustment',        'Adjustment'
+        OTHER             = 'other',             'Other'
+
+    supplier = models.ForeignKey(
+        Supplier, on_delete=models.PROTECT,
+        related_name='ap_movements',
+    )
+
+    class Meta:
+        ordering = ['supplier_id', 'id']
+        indexes = [
+            models.Index(fields=['tenant', 'supplier', 'id'], name='ap_mvmt_t_s_id_idx'),
+            models.Index(fields=['tenant', 'branch', 'occurred_at'], name='ap_mvmt_t_b_occ_idx'),
+            models.Index(
+                fields=['source_document_type', 'source_document_id'],
+                name='ap_mvmt_src_idx',
+            ),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(debit__gte=0) & models.Q(credit__gte=0),
+                name='ap_mvmt_nonneg',
+            ),
+            models.CheckConstraint(
+                check=~(models.Q(debit__gt=0) & models.Q(credit__gt=0)),
+                name='ap_mvmt_one_side_only',
+            ),
+            models.CheckConstraint(
+                check=~(models.Q(debit=0) & models.Q(credit=0)),
+                name='ap_mvmt_nonzero',
+            ),
+        ]
+
+    def __str__(self):
+        side = f'+{self.debit}' if self.debit else f'-{self.credit}'
+        return f'AP[{self.supplier_id}] {self.movement_type} {side} → {self.balance_after}'

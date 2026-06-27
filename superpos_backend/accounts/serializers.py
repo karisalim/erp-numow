@@ -10,10 +10,12 @@ from .models import (
     BranchSettings,
     BranchUserAssignment,
     Customer,
+    CustomerARMovement,
     FinancialAccount,
     FinancialAccountMovement,
     PaymentMethod,
     Supplier,
+    SupplierAPMovement,
     Tenant,
 )
 
@@ -619,6 +621,52 @@ class FinancialAccountMovementSerializer(serializers.ModelSerializer):
             'debit', 'credit', 'balance_after', 'currency',
             'actor_user', 'actor_user_username',
             'terminal_id', 'shift_id',
+            'occurred_at', 'notes', 'created_at',
+        ]
+        read_only_fields = fields
+
+
+# ── Customer AR + Supplier AP movement serializers (Slice F) ────────────────
+
+
+class CustomerARMovementSerializer(serializers.ModelSerializer):
+    """Read-only AR ledger row. Writes go through
+    `accounts.services.customer_ar` — never trust `balance_after` from a client.
+    """
+
+    customer_name       = serializers.CharField(source='customer.name',     read_only=True)
+    actor_user_username = serializers.CharField(source='actor_user.username', read_only=True)
+
+    class Meta:
+        model  = CustomerARMovement
+        fields = [
+            'id', 'tenant', 'branch',
+            'customer', 'customer_name',
+            'source_document_type', 'source_document_id',
+            'movement_type',
+            'debit', 'credit', 'balance_after', 'currency',
+            'actor_user', 'actor_user_username',
+            'occurred_at', 'notes', 'created_at',
+        ]
+        read_only_fields = fields
+
+
+class SupplierAPMovementSerializer(serializers.ModelSerializer):
+    """Read-only AP ledger row. Writes go through
+    `accounts.services.supplier_ap`."""
+
+    supplier_name       = serializers.CharField(source='supplier.name',     read_only=True)
+    actor_user_username = serializers.CharField(source='actor_user.username', read_only=True)
+
+    class Meta:
+        model  = SupplierAPMovement
+        fields = [
+            'id', 'tenant', 'branch',
+            'supplier', 'supplier_name',
+            'source_document_type', 'source_document_id',
+            'movement_type',
+            'debit', 'credit', 'balance_after', 'currency',
+            'actor_user', 'actor_user_username',
             'occurred_at', 'notes', 'created_at',
         ]
         read_only_fields = fields

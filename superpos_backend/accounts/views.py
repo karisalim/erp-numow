@@ -14,10 +14,12 @@ from .models import (
     BranchSettings,
     BranchUserAssignment,
     Customer,
+    CustomerARMovement,
     FinancialAccount,
     FinancialAccountMovement,
     PaymentMethod,
     Supplier,
+    SupplierAPMovement,
 )
 from .permissions import IsCashierOrAbove, IsManagerOrAbove
 from .serializers import (
@@ -26,11 +28,13 @@ from .serializers import (
     BranchSettingsSerializer,
     BranchUserAssignmentSerializer,
     BranchV2Serializer,
+    CustomerARMovementSerializer,
     CustomerSerializer,
     CustomTokenObtainPairSerializer,
     FinancialAccountMovementSerializer,
     FinancialAccountSerializer,
     PaymentMethodSerializer,
+    SupplierAPMovementSerializer,
     SupplierSerializer,
     TenantSettingsSerializer,
     UserSerializer,
@@ -38,6 +42,8 @@ from .serializers import (
     UserUpdateSerializer,
 )
 from .services import account_movements
+from .services import customer_ar as customer_ar_svc
+from .services import supplier_ap as supplier_ap_svc
 
 User = get_user_model()
 
@@ -788,6 +794,176 @@ class SupplierDetailView(_PartyDetailView):
 class SupplierDeactivateView(_PartyDeactivateView):
     model            = Supplier
     serializer_class = SupplierSerializer
+
+
+# ── Party AR / AP statement + balance + flat list (Phase 1.5 Slice F) ──────
+
+class _PartyScopedReadView(APIView):
+    """Shared lookup for endpoints rooted at /<party>/{id}/...
+
+    Subclasses set `party_model` to Customer or Supplier. Returns 404 for
+    foreign-tenant ids so existence never leaks across tenants.
+    """
+
+    permission_classes = [IsManagerOrAbove]
+    party_model = None
+    party_label = ''       # 'customer' / 'supplier' — used in 404 text
+
+    def _party(self, request, pk):
+        tenant = _tenant_or_404(request)
+        obj = self.party_model.objects.filter(tenant=tenant, pk=pk).first()
+        if obj is None:
+            raise NotFound(f'{self.party_label.capitalize()} not found.')
+        return tenant, obj
+
+
+def _statement_filter_kwargs(request, tenant):
+    """Pull the standard statement query params out of `request`.
+
+    Returns a dict matching the keyword args of `get_*_statement`. Resolves
+    the optional `?branch=<id>` against the caller's tenant (foreign branch
+    id → 404).
+    """
+    params = request.query_params
+
+    branch = None
+    branch_id = _parse_optional_int(params.get('branch'))
+    if branch_id is not None:
+        branch = Branch.objects.filter(tenant=tenant, pk=branch_id).first()
+        if branch is None:
+            raise NotFound('Branch not found.')
+
+    return {
+        'branch':               branch,
+        'movement_type':        params.get('movement_type') or None,
+        'source_document_type': params.get('source_document_type') or None,
+        'source_document_id':   _parse_optional_int(params.get('source_document_id')),
+        'occurred_from':        params.get('occurred_from') or None,
+        'occurred_to':          params.get('occurred_to') or None,
+    }
+
+
+# Customer AR ────────────────────────────────────────────────────────────────
+
+class CustomerStatementView(_PartyScopedReadView):
+    """GET /api/customers/{id}/statement/ — per-customer AR statement."""
+
+    party_model = Customer
+    party_label = 'customer'
+    http_method_names = ['get', 'head', 'options']
+
+    def get(self, request, pk):
+        tenant, customer = self._party(request, pk)
+        filters = _statement_filter_kwargs(request, tenant)
+        qs = customer_ar_svc.get_customer_statement(customer, **filters)
+        return Response(CustomerARMovementSerializer(qs, many=True).data)
+
+
+class CustomerBalanceView(_PartyScopedReadView):
+    """GET /api/customers/{id}/balance/ — derived current AR balance."""
+
+    party_model = Customer
+    party_label = 'customer'
+    http_method_names = ['get', 'head', 'options']
+
+    def get(self, request, pk):
+        tenant, customer = self._party(request, pk)
+        balance = customer_ar_svc.get_customer_balance(customer)
+        return Response({
+            'customer_id':     customer.id,
+            'customer_name':   customer.name,
+            'opening_balance': str(customer.opening_balance),
+            'balance':         str(balance),
+        })
+
+
+class CustomerARMovementListView(generics.ListAPIView):
+    """GET /api/customer-ar/movements/ — tenant-wide flat stream.
+
+    Useful for admin auditing across customers. Supports `customer=<id>`,
+    `branch=<id>`, `movement_type=`, `source_document_type=`,
+    `source_document_id=` query params.
+    """
+
+    serializer_class   = CustomerARMovementSerializer
+    permission_classes = [IsManagerOrAbove]
+    ordering           = ['-id']
+
+    def get_queryset(self):
+        tenant = _tenant_or_404(self.request)
+        qs = CustomerARMovement.objects.filter(tenant=tenant)
+        params = self.request.query_params
+
+        if cid := _parse_optional_int(params.get('customer')):
+            qs = qs.filter(customer_id=cid)
+        if bid := _parse_optional_int(params.get('branch')):
+            qs = qs.filter(branch_id=bid)
+        if mt := params.get('movement_type'):
+            qs = qs.filter(movement_type=mt)
+        if sdt := params.get('source_document_type'):
+            qs = qs.filter(source_document_type=sdt)
+        if sdi := _parse_optional_int(params.get('source_document_id')):
+            qs = qs.filter(source_document_id=sdi)
+        return qs.order_by('id')
+
+
+# Supplier AP ────────────────────────────────────────────────────────────────
+
+class SupplierStatementView(_PartyScopedReadView):
+    """GET /api/suppliers/{id}/statement/ — per-supplier AP statement."""
+
+    party_model = Supplier
+    party_label = 'supplier'
+    http_method_names = ['get', 'head', 'options']
+
+    def get(self, request, pk):
+        tenant, supplier = self._party(request, pk)
+        filters = _statement_filter_kwargs(request, tenant)
+        qs = supplier_ap_svc.get_supplier_statement(supplier, **filters)
+        return Response(SupplierAPMovementSerializer(qs, many=True).data)
+
+
+class SupplierBalanceView(_PartyScopedReadView):
+    """GET /api/suppliers/{id}/balance/ — derived current AP balance."""
+
+    party_model = Supplier
+    party_label = 'supplier'
+    http_method_names = ['get', 'head', 'options']
+
+    def get(self, request, pk):
+        tenant, supplier = self._party(request, pk)
+        balance = supplier_ap_svc.get_supplier_balance(supplier)
+        return Response({
+            'supplier_id':     supplier.id,
+            'supplier_name':   supplier.name,
+            'opening_balance': str(supplier.opening_balance),
+            'balance':         str(balance),
+        })
+
+
+class SupplierAPMovementListView(generics.ListAPIView):
+    """GET /api/supplier-ap/movements/ — tenant-wide flat stream."""
+
+    serializer_class   = SupplierAPMovementSerializer
+    permission_classes = [IsManagerOrAbove]
+    ordering           = ['-id']
+
+    def get_queryset(self):
+        tenant = _tenant_or_404(self.request)
+        qs = SupplierAPMovement.objects.filter(tenant=tenant)
+        params = self.request.query_params
+
+        if sid := _parse_optional_int(params.get('supplier')):
+            qs = qs.filter(supplier_id=sid)
+        if bid := _parse_optional_int(params.get('branch')):
+            qs = qs.filter(branch_id=bid)
+        if mt := params.get('movement_type'):
+            qs = qs.filter(movement_type=mt)
+        if sdt := params.get('source_document_type'):
+            qs = qs.filter(source_document_type=sdt)
+        if sdi := _parse_optional_int(params.get('source_document_id')):
+            qs = qs.filter(source_document_id=sdi)
+        return qs.order_by('id')
 
 
 class FinancialAccountBalanceView(_AccountScopedView):

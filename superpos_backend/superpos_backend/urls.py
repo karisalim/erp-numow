@@ -4,6 +4,11 @@ from django.contrib import admin
 from django.urls import path, include
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 
+from accounts.views import (
+    CustomerARMovementListView,
+    SupplierAPMovementListView,
+)
+
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/auth/',     include('accounts.urls')),
@@ -12,6 +17,13 @@ urlpatterns = [
     path('api/finance/',   include('accounts.finance_urls')),
     path('api/customers/', include('accounts.customers_urls')),
     path('api/suppliers/', include('accounts.suppliers_urls')),
+
+    # Phase 1.5 Slice F — tenant-wide flat AR/AP ledger streams.
+    # Mounted inline since each prefix only has one route — adding a
+    # dedicated URL module per single-endpoint prefix is overkill.
+    path('api/customer-ar/movements/', CustomerARMovementListView.as_view(), name='customer-ar-movement-list'),
+    path('api/supplier-ap/movements/', SupplierAPMovementListView.as_view(), name='supplier-ap-movement-list'),
+
     path('api/',           include('pos.urls')),
 
     # OpenAPI schema + Swagger UI
