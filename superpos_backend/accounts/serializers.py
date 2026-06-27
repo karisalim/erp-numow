@@ -4,16 +4,94 @@ from django.contrib.auth import get_user_model
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
-from .models import Branch, Tenant
+from .models import Branch, BranchSettings, BranchUserAssignment, Tenant
 
 User = get_user_model()
 
 
 class BranchSerializer(serializers.ModelSerializer):
+    """Legacy serializer kept for backward compatibility on
+    /api/auth/branches/ and /api/accounts/branches/ mounts.
+
+    The richer v3.6 surface lives in `BranchV2Serializer`; legacy clients
+    keep seeing the same flat shape they expect.
+    """
+
     class Meta:
         model  = Branch
         fields = ['id', 'name', 'address', 'phone', 'active', 'created_at']
         read_only_fields = ['id', 'created_at']
+
+
+class BranchV2Serializer(serializers.ModelSerializer):
+    """v3.6 master-data shape for the /api/branches/ surface.
+
+    Adds `code`, `branch_type`, `tax_number`, `currency`, `timezone`,
+    `is_main`, and exposes the legacy `active` column under the contract
+    name `is_active` (MASTER_DATA_CONTRACT.md §4.3). `tenant` is read-only
+    here — it is always set from the authenticated user, never accepted
+    from the client.
+    """
+
+    is_active = serializers.BooleanField(source='active', required=False)
+
+    class Meta:
+        model  = Branch
+        fields = [
+            'id', 'tenant',
+            'code', 'name', 'branch_type',
+            'address', 'phone', 'tax_number',
+            'currency', 'timezone',
+            'is_main', 'is_active',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'tenant', 'created_at', 'updated_at']
+
+
+class BranchSettingsSerializer(serializers.ModelSerializer):
+    """Settings document for a branch.
+
+    Forward-declared `*_id` defaults (warehouses, cashbox, price tier) stay
+    plain ints until those master tables exist in later slices.
+    """
+
+    class Meta:
+        model  = BranchSettings
+        fields = [
+            'id', 'tenant', 'branch',
+            'default_sales_warehouse_id',
+            'default_purchase_warehouse_id',
+            'default_cashbox_id',
+            'default_main_safe_id',
+            'default_price_tier_id',
+            'require_shift_for_pos',
+            'allow_negative_stock',
+            'allow_shift_close_with_open_orders',
+            'receipt_header',
+            'receipt_footer',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'tenant', 'branch', 'created_at', 'updated_at']
+
+
+class BranchUserAssignmentSerializer(serializers.ModelSerializer):
+    """Maps a user to a branch with a per-branch role.
+
+    `user` accepts a user id; the view sets `tenant` and `branch` from the
+    URL/auth context — those are never trusted from the request body.
+    """
+
+    user_username = serializers.CharField(source='user.username', read_only=True)
+
+    class Meta:
+        model  = BranchUserAssignment
+        fields = [
+            'id', 'tenant', 'branch',
+            'user', 'user_username',
+            'role_at_branch', 'is_default_branch', 'is_active',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'tenant', 'branch', 'created_at', 'updated_at']
 
 
 class UserSerializer(serializers.ModelSerializer):

@@ -8,10 +8,13 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from .models import Branch
+from .models import Branch, BranchSettings, BranchUserAssignment
 from .permissions import IsCashierOrAbove, IsManagerOrAbove
 from .serializers import (
     BranchSerializer,
+    BranchSettingsSerializer,
+    BranchUserAssignmentSerializer,
+    BranchV2Serializer,
     CustomTokenObtainPairSerializer,
     TenantSettingsSerializer,
     UserSerializer,
@@ -204,3 +207,174 @@ class UserDetailView(generics.RetrieveUpdateDestroyAPIView):
         if self.request.method in ('PUT', 'PATCH'):
             return UserUpdateSerializer
         return UserSerializer
+
+
+# ── /api/branches/ — v3.6 master-data surface (Phase 1.5 Slice A) ────────────
+
+def _tenant_or_404(request):
+    """Return the caller's tenant, or raise 404 if unattached.
+
+    Centralizes the tenant-scoping check so every branch view fails the same
+    way for a tenantless user. Returning 404 (vs. 400) hides the existence
+    of foreign-tenant resources from probing.
+    """
+    tenant = getattr(request.user, 'tenant', None)
+    if tenant is None:
+        raise NotFound('User is not associated with a tenant.')
+    return tenant
+
+
+class BranchV2ListCreateView(generics.ListCreateAPIView):
+    """GET/POST /api/branches/ — tenant-scoped.
+
+    Read open to any authenticated user in the tenant (cashiers need branch
+    lists to know where they are); create/modify is manager+.
+    """
+
+    serializer_class = BranchV2Serializer
+    search_fields    = ['name', 'code', 'address']
+    ordering         = ['name']
+
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+    def get_queryset(self):
+        tenant = _tenant_or_404(self.request)
+        return Branch.objects.filter(tenant=tenant)
+
+    def perform_create(self, serializer):
+        tenant = _tenant_or_404(self.request)
+        serializer.save(tenant=tenant)
+
+
+class BranchV2DetailView(generics.RetrieveUpdateAPIView):
+    """GET/PATCH /api/branches/{id}/ — no DELETE.
+
+    Per MASTER_DATA_CONTRACT.md §4.2 a branch cannot be deleted; use the
+    /deactivate/ action instead. `http_method_names` is the simplest guard.
+    """
+
+    serializer_class   = BranchV2Serializer
+    permission_classes = [IsManagerOrAbove]
+    http_method_names  = ['get', 'patch', 'head', 'options']
+
+    def get_queryset(self):
+        tenant = _tenant_or_404(self.request)
+        return Branch.objects.filter(tenant=tenant)
+
+
+class BranchDeactivateView(APIView):
+    """POST /api/branches/{id}/deactivate/ — flip `active` to False.
+
+    Idempotent: calling it twice yields the same end state and a 200. The
+    response mirrors the branch detail so the client can refresh state in
+    one round-trip.
+    """
+
+    permission_classes = [IsManagerOrAbove]
+
+    def post(self, request, pk):
+        tenant = _tenant_or_404(request)
+        branch = Branch.objects.filter(tenant=tenant, pk=pk).first()
+        if branch is None:
+            raise NotFound('Branch not found.')
+        if branch.active:
+            branch.active = False
+            branch.save(update_fields=['active', 'updated_at'])
+        return Response(BranchV2Serializer(branch).data)
+
+
+class BranchSettingsView(APIView):
+    """GET/PATCH /api/branches/{id}/settings/.
+
+    Settings are created lazily on first GET — saves the caller from having
+    to POST an empty document first. PATCH-only writes match the "partial
+    update" semantics the contract describes ("PATCH").
+    """
+
+    permission_classes = [IsManagerOrAbove]
+
+    def _branch(self, request, pk):
+        tenant = _tenant_or_404(request)
+        branch = Branch.objects.filter(tenant=tenant, pk=pk).first()
+        if branch is None:
+            raise NotFound('Branch not found.')
+        return tenant, branch
+
+    def _settings(self, tenant, branch):
+        settings_obj, _ = BranchSettings.objects.get_or_create(
+            branch=branch, defaults={'tenant': tenant},
+        )
+        return settings_obj
+
+    def get(self, request, pk):
+        tenant, branch = self._branch(request, pk)
+        return Response(BranchSettingsSerializer(self._settings(tenant, branch)).data)
+
+    def patch(self, request, pk):
+        tenant, branch = self._branch(request, pk)
+        settings_obj = self._settings(tenant, branch)
+        serializer = BranchSettingsSerializer(
+            settings_obj, data=request.data, partial=True,
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+
+class BranchUsersView(APIView):
+    """GET/POST /api/branches/{id}/users/.
+
+    GET → list of BranchUserAssignment rows for the branch.
+    POST → create or reactivate an assignment. The body supplies `user`,
+    optional `role_at_branch` (defaults to the user's current role),
+    optional `is_default_branch`. `tenant` and `branch` are derived from
+    the URL + auth and cannot be spoofed.
+
+    Repeated POSTs with the same `user` are idempotent at the model level
+    (unique constraint); the view returns 200 with the existing row instead
+    of 409, to match the "assign or reassign" UX.
+    """
+
+    permission_classes = [IsManagerOrAbove]
+
+    def _branch(self, request, pk):
+        tenant = _tenant_or_404(request)
+        branch = Branch.objects.filter(tenant=tenant, pk=pk).first()
+        if branch is None:
+            raise NotFound('Branch not found.')
+        return tenant, branch
+
+    def get(self, request, pk):
+        tenant, branch = self._branch(request, pk)
+        qs = BranchUserAssignment.objects.filter(tenant=tenant, branch=branch)
+        return Response(BranchUserAssignmentSerializer(qs, many=True).data)
+
+    def post(self, request, pk):
+        tenant, branch = self._branch(request, pk)
+        user_id = request.data.get('user')
+        if not user_id:
+            raise ValidationError({'user': 'This field is required.'})
+
+        # Enforce tenant isolation: the target user must belong to the
+        # caller's tenant, otherwise we'd happily wire users across tenants.
+        target = User.objects.filter(tenant=tenant, pk=user_id).first()
+        if target is None:
+            raise NotFound('User not found in this tenant.')
+
+        defaults = {
+            'tenant':            tenant,
+            'role_at_branch':    request.data.get('role_at_branch', target.role),
+            'is_default_branch': bool(request.data.get('is_default_branch', False)),
+            'is_active':         bool(request.data.get('is_active', True)),
+        }
+        assignment, created = BranchUserAssignment.objects.update_or_create(
+            tenant=tenant, branch=branch, user=target,
+            defaults=defaults,
+        )
+        return Response(
+            BranchUserAssignmentSerializer(assignment).data,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )

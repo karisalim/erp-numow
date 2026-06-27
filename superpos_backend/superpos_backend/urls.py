@@ -8,6 +8,7 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/auth/',     include('accounts.urls')),
     path('api/accounts/', include('accounts.urls')),
+    path('api/branches/', include('accounts.branches_urls')),
     path('api/',          include('pos.urls')),
 
     # OpenAPI schema + Swagger UI
