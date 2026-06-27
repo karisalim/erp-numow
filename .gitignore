@@ -10,3 +10,4 @@ backups/
 # Python cache
 __pycache__/
 *.py[cod]
+superpos/dist/

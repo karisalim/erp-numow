@@ -39,15 +39,21 @@ export const TRANSACTIONS: Transaction[] = [
   { id: 'TXN-481195', ts: '2026-05-11 12:54', cashier: 'Karim O.',  items: 7,  method: 'card',   total: 48.65,  status: 'Completed' },
 ];
 
+// `branch` is now typed `number | null` on `AppUser` (backend FK id). The
+// display label moved to `branch_name`; mock rows use `null` for the id so
+// they still satisfy the type while preserving the original demo strings.
+// `username` and `is_active` are also required by `AppUser` — derived from
+// the existing email local-part and the legacy `active` flag respectively,
+// so runtime behavior of any consumer is unchanged.
 export const USERS: AppUser[] = [
-  { id: 'u1', name: 'Mohamed Sayed', email: 'mohamed@superpos.io', role: 'Owner',   branch: 'All branches',        last: 'Active now',   active: true  },
-  { id: 'u2', name: 'Layla Hassan',  email: 'layla@superpos.io',   role: 'Admin',   branch: 'Cairo Downtown #03',  last: '12 min ago',   active: true  },
-  { id: 'u3', name: 'Ahmed H.',      email: 'ahmed@superpos.io',   role: 'Cashier', branch: 'Cairo Downtown #03',  last: 'Active now',   active: true  },
-  { id: 'u4', name: 'Sara Mostafa',  email: 'sara@superpos.io',    role: 'Cashier', branch: 'Cairo Downtown #03',  last: 'Active now',   active: true  },
-  { id: 'u5', name: 'Karim Othman',  email: 'karim@superpos.io',   role: 'Cashier', branch: 'Alexandria Port #01', last: '2 hours ago',  active: true  },
-  { id: 'u6', name: 'Nadia Farouk',  email: 'nadia@superpos.io',   role: 'Manager', branch: 'Alexandria Port #01', last: 'Yesterday',    active: true  },
-  { id: 'u7', name: 'Omar Khaled',   email: 'omar@superpos.io',    role: 'Manager', branch: 'Giza Pyramids #02',   last: '3 days ago',   active: false },
-  { id: 'u8', name: 'Yasmin Ali',    email: 'yasmin@superpos.io',  role: 'Cashier', branch: 'Giza Pyramids #02',   last: '1 week ago',   active: false },
+  { id: 'u1', username: 'mohamed', name: 'Mohamed Sayed', email: 'mohamed@superpos.io', role: 'Owner',   branch: null, branch_name: 'All branches',        last: 'Active now',   active: true,  is_active: true  },
+  { id: 'u2', username: 'layla',   name: 'Layla Hassan',  email: 'layla@superpos.io',   role: 'Admin',   branch: null, branch_name: 'Cairo Downtown #03',  last: '12 min ago',   active: true,  is_active: true  },
+  { id: 'u3', username: 'ahmed',   name: 'Ahmed H.',      email: 'ahmed@superpos.io',   role: 'Cashier', branch: null, branch_name: 'Cairo Downtown #03',  last: 'Active now',   active: true,  is_active: true  },
+  { id: 'u4', username: 'sara',    name: 'Sara Mostafa',  email: 'sara@superpos.io',    role: 'Cashier', branch: null, branch_name: 'Cairo Downtown #03',  last: 'Active now',   active: true,  is_active: true  },
+  { id: 'u5', username: 'karim',   name: 'Karim Othman',  email: 'karim@superpos.io',   role: 'Cashier', branch: null, branch_name: 'Alexandria Port #01', last: '2 hours ago',  active: true,  is_active: true  },
+  { id: 'u6', username: 'nadia',   name: 'Nadia Farouk',  email: 'nadia@superpos.io',   role: 'Manager', branch: null, branch_name: 'Alexandria Port #01', last: 'Yesterday',    active: true,  is_active: true  },
+  { id: 'u7', username: 'omar',    name: 'Omar Khaled',   email: 'omar@superpos.io',    role: 'Manager', branch: null, branch_name: 'Giza Pyramids #02',   last: '3 days ago',   active: false, is_active: false },
+  { id: 'u8', username: 'yasmin',  name: 'Yasmin Ali',    email: 'yasmin@superpos.io',  role: 'Cashier', branch: null, branch_name: 'Giza Pyramids #02',   last: '1 week ago',   active: false, is_active: false },
 ];
 
 export const PERMISSIONS: Record<string, number[]> = {
