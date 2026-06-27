@@ -2,3 +2,11 @@
 # Python cache
 __pycache__/
 *.py[cod]
+
+# Local database backups
+superpos_backend/backups/
+backups/
+
+# Python cache
+__pycache__/
+*.py[cod]
