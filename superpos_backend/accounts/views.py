@@ -14,6 +14,7 @@ from .models import (
     BranchSettings,
     BranchUserAssignment,
     FinancialAccount,
+    FinancialAccountMovement,
     PaymentMethod,
 )
 from .permissions import IsCashierOrAbove, IsManagerOrAbove
@@ -24,6 +25,7 @@ from .serializers import (
     BranchUserAssignmentSerializer,
     BranchV2Serializer,
     CustomTokenObtainPairSerializer,
+    FinancialAccountMovementSerializer,
     FinancialAccountSerializer,
     PaymentMethodSerializer,
     TenantSettingsSerializer,
@@ -31,6 +33,7 @@ from .serializers import (
     UserCreateSerializer,
     UserUpdateSerializer,
 )
+from .services import account_movements
 
 User = get_user_model()
 
@@ -594,3 +597,109 @@ class BranchPaymentMethodDeactivateView(_BranchPaymentBaseView):
                 link, context=_ctx_with_branch(self, branch),
             ).data,
         )
+
+
+# ── /api/finance/movements + per-account read endpoints (Slice D) ────────────
+
+def _parse_optional_int(value):
+    """Strict optional int parse — empty string / None → None, else int."""
+    if value in (None, ''):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ValidationError({'detail': f'Expected integer, got {value!r}.'})
+
+
+class FinancialAccountMovementListView(generics.ListAPIView):
+    """GET /api/finance/movements/ — flat tenant-wide ledger stream.
+
+    Query params:
+        account=<id>             filter to one account
+        branch=<id>              filter to one branch
+        movement_type=<type>     enum filter
+        source_document_type=<s> filter on opaque source string
+        source_document_id=<id>  filter on opaque source id
+    """
+
+    serializer_class   = FinancialAccountMovementSerializer
+    permission_classes = [IsManagerOrAbove]
+    ordering           = ['-id']
+
+    def get_queryset(self):
+        tenant = _tenant_or_404(self.request)
+        qs = FinancialAccountMovement.objects.filter(tenant=tenant)
+        params = self.request.query_params
+
+        account_id = _parse_optional_int(params.get('account'))
+        if account_id is not None:
+            qs = qs.filter(account_id=account_id)
+        branch_id = _parse_optional_int(params.get('branch'))
+        if branch_id is not None:
+            qs = qs.filter(branch_id=branch_id)
+        if mt := params.get('movement_type'):
+            qs = qs.filter(movement_type=mt)
+        if sdt := params.get('source_document_type'):
+            qs = qs.filter(source_document_type=sdt)
+        sdi = _parse_optional_int(params.get('source_document_id'))
+        if sdi is not None:
+            qs = qs.filter(source_document_id=sdi)
+        return qs.order_by('id')
+
+
+class _AccountScopedView(APIView):
+    """Shared lookup for endpoints rooted at /finance/accounts/{id}/..."""
+
+    permission_classes = [IsManagerOrAbove]
+
+    def _account(self, request, pk):
+        tenant = _tenant_or_404(request)
+        account = FinancialAccount.objects.filter(tenant=tenant, pk=pk).first()
+        if account is None:
+            raise NotFound('Financial account not found.')
+        return tenant, account
+
+
+class FinancialAccountStatementView(_AccountScopedView):
+    """GET /api/finance/accounts/{id}/movements/ — per-account statement."""
+
+    http_method_names = ['get', 'head', 'options']
+
+    def get(self, request, pk):
+        tenant, account = self._account(request, pk)
+        params = request.query_params
+
+        branch_id = _parse_optional_int(params.get('branch'))
+        branch = None
+        if branch_id is not None:
+            branch = Branch.objects.filter(tenant=tenant, pk=branch_id).first()
+            if branch is None:
+                raise NotFound('Branch not found.')
+
+        qs = account_movements.get_account_statement(
+            account,
+            branch=branch,
+            movement_type=params.get('movement_type') or None,
+            source_document_type=params.get('source_document_type') or None,
+            source_document_id=_parse_optional_int(params.get('source_document_id')),
+            occurred_from=params.get('occurred_from') or None,
+            occurred_to=params.get('occurred_to') or None,
+        )
+        return Response(FinancialAccountMovementSerializer(qs, many=True).data)
+
+
+class FinancialAccountBalanceView(_AccountScopedView):
+    """GET /api/finance/accounts/{id}/balance/ — derived current balance."""
+
+    http_method_names = ['get', 'head', 'options']
+
+    def get(self, request, pk):
+        tenant, account = self._account(request, pk)
+        balance = account_movements.get_account_current_balance(account)
+        return Response({
+            'account_id':      account.id,
+            'account_type':    account.account_type,
+            'currency':        account.currency,
+            'opening_balance': str(account.opening_balance),
+            'balance':         str(balance),
+        })

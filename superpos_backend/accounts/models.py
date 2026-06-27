@@ -502,3 +502,131 @@ class BranchPaymentMethod(models.Model):
 
     def __str__(self):
         return f'{self.branch} :: {self.payment_method} -> {self.destination_account}'
+
+
+# ── Universal Movement Ledger (Phase 1.5 Slice D) ────────────────────────────
+
+class FinancialAccountMovement(models.Model):
+    """Append-only ledger row for money flowing into/out of a FinancialAccount.
+
+    MASTER_DATA_CONTRACT.md §6.3 (FinancialAccountMovement). Every posted
+    document in later slices (sales, purchases, customer receipts,
+    supplier payments, cash drops, expenses, …) will write one or more rows
+    here through `accounts.services.account_movements`. Reports read from
+    these rows, never from UI state.
+
+    Sign convention:
+        * `debit`  is always positive (Decimal >= 0)
+        * `credit` is always positive (Decimal >= 0)
+        * exactly one of (debit, credit) is non-zero per row (enforced by
+          DB CHECK + service layer).
+
+    For asset-like account types (cashbox/main_safe/bank/card_settlement/
+    wallet/customer_ar/expense/opening_balance/other), debit increases the
+    balance and credit decreases it. For liability-like accounts
+    (supplier_ap) the rule flips: credit increases, debit decreases.
+    Centralized in `account_movements.balance_delta()` so future AR/AP
+    additions only touch one place.
+
+    `balance_after` is computed by the service at write time using a
+    `select_for_update()` lock on prior rows, so concurrent posts can't
+    interleave and produce an out-of-order running balance.
+
+    `source_document_type` + `source_document_id` are opaque pointers — the
+    service writer is responsible for setting them; we deliberately do NOT
+    FK to a generic content type so this table stays tenant-clean and
+    cheaply indexable.
+
+    `terminal_id` and `shift_id` are forward-declared as plain ints because
+    Terminal exists today but Shift doesn't yet (lands in a later slice).
+    A future migration can swap shift_id for a real FK without data loss.
+    """
+
+    class MovementType(models.TextChoices):
+        OPENING_BALANCE          = 'opening_balance',          'Opening Balance'
+        SALES_CASH_IN            = 'sales_cash_in',            'Sales Cash In'
+        SALES_CARD_IN            = 'sales_card_in',            'Sales Card In'
+        SALES_WALLET_IN          = 'sales_wallet_in',          'Sales Wallet In'
+        SALES_CREDIT             = 'sales_credit',             'Sales Credit'
+        CUSTOMER_RECEIPT_IN      = 'customer_receipt_in',      'Customer Receipt In'
+        SALES_RETURN_OUT         = 'sales_return_out',         'Sales Return Out'
+        PURCHASE_OUT             = 'purchase_out',             'Purchase Out'
+        SUPPLIER_PAYMENT_OUT     = 'supplier_payment_out',     'Supplier Payment Out'
+        SUPPLIER_AP_INCREASE     = 'supplier_ap_increase',     'Supplier AP Increase'
+        PURCHASE_RETURN_IN       = 'purchase_return_in',       'Purchase Return In'
+        EXPENSE_OUT              = 'expense_out',              'Expense Out'
+        EXPENSE_RECORDED         = 'expense_recorded',         'Expense Recorded'
+        CASH_IN                  = 'cash_in',                  'Cash In'
+        CASH_OUT                 = 'cash_out',                 'Cash Out'
+        CASH_DROP_OUT            = 'cash_drop_out',            'Cash Drop Out'
+        CASH_DROP_IN             = 'cash_drop_in',             'Cash Drop In'
+        SETTLEMENT_TO_BANK       = 'settlement_to_bank',       'Settlement To Bank'
+        SETTLEMENT_FROM_CARD     = 'settlement_from_card',     'Settlement From Card'
+        ROUNDING_ADJUSTMENT      = 'rounding_adjustment',      'Rounding Adjustment'
+        OTHER                    = 'other',                    'Other'
+
+    tenant = models.ForeignKey(
+        Tenant, on_delete=models.CASCADE,
+        related_name='account_movements', db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch, on_delete=models.PROTECT,
+        related_name='account_movements', db_index=True,
+        # Nullable because a tenant-wide account (e.g. headquarters bank)
+        # may receive a movement that isn't anchored to a specific branch.
+        null=True, blank=True,
+    )
+    account = models.ForeignKey(
+        FinancialAccount, on_delete=models.PROTECT,
+        related_name='movements',
+    )
+    source_document_type = models.CharField(max_length=80, blank=True, default='')
+    source_document_id   = models.BigIntegerField(null=True, blank=True)
+    movement_type        = models.CharField(
+        max_length=40, choices=MovementType.choices, db_index=True,
+    )
+    debit         = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    credit        = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    balance_after = models.DecimalField(max_digits=18, decimal_places=2)
+    currency      = models.CharField(max_length=8, blank=True, default='')
+    actor_user    = models.ForeignKey(
+        'accounts.User', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='account_movements',
+    )
+    terminal_id   = models.BigIntegerField(null=True, blank=True)
+    shift_id      = models.BigIntegerField(null=True, blank=True)
+    occurred_at   = models.DateTimeField(db_index=True)
+    notes         = models.CharField(max_length=255, blank=True, default='')
+    created_at    = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['account_id', 'id']
+        indexes = [
+            models.Index(fields=['tenant', 'account', 'id'], name='acct_mvmt_t_a_id_idx'),
+            models.Index(fields=['tenant', 'branch', 'occurred_at'], name='acct_mvmt_t_b_occ_idx'),
+            models.Index(
+                fields=['source_document_type', 'source_document_id'],
+                name='acct_mvmt_src_idx',
+            ),
+        ]
+        constraints = [
+            # Both sides must be >= 0 …
+            models.CheckConstraint(
+                check=models.Q(debit__gte=0) & models.Q(credit__gte=0),
+                name='acct_mvmt_nonneg',
+            ),
+            # … and exactly one side must be > 0. Encoded as: NOT (both > 0)
+            # AND NOT (both == 0).
+            models.CheckConstraint(
+                check=~(models.Q(debit__gt=0) & models.Q(credit__gt=0)),
+                name='acct_mvmt_one_side_only',
+            ),
+            models.CheckConstraint(
+                check=~(models.Q(debit=0) & models.Q(credit=0)),
+                name='acct_mvmt_nonzero',
+            ),
+        ]
+
+    def __str__(self):
+        side = f'+{self.debit}' if self.debit else f'-{self.credit}'
+        return f'Mvmt[{self.account_id}] {self.movement_type} {side} → {self.balance_after}'

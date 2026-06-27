@@ -10,6 +10,7 @@ from .models import (
     BranchSettings,
     BranchUserAssignment,
     FinancialAccount,
+    FinancialAccountMovement,
     PaymentMethod,
     Tenant,
 )
@@ -518,6 +519,34 @@ class BranchPaymentMethodSerializer(serializers.ModelSerializer):
             })
 
         return attrs
+
+
+class FinancialAccountMovementSerializer(serializers.ModelSerializer):
+    """Read-only ledger row.
+
+    Writes go through `accounts.services.account_movements` — the API
+    surface deliberately does not accept POSTs to this resource in this
+    slice. `balance_after` is computed by the service, never trusted from
+    a client.
+    """
+
+    account_name         = serializers.CharField(source='account.name',         read_only=True)
+    account_type         = serializers.CharField(source='account.account_type', read_only=True)
+    actor_user_username  = serializers.CharField(source='actor_user.username',  read_only=True)
+
+    class Meta:
+        model  = FinancialAccountMovement
+        fields = [
+            'id', 'tenant', 'branch',
+            'account', 'account_name', 'account_type',
+            'source_document_type', 'source_document_id',
+            'movement_type',
+            'debit', 'credit', 'balance_after', 'currency',
+            'actor_user', 'actor_user_username',
+            'terminal_id', 'shift_id',
+            'occurred_at', 'notes', 'created_at',
+        ]
+        read_only_fields = fields
 
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):

@@ -397,6 +397,74 @@ def products_import(request):
 
 # ── Inventory batches ─────────────────────────────────────────────────────────
 
+class ProductStockMovementListView(TenantMixin, generics.ListAPIView):
+    """GET /api/products/{pk}/stock-movements/ — per-product audit trail.
+
+    Read-only counterpart to `StockMovementListCreateView` (which also
+    accepts POST for legacy "Receive Stock" UX). Always tenant-scoped via
+    `TenantMixin`. Optional `branch` filter for per-branch slices.
+    """
+
+    serializer_class   = StockMovementSerializer
+    permission_classes = [IsManagerOrAbove]
+    ordering           = ['-id']
+
+    def get_queryset(self):
+        tenant = self._tenant()
+        if tenant is None:
+            return StockMovement.objects.none()
+        qs = StockMovement.objects.filter(
+            tenant=tenant, product_id=self.kwargs['pk'],
+        )
+        branch = self.request.query_params.get('branch')
+        if branch:
+            qs = qs.filter(branch_id=branch)
+        movement_type = self.request.query_params.get('movement_type')
+        if movement_type:
+            qs = qs.filter(movement_type=movement_type)
+        return qs.order_by('id')
+
+
+class ProductStockBalanceView(generics.GenericAPIView):
+    """GET /api/products/{pk}/stock-balance/ — ledger-derived balance.
+
+    Computed from StockMovement (in − out) so reports never trust the
+    cached `Product.stock` value. Pass `?branch=<id>` for a per-branch
+    balance.
+    """
+
+    permission_classes = [IsManagerOrAbove]
+
+    def get(self, request, pk):
+        from pos.services import stock_movements as svc
+
+        tenant = getattr(request.user, 'tenant', None)
+        product = Product.objects.filter(tenant=tenant, pk=pk).first()
+        if product is None:
+            return Response(
+                {'detail': 'Product not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        branch_id = request.query_params.get('branch')
+        branch = None
+        if branch_id:
+            from accounts.models import Branch as _Branch
+            branch = _Branch.objects.filter(tenant=tenant, pk=branch_id).first()
+            if branch is None:
+                return Response(
+                    {'detail': 'Branch not found.'},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+        balance = svc.get_product_stock_balance(product, branch=branch)
+        return Response({
+            'product_id':    product.id,
+            'product_name':  product.name,
+            'branch_id':     branch.id if branch else None,
+            'cached_stock':  str(product.stock),
+            'ledger_stock':  str(balance),
+        })
+
+
 class StockMovementListCreateView(TenantMixin, generics.ListCreateAPIView):
     """
     GET  /api/stock-movements/?product_id=<id>

@@ -14,6 +14,9 @@ urlpatterns = [
     path('products/scan/<str:barcode>/',    views.product_scan,                    name='product-scan'),
     path('products/<int:pk>/',              views.ProductDetailView.as_view(),     name='product-detail'),
     path('products/<int:pk>/stock/',        views.product_stock_update,            name='product-stock'),
+    # Phase 1.5 Slice D — per-product ledger views (read-only).
+    path('products/<int:pk>/stock-movements/', views.ProductStockMovementListView.as_view(), name='product-stock-movements'),
+    path('products/<int:pk>/stock-balance/',   views.ProductStockBalanceView.as_view(),      name='product-stock-balance'),
 
     # Inventory — batches (CRUD)
     path('inventory/batches/',          views.InventoryBatchListCreateView.as_view(), name='batch-list'),

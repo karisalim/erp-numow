@@ -273,6 +273,22 @@ class StockMovement(models.Model):
         null=True, blank=True, related_name='movements',
     )
     note          = models.CharField(max_length=200, blank=True, default='')
+
+    # ── Universal movement linkage (Phase 1.5 Slice D) ───────────────────────
+    # `sale` above is a hard-coded FK to the legacy Sale model — it can't
+    # represent a movement caused by a (future) PurchaseInvoice, OpenOrder,
+    # ManualAdjustmentDoc, etc. MASTER_DATA_CONTRACT.md §6.3 requires every
+    # movement to carry `source_document_type` + `source_document_id` so the
+    # future posting engine can attach any document kind without hijacking
+    # the legacy `sale` slot. `actor_user` is the operator audit pointer.
+    # All three are nullable so legacy rows backfill to NULL cleanly.
+    source_document_type = models.CharField(max_length=80, blank=True, default='')
+    source_document_id   = models.BigIntegerField(null=True, blank=True)
+    actor_user = models.ForeignKey(
+        'accounts.User', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='stock_movements',
+    )
+
     created_at    = models.DateTimeField(auto_now_add=True)
     updated_at    = models.DateTimeField(auto_now=True)
 
