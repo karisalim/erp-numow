@@ -11,11 +11,13 @@ from .models import (
     BranchUserAssignment,
     Customer,
     CustomerARMovement,
+    CustomerReceipt,
     FinancialAccount,
     FinancialAccountMovement,
     PaymentMethod,
     Supplier,
     SupplierAPMovement,
+    SupplierPayment,
     Tenant,
 )
 
@@ -670,6 +672,81 @@ class SupplierAPMovementSerializer(serializers.ModelSerializer):
             'occurred_at', 'notes', 'created_at',
         ]
         read_only_fields = fields
+
+
+# ── Settlement document serializers (Phase 1.5 Slice G) ─────────────────────
+
+
+class CustomerReceiptSerializer(serializers.ModelSerializer):
+    """Read view + create payload for a CustomerReceipt.
+
+    Writes do NOT go through the serializer's `.save()` path — the view
+    pulls validated field values out and hands them to
+    `accounts.services.customer_receipts.create_customer_receipt`, which
+    is the only place that produces a receipt + its ledger rows
+    atomically. Letting the serializer save the model directly would
+    create an orphaned document (no AR / no finance movement).
+
+    `tenant` is read-only and set from the request user; the request body
+    is never trusted to set it.
+    """
+
+    customer_name              = serializers.CharField(source='customer.name',                    read_only=True)
+    payment_method_name        = serializers.CharField(source='payment_method.name',              read_only=True)
+    payment_method_type        = serializers.CharField(source='payment_method.method_type',       read_only=True)
+    destination_account_name   = serializers.CharField(source='destination_account.name',         read_only=True)
+    destination_account_type   = serializers.CharField(source='destination_account.account_type', read_only=True)
+    actor_user_username        = serializers.CharField(source='actor_user.username',              read_only=True)
+
+    class Meta:
+        model  = CustomerReceipt
+        fields = [
+            'id', 'tenant', 'branch',
+            'customer', 'customer_name',
+            'payment_method', 'payment_method_name', 'payment_method_type',
+            'destination_account', 'destination_account_name', 'destination_account_type',
+            'amount', 'reference', 'notes',
+            'status', 'posted_at',
+            'actor_user', 'actor_user_username',
+            'created_at',
+        ]
+        read_only_fields = [
+            'id', 'tenant', 'status', 'posted_at',
+            'actor_user', 'created_at',
+        ]
+
+
+class SupplierPaymentSerializer(serializers.ModelSerializer):
+    """Read view + create payload for a SupplierPayment.
+
+    Same write contract as `CustomerReceiptSerializer` — the view calls
+    `accounts.services.supplier_payments.create_supplier_payment` rather
+    than `.save()` so the document and ledger rows are written together.
+    """
+
+    supplier_name           = serializers.CharField(source='supplier.name',                read_only=True)
+    payment_method_name     = serializers.CharField(source='payment_method.name',          read_only=True)
+    payment_method_type     = serializers.CharField(source='payment_method.method_type',   read_only=True)
+    source_account_name     = serializers.CharField(source='source_account.name',          read_only=True)
+    source_account_type     = serializers.CharField(source='source_account.account_type',  read_only=True)
+    actor_user_username     = serializers.CharField(source='actor_user.username',          read_only=True)
+
+    class Meta:
+        model  = SupplierPayment
+        fields = [
+            'id', 'tenant', 'branch',
+            'supplier', 'supplier_name',
+            'payment_method', 'payment_method_name', 'payment_method_type',
+            'source_account', 'source_account_name', 'source_account_type',
+            'amount', 'reference', 'notes',
+            'status', 'posted_at',
+            'actor_user', 'actor_user_username',
+            'created_at',
+        ]
+        read_only_fields = [
+            'id', 'tenant', 'status', 'posted_at',
+            'actor_user', 'created_at',
+        ]
 
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):

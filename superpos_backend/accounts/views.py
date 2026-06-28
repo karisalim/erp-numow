@@ -15,11 +15,13 @@ from .models import (
     BranchUserAssignment,
     Customer,
     CustomerARMovement,
+    CustomerReceipt,
     FinancialAccount,
     FinancialAccountMovement,
     PaymentMethod,
     Supplier,
     SupplierAPMovement,
+    SupplierPayment,
 )
 from .permissions import IsCashierOrAbove, IsManagerOrAbove
 from .serializers import (
@@ -29,12 +31,14 @@ from .serializers import (
     BranchUserAssignmentSerializer,
     BranchV2Serializer,
     CustomerARMovementSerializer,
+    CustomerReceiptSerializer,
     CustomerSerializer,
     CustomTokenObtainPairSerializer,
     FinancialAccountMovementSerializer,
     FinancialAccountSerializer,
     PaymentMethodSerializer,
     SupplierAPMovementSerializer,
+    SupplierPaymentSerializer,
     SupplierSerializer,
     TenantSettingsSerializer,
     UserSerializer,
@@ -43,7 +47,10 @@ from .serializers import (
 )
 from .services import account_movements
 from .services import customer_ar as customer_ar_svc
+from .services import customer_receipts as customer_receipts_svc
 from .services import supplier_ap as supplier_ap_svc
+from .services import supplier_payments as supplier_payments_svc
+from pos.services import idempotency
 
 User = get_user_model()
 
@@ -981,3 +988,256 @@ class FinancialAccountBalanceView(_AccountScopedView):
             'opening_balance': str(account.opening_balance),
             'balance':         str(balance),
         })
+
+
+# ── Settlement endpoints (Phase 1.5 Slice G) ────────────────────────────────
+#
+# CustomerReceipt + SupplierPayment POSTs hand off to the dedicated
+# posting services — never to `serializer.save()` directly — so the
+# document and ledger rows always travel together inside one atomic
+# transaction. POST also supports `Idempotency-Key`: replaying the same
+# key + payload returns the stored response; reusing the key with a
+# different payload returns 409 (per API_CONTRACT.md §2). DELETE is
+# deliberately not exposed; reversal is a future compensating-document
+# slice, not a row mutation.
+
+
+def _resolve_party_fk(model, *, tenant, pk, label):
+    """Look up `model.id=pk` within the caller's tenant or raise 400.
+
+    The serializer would normally do this via its FK field's queryset, but
+    we look up parties before the serializer runs so the posting service
+    receives actual model instances, not raw ids. Foreign-tenant ids
+    raise ValidationError (400) rather than NotFound (404) because the
+    request is well-formed but the referenced row is unreachable.
+    """
+    if pk in (None, ''):
+        raise ValidationError({label: 'This field is required.'})
+    try:
+        pk_int = int(pk)
+    except (TypeError, ValueError):
+        raise ValidationError({label: 'Must be an integer id.'})
+    obj = model.objects.filter(tenant=tenant, pk=pk_int).first()
+    if obj is None:
+        raise ValidationError({label: f'{model.__name__} not found in this tenant.'})
+    return obj
+
+
+def _resolve_branch_fk(*, tenant, pk):
+    """Optional branch — null is allowed (tenant-wide receipt)."""
+    if pk in (None, ''):
+        return None
+    try:
+        pk_int = int(pk)
+    except (TypeError, ValueError):
+        raise ValidationError({'branch': 'Must be an integer id.'})
+    branch = Branch.objects.filter(tenant=tenant, pk=pk_int).first()
+    if branch is None:
+        raise ValidationError({'branch': 'Branch not found in this tenant.'})
+    return branch
+
+
+class _SettlementListCreateBase(APIView):
+    """Shared POST-with-idempotency + GET list scaffolding.
+
+    Subclasses set `model`, `serializer_class`, `post_endpoint_label`
+    (for the idempotency record path field), and override `_create()` to
+    call the right posting service.
+    """
+
+    permission_classes = [IsCashierOrAbove]
+    model = None
+    serializer_class = None
+    post_endpoint_label = ''
+
+    # ── List ──────────────────────────────────────────────────────────────────
+
+    def get_queryset(self, tenant, params):
+        qs = self.model.objects.filter(tenant=tenant)
+        bid = _parse_optional_int(params.get('branch'))
+        if bid is not None:
+            qs = qs.filter(branch_id=bid)
+        return qs.order_by('-id')
+
+    def get(self, request):
+        tenant = _tenant_or_404(request)
+        qs = self.get_queryset(tenant, request.query_params)
+        return Response(self.serializer_class(qs, many=True).data)
+
+    # ── Create ────────────────────────────────────────────────────────────────
+
+    def _create(self, *, tenant, request, data):
+        """Subclass hook — must return a serialized response body."""
+        raise NotImplementedError
+
+    def post(self, request):
+        tenant = _tenant_or_404(request)
+        key = request.headers.get('Idempotency-Key') or ''
+        payload = request.data
+
+        # Idempotency check — proceed / replay / conflict.
+        lookup = idempotency.lookup(
+            tenant=tenant, key=key, payload=payload,
+            method=request.method, path=request.path, user=request.user,
+        )
+        if lookup.conflict:
+            return Response(
+                {
+                    'error': {
+                        'code': 'IDEMPOTENCY_CONFLICT',
+                        'detail': (
+                            f'Idempotency-Key {key!r} reused with a different payload.'
+                        ),
+                    },
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        if lookup.replay:
+            return Response(lookup.body, status=lookup.status)
+
+        body = self._create(tenant=tenant, request=request, data=payload)
+        response = Response(body, status=status.HTTP_201_CREATED)
+
+        # Persist the snapshot only after the work has succeeded so that a
+        # later replay returns the same 201 with the same body. Failure
+        # paths above (raised before this point) never write a snapshot,
+        # so the next legitimate attempt with the same key can retry.
+        idempotency.save(
+            tenant=tenant, key=key, payload=payload,
+            method=request.method, path=request.path, user=request.user,
+            response_status=response.status_code, response_body=body,
+        )
+        return response
+
+
+class _SettlementDetailBase(APIView):
+    """Shared GET-detail scaffolding for settlement documents."""
+
+    permission_classes = [IsCashierOrAbove]
+    model = None
+    serializer_class = None
+
+    def get(self, request, pk):
+        tenant = _tenant_or_404(request)
+        obj = self.model.objects.filter(tenant=tenant, pk=pk).first()
+        if obj is None:
+            raise NotFound(f'{self.model.__name__} not found.')
+        return Response(self.serializer_class(obj).data)
+
+
+# Customer receipts ──────────────────────────────────────────────────────────
+
+class CustomerReceiptListCreateView(_SettlementListCreateBase):
+    """GET/POST /api/customer-receipts/.
+
+    GET supports `?branch=<id>` filter; POST accepts the standard
+    receipt payload + an `Idempotency-Key` header.
+    """
+
+    model               = CustomerReceipt
+    serializer_class    = CustomerReceiptSerializer
+    post_endpoint_label = 'customer-receipts'
+
+    def get_queryset(self, tenant, params):
+        qs = super().get_queryset(tenant, params)
+        if cid := _parse_optional_int(params.get('customer')):
+            qs = qs.filter(customer_id=cid)
+        return qs
+
+    def _create(self, *, tenant, request, data):
+        # Resolve every FK against the caller's tenant before handing the
+        # service real model instances. Looking these up here (rather
+        # than via DRF FK fields) gives us a single tenant-scoping
+        # checkpoint and lets the service stay decoupled from DRF.
+        customer = _resolve_party_fk(
+            Customer, tenant=tenant, pk=data.get('customer'), label='customer',
+        )
+        payment_method = _resolve_party_fk(
+            PaymentMethod, tenant=tenant, pk=data.get('payment_method'),
+            label='payment_method',
+        )
+        destination_account = _resolve_party_fk(
+            FinancialAccount, tenant=tenant, pk=data.get('destination_account'),
+            label='destination_account',
+        )
+        branch = _resolve_branch_fk(tenant=tenant, pk=data.get('branch'))
+
+        try:
+            receipt = customer_receipts_svc.create_customer_receipt(
+                tenant=tenant,
+                branch=branch,
+                customer=customer,
+                payment_method=payment_method,
+                destination_account=destination_account,
+                amount=data.get('amount'),
+                reference=(data.get('reference') or ''),
+                notes=(data.get('notes') or ''),
+                actor_user=getattr(request, 'user', None),
+            )
+        except customer_receipts_svc.CustomerReceiptError as exc:
+            raise ValidationError({'detail': str(exc)})
+
+        return CustomerReceiptSerializer(receipt).data
+
+
+class CustomerReceiptDetailView(_SettlementDetailBase):
+    """GET /api/customer-receipts/{id}/ — read-only."""
+
+    model            = CustomerReceipt
+    serializer_class = CustomerReceiptSerializer
+    http_method_names = ['get', 'head', 'options']
+
+
+# Supplier payments ──────────────────────────────────────────────────────────
+
+class SupplierPaymentListCreateView(_SettlementListCreateBase):
+    """GET/POST /api/supplier-payments/."""
+
+    model               = SupplierPayment
+    serializer_class    = SupplierPaymentSerializer
+    post_endpoint_label = 'supplier-payments'
+
+    def get_queryset(self, tenant, params):
+        qs = super().get_queryset(tenant, params)
+        if sid := _parse_optional_int(params.get('supplier')):
+            qs = qs.filter(supplier_id=sid)
+        return qs
+
+    def _create(self, *, tenant, request, data):
+        supplier = _resolve_party_fk(
+            Supplier, tenant=tenant, pk=data.get('supplier'), label='supplier',
+        )
+        payment_method = _resolve_party_fk(
+            PaymentMethod, tenant=tenant, pk=data.get('payment_method'),
+            label='payment_method',
+        )
+        source_account = _resolve_party_fk(
+            FinancialAccount, tenant=tenant, pk=data.get('source_account'),
+            label='source_account',
+        )
+        branch = _resolve_branch_fk(tenant=tenant, pk=data.get('branch'))
+
+        try:
+            payment = supplier_payments_svc.create_supplier_payment(
+                tenant=tenant,
+                branch=branch,
+                supplier=supplier,
+                payment_method=payment_method,
+                source_account=source_account,
+                amount=data.get('amount'),
+                reference=(data.get('reference') or ''),
+                notes=(data.get('notes') or ''),
+                actor_user=getattr(request, 'user', None),
+            )
+        except supplier_payments_svc.SupplierPaymentError as exc:
+            raise ValidationError({'detail': str(exc)})
+
+        return SupplierPaymentSerializer(payment).data
+
+
+class SupplierPaymentDetailView(_SettlementDetailBase):
+    """GET /api/supplier-payments/{id}/ — read-only."""
+
+    model            = SupplierPayment
+    serializer_class = SupplierPaymentSerializer
+    http_method_names = ['get', 'head', 'options']

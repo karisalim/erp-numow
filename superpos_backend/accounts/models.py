@@ -874,3 +874,156 @@ class SupplierAPMovement(_PartyMovementBase):
     def __str__(self):
         side = f'+{self.debit}' if self.debit else f'-{self.credit}'
         return f'AP[{self.supplier_id}] {self.movement_type} {side} → {self.balance_after}'
+
+
+# ── Settlement Documents (Phase 1.5 Slice G) ─────────────────────────────────
+#
+# CustomerReceipt and SupplierPayment are the first real *settlement
+# documents* in the system. Each one is a small header record whose
+# successful create-and-post produces:
+#   * one document row (this table), plus
+#   * one party-ledger row (CustomerARMovement / SupplierAPMovement), plus
+#   * one finance-ledger row (FinancialAccountMovement)
+#
+# All three are written inside a single atomic transaction by the posting
+# service so partial postings are impossible (see
+# `accounts/services/customer_receipts.py` and `supplier_payments.py`).
+#
+# Status model:
+#   This slice ships POSTED only. The existing transactional shape in the
+#   codebase doesn't carry a generic cancel/reverse pattern yet, so we
+#   intentionally keep it minimal — `posted_at` records the post timestamp
+#   and the row is immutable thereafter. Future slices that need to undo a
+#   receipt/payment will post a *compensating* document (sign-flipped
+#   ledger rows), not mutate this one. That keeps the audit trail honest.
+
+class _SettlementDocumentBase(models.Model):
+    """Shared columns for settlement documents (CustomerReceipt /
+    SupplierPayment).
+
+    Both documents share an identical header shape — only the party FK and
+    the account-side semantics differ. Centralising the shared columns here
+    keeps the per-document model files terse and lets a future slice add
+    fields (e.g. `currency`, `exchange_rate`, `posted_by_terminal`) in one
+    place.
+    """
+
+    class Status(models.TextChoices):
+        POSTED = 'posted', 'Posted'
+
+    tenant = models.ForeignKey(
+        Tenant, on_delete=models.CASCADE,
+        related_name='+', db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch, on_delete=models.PROTECT,
+        related_name='+', db_index=True,
+        null=True, blank=True,
+    )
+    payment_method = models.ForeignKey(
+        PaymentMethod, on_delete=models.PROTECT,
+        related_name='+',
+    )
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    reference = models.CharField(max_length=120, blank=True, default='')
+    notes     = models.CharField(max_length=255, blank=True, default='')
+    status    = models.CharField(
+        max_length=10, choices=Status.choices,
+        default=Status.POSTED, db_index=True,
+    )
+    posted_at = models.DateTimeField(db_index=True)
+    actor_user = models.ForeignKey(
+        'accounts.User', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        abstract = True
+        ordering = ['-id']
+
+
+class CustomerReceipt(_SettlementDocumentBase):
+    """A customer's settlement of an outstanding AR balance.
+
+    Posting flow (atomic — see `accounts.services.customer_receipts.create_customer_receipt`):
+        1. CustomerReceipt row is created here.
+        2. CustomerARMovement.credit posted against the customer (AR ↓).
+        3. FinancialAccountMovement.debit posted against the destination
+           account (cashbox / bank / wallet / card_settlement balance ↑).
+
+    `destination_account` MUST be account-type compatible with the
+    selected `payment_method.method_type`. The compatibility matrix lives
+    in the serializer/service layer (mirrors the rules already enforced
+    by `BranchPaymentMethodSerializer`). For credit-type methods, the
+    destination_account would be customer_ar — but a "credit receipt"
+    is nonsense (it'd be paying AR with AR), so credit methods are
+    rejected at the service layer.
+    """
+
+    customer = models.ForeignKey(
+        Customer, on_delete=models.PROTECT,
+        related_name='receipts',
+    )
+    destination_account = models.ForeignKey(
+        FinancialAccount, on_delete=models.PROTECT,
+        related_name='customer_receipts',
+    )
+
+    class Meta:
+        ordering = ['-id']
+        indexes = [
+            models.Index(fields=['tenant', 'customer', 'id'], name='cust_rcpt_t_c_id_idx'),
+            models.Index(fields=['tenant', 'branch', 'posted_at'], name='cust_rcpt_t_b_pst_idx'),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(amount__gt=0),
+                name='cust_rcpt_amount_positive',
+            ),
+        ]
+
+    def __str__(self):
+        return f'CustomerReceipt[{self.id}] {self.customer_id} {self.amount} ({self.status})'
+
+
+class SupplierPayment(_SettlementDocumentBase):
+    """A payment we made to settle an outstanding AP balance with a supplier.
+
+    Posting flow (atomic — see `accounts.services.supplier_payments.create_supplier_payment`):
+        1. SupplierPayment row is created here.
+        2. SupplierAPMovement.debit posted against the supplier (AP ↓).
+        3. FinancialAccountMovement.credit posted against the source
+           account (cashbox / bank / wallet balance ↓).
+
+    `source_account` MUST be account-type compatible — paying a supplier
+    from a card_settlement account is not a meaningful real-world flow,
+    so the service layer restricts source accounts to cashbox / bank /
+    wallet / main_safe. Credit-type payment methods are rejected (a
+    "credit payment to supplier" would be increasing AP, not settling it).
+    """
+
+    supplier = models.ForeignKey(
+        Supplier, on_delete=models.PROTECT,
+        related_name='payments',
+    )
+    source_account = models.ForeignKey(
+        FinancialAccount, on_delete=models.PROTECT,
+        related_name='supplier_payments',
+    )
+
+    class Meta:
+        ordering = ['-id']
+        indexes = [
+            models.Index(fields=['tenant', 'supplier', 'id'], name='sup_pmt_t_s_id_idx'),
+            models.Index(fields=['tenant', 'branch', 'posted_at'], name='sup_pmt_t_b_pst_idx'),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(amount__gt=0),
+                name='sup_pmt_amount_positive',
+            ),
+        ]
+
+    def __str__(self):
+        return f'SupplierPayment[{self.id}] {self.supplier_id} {self.amount} ({self.status})'

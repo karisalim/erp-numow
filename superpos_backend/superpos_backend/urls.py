@@ -8,6 +8,10 @@ from accounts.views import (
     CustomerARMovementListView,
     SupplierAPMovementListView,
 )
+from accounts.settlements_urls import (
+    customer_receipt_urlpatterns,
+    supplier_payment_urlpatterns,
+)
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -23,6 +27,10 @@ urlpatterns = [
     # dedicated URL module per single-endpoint prefix is overkill.
     path('api/customer-ar/movements/', CustomerARMovementListView.as_view(), name='customer-ar-movement-list'),
     path('api/supplier-ap/movements/', SupplierAPMovementListView.as_view(), name='supplier-ap-movement-list'),
+
+    # Phase 1.5 Slice G — settlement document endpoints.
+    path('api/customer-receipts/', include((customer_receipt_urlpatterns, 'customer_receipts'))),
+    path('api/supplier-payments/', include((supplier_payment_urlpatterns, 'supplier_payments'))),
 
     path('api/',           include('pos.urls')),
 
