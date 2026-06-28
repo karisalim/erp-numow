@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Iterable, Optional
 
-from django.db import transaction
+from django.db import models, transaction
 from django.db.models import QuerySet
 from django.utils import timezone
 
@@ -130,6 +130,7 @@ def get_account_statement(
     movement_type: Optional[str] = None,
     source_document_type: Optional[str] = None,
     source_document_id:   Optional[int] = None,
+    actor_user=None,
     occurred_from=None,
     occurred_to=None,
 ) -> QuerySet[FinancialAccountMovement]:
@@ -150,11 +151,129 @@ def get_account_statement(
         qs = qs.filter(source_document_type=source_document_type)
     if source_document_id is not None:
         qs = qs.filter(source_document_id=source_document_id)
+    if actor_user is not None:
+        qs = qs.filter(actor_user=actor_user)
     if occurred_from is not None:
         qs = qs.filter(occurred_at__gte=occurred_from)
     if occurred_to is not None:
         qs = qs.filter(occurred_at__lte=occurred_to)
     return qs.order_by('id')
+
+
+def get_account_statement_summary(
+    account: FinancialAccount,
+    *,
+    branch=None,
+    movement_type: Optional[str] = None,
+    source_document_type: Optional[str] = None,
+    source_document_id:   Optional[int] = None,
+    actor_user=None,
+    occurred_from=None,
+    occurred_to=None,
+) -> dict:
+    """Statement metadata + rows for one account.
+
+    Returns a dict with:
+        opening_balance  — balance immediately before the first row in
+                           the filtered window (or `account.opening_balance`
+                           when no date filter / no prior rows exist)
+        total_debit      — sum of `debit` across the filtered rows
+        total_credit     — sum of `credit` across the filtered rows
+        net_change       — signed effect on the balance
+                           (asset: debit - credit; liability: credit - debit)
+        closing_balance  — `balance_after` of the last filtered row, or
+                           `opening_balance` if the window is empty
+        date_from / date_to / filters — echo of the input
+        movements        — the underlying queryset (caller serializes it)
+
+    `opening_balance` is computed from `balance_before` of the earliest
+    movement in the window when available; this works for new rows that
+    were written by the post-hardening services. For pre-hardening rows
+    (balance_before IS NULL) we fall back to "balance_after of the most
+    recent row before the window", which keeps the totals coherent even
+    for historical data.
+    """
+    qs = get_account_statement(
+        account,
+        branch=branch,
+        movement_type=movement_type,
+        source_document_type=source_document_type,
+        source_document_id=source_document_id,
+        actor_user=actor_user,
+        occurred_from=occurred_from,
+        occurred_to=occurred_to,
+    )
+    first_row = qs.first()
+    last_row  = qs.order_by('id').last()
+
+    opening_balance = _opening_balance_for_window(
+        first_row=first_row,
+        fallback=account.opening_balance or Decimal('0.00'),
+        account_qs=FinancialAccountMovement.objects.filter(
+            tenant=account.tenant, account=account,
+        ),
+        occurred_from=occurred_from,
+    )
+    closing_balance = (
+        last_row.balance_after if last_row is not None else opening_balance
+    )
+
+    totals = qs.aggregate(
+        total_debit=models.Sum('debit'),
+        total_credit=models.Sum('credit'),
+    )
+    total_debit  = totals['total_debit']  or Decimal('0.00')
+    total_credit = totals['total_credit'] or Decimal('0.00')
+    # Net change uses the same asset-vs-liability rule as `balance_delta`
+    # so the summary stays consistent with the per-row arithmetic.
+    if account.account_type in _LIABILITY_TYPES:
+        net_change = total_credit - total_debit
+    else:
+        net_change = total_debit - total_credit
+
+    return {
+        'opening_balance': opening_balance,
+        'total_debit':     total_debit,
+        'total_credit':    total_credit,
+        'net_change':      net_change,
+        'closing_balance': closing_balance,
+        'date_from':       occurred_from,
+        'date_to':         occurred_to,
+        'filters': {
+            'branch':               branch.id if branch is not None else None,
+            'movement_type':        movement_type,
+            'source_document_type': source_document_type,
+            'source_document_id':   source_document_id,
+            'actor_user':           actor_user.id if actor_user is not None else None,
+        },
+        'movements':       qs,
+    }
+
+
+def _opening_balance_for_window(*, first_row, fallback, account_qs, occurred_from):
+    """Compute the opening balance for a statement window.
+
+    Preference order:
+        1. `first_row.balance_before` (new rows store this directly)
+        2. `balance_after` of the latest row *before* the window
+        3. `fallback` (opening_balance of the account/customer/supplier)
+
+    Pulled out as a helper so the customer/supplier statement summaries
+    can share the exact same logic.
+    """
+    if first_row is not None and first_row.balance_before is not None:
+        return first_row.balance_before
+    if occurred_from is not None:
+        prior = (
+            account_qs
+            .filter(occurred_at__lt=occurred_from)
+            .order_by('-id')
+            .values_list('balance_after', flat=True)
+            .first()
+        )
+        if prior is not None:
+            return prior
+    return fallback
 
 
 # ── Writes ───────────────────────────────────────────────────────────────────
@@ -217,7 +336,11 @@ def record_account_movement(
         account.pk, account.opening_balance or Decimal('0.00'),
     )
     delta = balance_delta(locked, debit, credit)
-    new_balance = latest_balance + delta
+    # `balance_before` is the running balance immediately before this row;
+    # `balance_after` is balance_before + signed delta. Both stored so the
+    # frontend can render a ledger column pair without doing arithmetic.
+    balance_before = latest_balance
+    new_balance    = balance_before + delta
 
     return FinancialAccountMovement.objects.create(
         tenant=locked.tenant,
@@ -228,6 +351,7 @@ def record_account_movement(
         movement_type=movement_type,
         debit=debit,
         credit=credit,
+        balance_before=balance_before,
         balance_after=new_balance,
         currency=locked.currency,
         actor_user=actor_user,
@@ -260,6 +384,7 @@ __all__ = [
     'balance_delta',
     'get_account_current_balance',
     'get_account_statement',
+    'get_account_statement_summary',
     'record_account_movement',
     'record_account_debit',
     'record_account_credit',

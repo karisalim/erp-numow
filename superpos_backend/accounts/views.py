@@ -678,31 +678,26 @@ class _AccountScopedView(APIView):
 
 
 class FinancialAccountStatementView(_AccountScopedView):
-    """GET /api/finance/accounts/{id}/movements/ — per-account statement."""
+    """GET /api/finance/accounts/{id}/movements/ — per-account statement.
+
+    Returns the summary envelope (opening/closing balance, totals, filters,
+    date range) plus the row list — see `_serialize_statement_summary`.
+    Honors the standard filter set: branch / movement_type /
+    source_document_type / source_document_id / actor_user /
+    date_from / date_to.
+    """
 
     http_method_names = ['get', 'head', 'options']
 
     def get(self, request, pk):
         tenant, account = self._account(request, pk)
-        params = request.query_params
-
-        branch_id = _parse_optional_int(params.get('branch'))
-        branch = None
-        if branch_id is not None:
-            branch = Branch.objects.filter(tenant=tenant, pk=branch_id).first()
-            if branch is None:
-                raise NotFound('Branch not found.')
-
-        qs = account_movements.get_account_statement(
-            account,
-            branch=branch,
-            movement_type=params.get('movement_type') or None,
-            source_document_type=params.get('source_document_type') or None,
-            source_document_id=_parse_optional_int(params.get('source_document_id')),
-            occurred_from=params.get('occurred_from') or None,
-            occurred_to=params.get('occurred_to') or None,
+        filters = _statement_filter_kwargs(request, tenant)
+        summary = account_movements.get_account_statement_summary(
+            account, **filters,
         )
-        return Response(FinancialAccountMovementSerializer(qs, many=True).data)
+        return Response(_serialize_statement_summary(
+            summary, movement_serializer=FinancialAccountMovementSerializer,
+        ))
 
 
 # ── Customer + Supplier endpoints (Phase 1.5 Slice E) ───────────────────────
@@ -829,7 +824,9 @@ def _statement_filter_kwargs(request, tenant):
 
     Returns a dict matching the keyword args of `get_*_statement`. Resolves
     the optional `?branch=<id>` against the caller's tenant (foreign branch
-    id → 404).
+    id → 404). Also accepts the new aliases `date_from` / `date_to` as
+    synonyms for `occurred_from` / `occurred_to` so the statement contract
+    can use the natural name without breaking older callers.
     """
     params = request.query_params
 
@@ -840,20 +837,72 @@ def _statement_filter_kwargs(request, tenant):
         if branch is None:
             raise NotFound('Branch not found.')
 
+    actor_user = None
+    actor_user_id = _parse_optional_int(params.get('actor_user'))
+    if actor_user_id is not None:
+        actor_user = User.objects.filter(tenant=tenant, pk=actor_user_id).first()
+        if actor_user is None:
+            raise NotFound('User not found.')
+
     return {
         'branch':               branch,
         'movement_type':        params.get('movement_type') or None,
         'source_document_type': params.get('source_document_type') or None,
         'source_document_id':   _parse_optional_int(params.get('source_document_id')),
-        'occurred_from':        params.get('occurred_from') or None,
-        'occurred_to':          params.get('occurred_to') or None,
+        'actor_user':           actor_user,
+        # Accept both `occurred_from`/`occurred_to` (legacy) and
+        # `date_from`/`date_to` (the v3.6 statement-contract name).
+        'occurred_from':        (
+            params.get('occurred_from') or params.get('date_from') or None
+        ),
+        'occurred_to':          (
+            params.get('occurred_to') or params.get('date_to') or None
+        ),
+    }
+
+
+def _serialize_statement_summary(summary, *, movement_serializer):
+    """Convert a service-layer summary dict into a JSON-ready response body.
+
+    The service returns Decimals + a queryset + raw datetime/None values;
+    the API surface needs strings for money, ISO-8601 timestamps, and the
+    serialized movement rows. Centralised so finance/AR/AP endpoints have
+    one consistent shape.
+    """
+    def _dec(v):
+        return str(v) if v is not None else None
+
+    def _dt(v):
+        if v is None:
+            return None
+        # Echo whatever the client sent — already a string. If a datetime
+        # ever leaks through, render it ISO-8601.
+        if hasattr(v, 'isoformat'):
+            return v.isoformat()
+        return str(v)
+
+    return {
+        'opening_balance': _dec(summary['opening_balance']),
+        'total_debit':     _dec(summary['total_debit']),
+        'total_credit':    _dec(summary['total_credit']),
+        'net_change':      _dec(summary['net_change']),
+        'closing_balance': _dec(summary['closing_balance']),
+        'date_from':       _dt(summary['date_from']),
+        'date_to':         _dt(summary['date_to']),
+        'filters':         summary['filters'],
+        'movements':       movement_serializer(summary['movements'], many=True).data,
     }
 
 
 # Customer AR ────────────────────────────────────────────────────────────────
 
 class CustomerStatementView(_PartyScopedReadView):
-    """GET /api/customers/{id}/statement/ — per-customer AR statement."""
+    """GET /api/customers/{id}/statement/ — per-customer AR statement.
+
+    Returns the same summary envelope as the finance/account statement —
+    opening_balance, total_debit, total_credit, net_change,
+    closing_balance, date_from, date_to, filters, movements.
+    """
 
     party_model = Customer
     party_label = 'customer'
@@ -862,8 +911,12 @@ class CustomerStatementView(_PartyScopedReadView):
     def get(self, request, pk):
         tenant, customer = self._party(request, pk)
         filters = _statement_filter_kwargs(request, tenant)
-        qs = customer_ar_svc.get_customer_statement(customer, **filters)
-        return Response(CustomerARMovementSerializer(qs, many=True).data)
+        summary = customer_ar_svc.get_customer_statement_summary(
+            customer, **filters,
+        )
+        return Response(_serialize_statement_summary(
+            summary, movement_serializer=CustomerARMovementSerializer,
+        ))
 
 
 class CustomerBalanceView(_PartyScopedReadView):
@@ -917,7 +970,12 @@ class CustomerARMovementListView(generics.ListAPIView):
 # Supplier AP ────────────────────────────────────────────────────────────────
 
 class SupplierStatementView(_PartyScopedReadView):
-    """GET /api/suppliers/{id}/statement/ — per-supplier AP statement."""
+    """GET /api/suppliers/{id}/statement/ — per-supplier AP statement.
+
+    Returns the same summary envelope as the AR statement — see
+    `CustomerStatementView`. AP is liability-like so `net_change`
+    uses credit - debit (settled in the service layer).
+    """
 
     party_model = Supplier
     party_label = 'supplier'
@@ -926,8 +984,12 @@ class SupplierStatementView(_PartyScopedReadView):
     def get(self, request, pk):
         tenant, supplier = self._party(request, pk)
         filters = _statement_filter_kwargs(request, tenant)
-        qs = supplier_ap_svc.get_supplier_statement(supplier, **filters)
-        return Response(SupplierAPMovementSerializer(qs, many=True).data)
+        summary = supplier_ap_svc.get_supplier_statement_summary(
+            supplier, **filters,
+        )
+        return Response(_serialize_statement_summary(
+            summary, movement_serializer=SupplierAPMovementSerializer,
+        ))
 
 
 class SupplierBalanceView(_PartyScopedReadView):

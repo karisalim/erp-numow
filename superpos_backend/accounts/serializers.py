@@ -605,8 +605,11 @@ class FinancialAccountMovementSerializer(serializers.ModelSerializer):
 
     Writes go through `accounts.services.account_movements` — the API
     surface deliberately does not accept POSTs to this resource in this
-    slice. `balance_after` is computed by the service, never trusted from
-    a client.
+    slice. `balance_before` / `balance_after` are computed by the service
+    under a row-level lock, never trusted from a client. The full field
+    list is locked down as read-only so a future writable surface
+    (e.g. an admin tool) can't silently let a client override the
+    running balance.
     """
 
     account_name         = serializers.CharField(source='account.name',         read_only=True)
@@ -620,7 +623,7 @@ class FinancialAccountMovementSerializer(serializers.ModelSerializer):
             'account', 'account_name', 'account_type',
             'source_document_type', 'source_document_id',
             'movement_type',
-            'debit', 'credit', 'balance_after', 'currency',
+            'debit', 'credit', 'balance_before', 'balance_after', 'currency',
             'actor_user', 'actor_user_username',
             'terminal_id', 'shift_id',
             'occurred_at', 'notes', 'created_at',
@@ -633,7 +636,8 @@ class FinancialAccountMovementSerializer(serializers.ModelSerializer):
 
 class CustomerARMovementSerializer(serializers.ModelSerializer):
     """Read-only AR ledger row. Writes go through
-    `accounts.services.customer_ar` — never trust `balance_after` from a client.
+    `accounts.services.customer_ar` — never trust `balance_before` /
+    `balance_after` from a client.
     """
 
     customer_name       = serializers.CharField(source='customer.name',     read_only=True)
@@ -646,7 +650,7 @@ class CustomerARMovementSerializer(serializers.ModelSerializer):
             'customer', 'customer_name',
             'source_document_type', 'source_document_id',
             'movement_type',
-            'debit', 'credit', 'balance_after', 'currency',
+            'debit', 'credit', 'balance_before', 'balance_after', 'currency',
             'actor_user', 'actor_user_username',
             'occurred_at', 'notes', 'created_at',
         ]
@@ -667,7 +671,7 @@ class SupplierAPMovementSerializer(serializers.ModelSerializer):
             'supplier', 'supplier_name',
             'source_document_type', 'source_document_id',
             'movement_type',
-            'debit', 'credit', 'balance_after', 'currency',
+            'debit', 'credit', 'balance_before', 'balance_after', 'currency',
             'actor_user', 'actor_user_username',
             'occurred_at', 'notes', 'created_at',
         ]

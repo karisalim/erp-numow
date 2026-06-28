@@ -312,8 +312,11 @@ class FinancialMovementApiTests(_MovementsFixtureMixin, APITestCase):
         url = f'/api/finance/accounts/{self.cashbox_a.id}/movements/'
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(resp.json()), 1)
-        self.assertEqual(resp.json()[0]['balance_after'], '105.00')
+        body = resp.json()
+        # Slice "balance_before+totals": statement now returns a summary
+        # envelope with `movements` instead of a flat list.
+        self.assertEqual(len(body['movements']), 1)
+        self.assertEqual(body['movements'][0]['balance_after'], '105.00')
 
     def test_per_account_statement_404_on_foreign_account(self):
         url = f'/api/finance/accounts/{self.cashbox_b.id}/movements/'

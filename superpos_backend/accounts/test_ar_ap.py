@@ -364,9 +364,11 @@ class CustomerARApiTests(_PartiesFixtureMixin, APITestCase):
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         body = resp.json()
-        self.assertEqual(len(body), 1)
-        self.assertEqual(body[0]['movement_type'], 'sales_credit')
-        self.assertEqual(body[0]['balance_after'], '110.00')
+        # Slice "balance_before+totals": statement now returns a summary
+        # envelope with `movements` instead of a flat list.
+        self.assertEqual(len(body['movements']), 1)
+        self.assertEqual(body['movements'][0]['movement_type'], 'sales_credit')
+        self.assertEqual(body['movements'][0]['balance_after'], '110.00')
 
     def test_foreign_customer_balance_is_404(self):
         url = f'/api/customers/{self.cust_b.id}/balance/'
@@ -437,7 +439,9 @@ class SupplierAPApiTests(_PartiesFixtureMixin, APITestCase):
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         body = resp.json()
-        self.assertEqual([r['source_document_id'] for r in body], [11])
+        # Statement summary envelope: rows live under `movements`.
+        rows = body['movements']
+        self.assertEqual([r['source_document_id'] for r in rows], [11])
 
     def test_foreign_supplier_statement_is_404(self):
         url = f'/api/suppliers/{self.sup_b.id}/statement/'

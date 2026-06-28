@@ -585,11 +585,17 @@ class FinancialAccountMovement(models.Model):
     movement_type        = models.CharField(
         max_length=40, choices=MovementType.choices, db_index=True,
     )
-    debit         = models.DecimalField(max_digits=14, decimal_places=2, default=0)
-    credit        = models.DecimalField(max_digits=14, decimal_places=2, default=0)
-    balance_after = models.DecimalField(max_digits=18, decimal_places=2)
-    currency      = models.CharField(max_length=8, blank=True, default='')
-    actor_user    = models.ForeignKey(
+    debit          = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    credit         = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    # `balance_before` is the running balance immediately before this row was
+    # written; `balance_after` is balance_before + signed delta. Together they
+    # let the frontend render a proper ledger column pair without doing any
+    # arithmetic. Nullable so the additive migration can land without
+    # back-filling legacy rows — services always populate both for new writes.
+    balance_before = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
+    balance_after  = models.DecimalField(max_digits=18, decimal_places=2)
+    currency       = models.CharField(max_length=8, blank=True, default='')
+    actor_user     = models.ForeignKey(
         'accounts.User', on_delete=models.SET_NULL,
         null=True, blank=True, related_name='account_movements',
     )
@@ -750,11 +756,15 @@ class _PartyMovementBase(models.Model):
     source_document_type = models.CharField(max_length=80, blank=True, default='')
     source_document_id   = models.BigIntegerField(null=True, blank=True)
     movement_type        = models.CharField(max_length=40, db_index=True)
-    debit         = models.DecimalField(max_digits=14, decimal_places=2, default=0)
-    credit        = models.DecimalField(max_digits=14, decimal_places=2, default=0)
-    balance_after = models.DecimalField(max_digits=18, decimal_places=2)
-    currency      = models.CharField(max_length=8, blank=True, default='')
-    actor_user    = models.ForeignKey(
+    debit          = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    credit         = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    # See `FinancialAccountMovement.balance_before` for the rationale —
+    # both party ledgers expose the same before/after pair so customer/
+    # supplier statements look uniform on the frontend.
+    balance_before = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
+    balance_after  = models.DecimalField(max_digits=18, decimal_places=2)
+    currency       = models.CharField(max_length=8, blank=True, default='')
+    actor_user     = models.ForeignKey(
         'accounts.User', on_delete=models.SET_NULL,
         null=True, blank=True, related_name='+',
     )

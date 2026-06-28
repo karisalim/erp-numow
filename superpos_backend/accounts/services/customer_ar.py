@@ -68,6 +68,7 @@ def get_customer_statement(
     movement_type: Optional[str] = None,
     source_document_type: Optional[str] = None,
     source_document_id:   Optional[int] = None,
+    actor_user=None,
     occurred_from=None,
     occurred_to=None,
 ) -> QuerySet[CustomerARMovement]:
@@ -81,6 +82,58 @@ def get_customer_statement(
         movement_type=movement_type,
         source_document_type=source_document_type,
         source_document_id=source_document_id,
+        actor_user=actor_user,
+        occurred_from=occurred_from,
+        occurred_to=occurred_to,
+    )
+
+
+def get_customer_statement_summary(
+    customer: Customer,
+    *,
+    branch=None,
+    movement_type: Optional[str] = None,
+    source_document_type: Optional[str] = None,
+    source_document_id:   Optional[int] = None,
+    actor_user=None,
+    occurred_from=None,
+    occurred_to=None,
+) -> dict:
+    """Statement metadata + rows for one customer.
+
+    See `accounts.services.account_movements.get_account_statement_summary`
+    for the shape — this is the AR-side mirror.
+    """
+    qs = get_customer_statement(
+        customer,
+        branch=branch,
+        movement_type=movement_type,
+        source_document_type=source_document_type,
+        source_document_id=source_document_id,
+        actor_user=actor_user,
+        occurred_from=occurred_from,
+        occurred_to=occurred_to,
+    )
+    first_row = qs.first()
+    party_qs = CustomerARMovement.objects.filter(
+        tenant=customer.tenant, customer=customer,
+    )
+    opening_balance = _l.opening_balance_for_window(
+        first_row=first_row,
+        fallback=customer.opening_balance or Decimal('0.00'),
+        party_qs=party_qs,
+        occurred_from=occurred_from,
+    )
+    return _l.statement_summary(
+        qs=qs,
+        party=customer,
+        opening_balance=opening_balance,
+        asset=True,
+        branch=branch,
+        movement_type=movement_type,
+        source_document_type=source_document_type,
+        source_document_id=source_document_id,
+        actor_user=actor_user,
         occurred_from=occurred_from,
         occurred_to=occurred_to,
     )
@@ -123,7 +176,12 @@ def record_customer_ar_movement(
         movement_model=CustomerARMovement,
         party_field='customer_id',
     )
-    new_balance = latest_balance + _l.asset_delta(debit, credit)
+    # First-ever movement: `latest_balance` is `customer.opening_balance`
+    # (resolved by `_l.lock_and_latest_balance`). Subsequent movements:
+    # `latest_balance` is the previous row's `balance_after`. Either way,
+    # it is the right `balance_before` for the row about to be written.
+    balance_before = latest_balance
+    new_balance    = balance_before + _l.asset_delta(debit, credit)
 
     return CustomerARMovement.objects.create(
         tenant=locked_customer.tenant,
@@ -134,6 +192,7 @@ def record_customer_ar_movement(
         movement_type=movement_type,
         debit=debit,
         credit=credit,
+        balance_before=balance_before,
         balance_after=new_balance,
         currency='',  # No per-customer currency yet — tenant-wide default later.
         actor_user=actor_user,
@@ -163,6 +222,7 @@ __all__ = [
     'MovementType',
     'get_customer_balance',
     'get_customer_statement',
+    'get_customer_statement_summary',
     'record_customer_ar_movement',
     'record_customer_ar_debit',
     'record_customer_ar_credit',

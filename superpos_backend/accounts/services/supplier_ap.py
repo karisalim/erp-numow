@@ -59,6 +59,7 @@ def get_supplier_statement(
     movement_type: Optional[str] = None,
     source_document_type: Optional[str] = None,
     source_document_id:   Optional[int] = None,
+    actor_user=None,
     occurred_from=None,
     occurred_to=None,
 ) -> QuerySet[SupplierAPMovement]:
@@ -71,6 +72,54 @@ def get_supplier_statement(
         movement_type=movement_type,
         source_document_type=source_document_type,
         source_document_id=source_document_id,
+        actor_user=actor_user,
+        occurred_from=occurred_from,
+        occurred_to=occurred_to,
+    )
+
+
+def get_supplier_statement_summary(
+    supplier: Supplier,
+    *,
+    branch=None,
+    movement_type: Optional[str] = None,
+    source_document_type: Optional[str] = None,
+    source_document_id:   Optional[int] = None,
+    actor_user=None,
+    occurred_from=None,
+    occurred_to=None,
+) -> dict:
+    """Statement metadata + rows for one supplier (AP, liability-like)."""
+    qs = get_supplier_statement(
+        supplier,
+        branch=branch,
+        movement_type=movement_type,
+        source_document_type=source_document_type,
+        source_document_id=source_document_id,
+        actor_user=actor_user,
+        occurred_from=occurred_from,
+        occurred_to=occurred_to,
+    )
+    first_row = qs.first()
+    party_qs = SupplierAPMovement.objects.filter(
+        tenant=supplier.tenant, supplier=supplier,
+    )
+    opening_balance = _l.opening_balance_for_window(
+        first_row=first_row,
+        fallback=supplier.opening_balance or Decimal('0.00'),
+        party_qs=party_qs,
+        occurred_from=occurred_from,
+    )
+    return _l.statement_summary(
+        qs=qs,
+        party=supplier,
+        opening_balance=opening_balance,
+        asset=False,
+        branch=branch,
+        movement_type=movement_type,
+        source_document_type=source_document_type,
+        source_document_id=source_document_id,
+        actor_user=actor_user,
         occurred_from=occurred_from,
         occurred_to=occurred_to,
     )
@@ -106,7 +155,12 @@ def record_supplier_ap_movement(
         movement_model=SupplierAPMovement,
         party_field='supplier_id',
     )
-    new_balance = latest_balance + _l.liability_delta(debit, credit)
+    # First-ever movement: `latest_balance` is `supplier.opening_balance`
+    # (resolved by `_l.lock_and_latest_balance`). Subsequent movements:
+    # `latest_balance` is the previous row's `balance_after`. Either way,
+    # it is the right `balance_before` for the row about to be written.
+    balance_before = latest_balance
+    new_balance    = balance_before + _l.liability_delta(debit, credit)
 
     return SupplierAPMovement.objects.create(
         tenant=locked_supplier.tenant,
@@ -117,6 +171,7 @@ def record_supplier_ap_movement(
         movement_type=movement_type,
         debit=debit,
         credit=credit,
+        balance_before=balance_before,
         balance_after=new_balance,
         currency='',
         actor_user=actor_user,
@@ -146,6 +201,7 @@ __all__ = [
     'MovementType',
     'get_supplier_balance',
     'get_supplier_statement',
+    'get_supplier_statement_summary',
     'record_supplier_ap_movement',
     'record_supplier_ap_debit',
     'record_supplier_ap_credit',

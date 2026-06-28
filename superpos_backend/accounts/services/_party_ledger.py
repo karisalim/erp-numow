@@ -17,6 +17,7 @@ from decimal import Decimal
 from typing import Iterable, Optional, Type
 
 from django.db import models, transaction
+from django.db.models import Sum
 from django.utils import timezone
 
 
@@ -103,6 +104,7 @@ def filter_statement(
     movement_type: Optional[str] = None,
     source_document_type: Optional[str] = None,
     source_document_id:   Optional[int] = None,
+    actor_user=None,
     occurred_from=None,
     occurred_to=None,
 ):
@@ -115,11 +117,92 @@ def filter_statement(
         qs = qs.filter(source_document_type=source_document_type)
     if source_document_id is not None:
         qs = qs.filter(source_document_id=source_document_id)
+    if actor_user is not None:
+        qs = qs.filter(actor_user=actor_user)
     if occurred_from is not None:
         qs = qs.filter(occurred_at__gte=occurred_from)
     if occurred_to is not None:
         qs = qs.filter(occurred_at__lte=occurred_to)
     return qs.order_by('id')
+
+
+def opening_balance_for_window(*, first_row, fallback, party_qs, occurred_from):
+    """Compute the opening balance for a statement window.
+
+    Mirrors `account_movements._opening_balance_for_window` so AR/AP/finance
+    statements all use identical logic. Preference:
+        1. `first_row.balance_before` (post-hardening rows store this)
+        2. `balance_after` of the latest row *before* the window
+        3. `fallback` (party.opening_balance)
+    """
+    if first_row is not None and first_row.balance_before is not None:
+        return first_row.balance_before
+    if occurred_from is not None:
+        prior = (
+            party_qs
+            .filter(occurred_at__lt=occurred_from)
+            .order_by('-id')
+            .values_list('balance_after', flat=True)
+            .first()
+        )
+        if prior is not None:
+            return prior
+    return fallback
+
+
+def statement_summary(
+    *,
+    qs,
+    party,
+    opening_balance: Decimal,
+    asset: bool,
+    branch=None,
+    movement_type: Optional[str] = None,
+    source_document_type: Optional[str] = None,
+    source_document_id:   Optional[int] = None,
+    actor_user=None,
+    occurred_from=None,
+    occurred_to=None,
+):
+    """Generic statement-summary builder for party ledgers.
+
+    `qs` is the already-filtered movement queryset, `opening_balance` is
+    the resolved start-of-window balance, and `asset` flips the
+    `net_change` sign rule (True for AR, False for AP).
+    """
+    last_row = qs.order_by('id').last()
+    closing_balance = (
+        last_row.balance_after if last_row is not None else opening_balance
+    )
+
+    totals = qs.aggregate(
+        total_debit=Sum('debit'),
+        total_credit=Sum('credit'),
+    )
+    total_debit  = totals['total_debit']  or Decimal('0.00')
+    total_credit = totals['total_credit'] or Decimal('0.00')
+    net_change = (
+        (total_debit - total_credit) if asset
+        else (total_credit - total_debit)
+    )
+
+    return {
+        'opening_balance': opening_balance,
+        'total_debit':     total_debit,
+        'total_credit':    total_credit,
+        'net_change':      net_change,
+        'closing_balance': closing_balance,
+        'date_from':       occurred_from,
+        'date_to':         occurred_to,
+        'filters': {
+            'branch':               branch.id if branch is not None else None,
+            'movement_type':        movement_type,
+            'source_document_type': source_document_type,
+            'source_document_id':   source_document_id,
+            'actor_user':           actor_user.id if actor_user is not None else None,
+        },
+        'movements':       qs,
+    }
 
 
 def now():
