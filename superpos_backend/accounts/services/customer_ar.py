@@ -183,6 +183,12 @@ def record_customer_ar_movement(
     balance_before = latest_balance
     new_balance    = balance_before + _l.asset_delta(debit, credit)
 
+    # AR rows inherit the tenant currency (Tenant.currency defaults to EGP).
+    # Customer-level currency overrides will land in a later slice; for
+    # now the tenant default keeps the statement column non-empty so the
+    # frontend never has to fall back to a hardcoded label.
+    currency = (locked_customer.tenant.currency or '') if locked_customer.tenant_id else ''
+
     return CustomerARMovement.objects.create(
         tenant=locked_customer.tenant,
         branch=branch,
@@ -194,7 +200,7 @@ def record_customer_ar_movement(
         credit=credit,
         balance_before=balance_before,
         balance_after=new_balance,
-        currency='',  # No per-customer currency yet — tenant-wide default later.
+        currency=currency,
         actor_user=actor_user,
         occurred_at=occurred_at or _l.now(),
         notes=notes,

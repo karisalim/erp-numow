@@ -1134,8 +1134,23 @@ class _SettlementListCreateBase(APIView):
 
     def post(self, request):
         tenant = _tenant_or_404(request)
-        key = request.headers.get('Idempotency-Key') or ''
+        key = (request.headers.get('Idempotency-Key') or '').strip()
         payload = request.data
+
+        # Hardening fix: settlement posting is a financial side-effect, so
+        # the Idempotency-Key header is REQUIRED (per API_CONTRACT.md §2).
+        # A missing key would let a client retry on a flaky network and
+        # post the same receipt/payment twice.
+        if not key:
+            return Response(
+                {
+                    'error': {
+                        'code': 'IDEMPOTENCY_KEY_REQUIRED',
+                        'detail': 'Idempotency-Key header is required for this endpoint.',
+                    },
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         # Idempotency check — proceed / replay / conflict.
         lookup = idempotency.lookup(

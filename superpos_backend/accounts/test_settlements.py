@@ -14,11 +14,24 @@ Covers:
   * list / detail tenant-scoped
 """
 
+import uuid
 from decimal import Decimal
 from unittest.mock import patch
 
 from rest_framework import status
 from rest_framework.test import APITestCase
+
+
+def _idem_headers(key=None):
+    """Helper: build an HTTP_IDEMPOTENCY_KEY headers dict.
+
+    Pass an explicit `key` when the test cares (e.g. replay/conflict
+    checks); otherwise auto-generates a unique key so each request looks
+    like a brand-new attempt to the idempotency store. Centralised so the
+    hardening change ("Idempotency-Key is mandatory") doesn't require
+    rewriting every test in this file.
+    """
+    return {'HTTP_IDEMPOTENCY_KEY': key or uuid.uuid4().hex}
 
 from accounts.models import (
     Branch,
@@ -405,8 +418,10 @@ class SupplierPaymentServiceTests(_SettlementsFixtureMixin, APITestCase):
         self.assertEqual(fa_row.debit,  Decimal('0'))
 
     def test_bank_payment_decreases_bank_balance(self):
+        # bank_a is a tenant-wide account (branch_id IS NULL) — the
+        # payment still requires a branch, but the account can land it.
         payment = spsvc.create_supplier_payment(
-            tenant=self.tenant_a, branch=None,
+            tenant=self.tenant_a, branch=self.branch_a,
             supplier=self.sup_a,
             payment_method=self.pm_cash_a,  # cash-method can also draw from a bank
             source_account=self.bank_a,
@@ -418,6 +433,9 @@ class SupplierPaymentServiceTests(_SettlementsFixtureMixin, APITestCase):
         )
         self.assertEqual(fa_row.account_id, self.bank_a.id)
         self.assertEqual(fa_row.credit, Decimal('120.00'))
+        # All three rows (document + ledger pair) carry the same branch.
+        self.assertEqual(payment.branch_id, self.branch_a.id)
+        self.assertEqual(fa_row.branch_id,  self.branch_a.id)
 
     def test_cross_tenant_supplier_rejected(self):
         with self.assertRaises(spsvc.SupplierPaymentError):
@@ -568,7 +586,9 @@ class CustomerReceiptApiTests(_SettlementsFixtureMixin, APITestCase):
         return base
 
     def test_post_creates_receipt_and_posts_ledger(self):
-        resp = self.client.post(self.list_url, self._payload(), format='json')
+        resp = self.client.post(
+            self.list_url, self._payload(), format='json', **_idem_headers(),
+        )
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
         body = resp.json()
         self.assertEqual(body['amount'], '30.00')
@@ -589,26 +609,29 @@ class CustomerReceiptApiTests(_SettlementsFixtureMixin, APITestCase):
 
     def test_post_with_invalid_amount_returns_400(self):
         resp = self.client.post(
-            self.list_url, self._payload(amount='-1'), format='json',
+            self.list_url, self._payload(amount='-1'),
+            format='json', **_idem_headers(),
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_post_with_foreign_customer_returns_400(self):
         resp = self.client.post(
-            self.list_url, self._payload(customer=self.cust_b.id), format='json',
+            self.list_url, self._payload(customer=self.cust_b.id),
+            format='json', **_idem_headers(),
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_post_with_foreign_account_returns_400(self):
         resp = self.client.post(
             self.list_url, self._payload(destination_account=self.cashbox_b.id),
-            format='json',
+            format='json', **_idem_headers(),
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_post_with_foreign_branch_returns_400(self):
         resp = self.client.post(
-            self.list_url, self._payload(branch=self.branch_b.id), format='json',
+            self.list_url, self._payload(branch=self.branch_b.id),
+            format='json', **_idem_headers(),
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
@@ -704,7 +727,9 @@ class SupplierPaymentApiTests(_SettlementsFixtureMixin, APITestCase):
         return base
 
     def test_post_creates_payment_and_posts_ledger(self):
-        resp = self.client.post(self.list_url, self._payload(), format='json')
+        resp = self.client.post(
+            self.list_url, self._payload(), format='json', **_idem_headers(),
+        )
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
         body = resp.json()
         self.assertEqual(body['amount'], '60.00')
@@ -724,20 +749,22 @@ class SupplierPaymentApiTests(_SettlementsFixtureMixin, APITestCase):
 
     def test_post_with_foreign_supplier_returns_400(self):
         resp = self.client.post(
-            self.list_url, self._payload(supplier=self.sup_b.id), format='json',
+            self.list_url, self._payload(supplier=self.sup_b.id),
+            format='json', **_idem_headers(),
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_post_with_foreign_account_returns_400(self):
         resp = self.client.post(
             self.list_url, self._payload(source_account=self.cashbox_b.id),
-            format='json',
+            format='json', **_idem_headers(),
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_post_with_zero_amount_returns_400(self):
         resp = self.client.post(
-            self.list_url, self._payload(amount='0.00'), format='json',
+            self.list_url, self._payload(amount='0.00'),
+            format='json', **_idem_headers(),
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 

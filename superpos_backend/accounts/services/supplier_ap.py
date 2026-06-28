@@ -162,6 +162,10 @@ def record_supplier_ap_movement(
     balance_before = latest_balance
     new_balance    = balance_before + _l.liability_delta(debit, credit)
 
+    # AP rows inherit tenant currency — see customer_ar.py for the
+    # rationale. Per-supplier currency lands in a future slice.
+    currency = (locked_supplier.tenant.currency or '') if locked_supplier.tenant_id else ''
+
     return SupplierAPMovement.objects.create(
         tenant=locked_supplier.tenant,
         branch=branch,
@@ -173,7 +177,7 @@ def record_supplier_ap_movement(
         credit=credit,
         balance_before=balance_before,
         balance_after=new_balance,
-        currency='',
+        currency=currency,
         actor_user=actor_user,
         occurred_at=occurred_at or _l.now(),
         notes=notes,

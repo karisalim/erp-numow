@@ -467,6 +467,7 @@ class BalanceBeforeIsReadOnlyTests(_LedgerFixtureMixin, APITestCase):
                 'balance_after':       '88888.00',
             },
             format='json',
+            HTTP_IDEMPOTENCY_KEY='hardening-test-1',
         )
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
         receipt_id = resp.json()['id']

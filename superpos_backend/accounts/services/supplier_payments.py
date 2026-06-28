@@ -69,7 +69,11 @@ def _validate_inputs(
     source_account: FinancialAccount,
     amount: Decimal,
 ) -> None:
-    """Reject any cross-tenant / cross-branch / type-mismatched input."""
+    """Reject any cross-tenant / cross-branch / type-mismatched input.
+
+    Branch is REQUIRED (hardening fix) — see the matching docstring on
+    `customer_receipts._validate_inputs` for the rationale.
+    """
     if amount is None:
         raise SupplierPaymentError('amount is required')
 
@@ -80,6 +84,11 @@ def _validate_inputs(
     if amount_dec <= 0:
         raise SupplierPaymentError('amount must be > 0')
 
+    if branch is None:
+        raise SupplierPaymentError('branch is required')
+    if branch.tenant_id != tenant.id:
+        raise SupplierPaymentError('branch must belong to the caller\'s tenant')
+
     if supplier.tenant_id != tenant.id:
         raise SupplierPaymentError('supplier must belong to the caller\'s tenant')
     if payment_method.tenant_id != tenant.id:
@@ -87,12 +96,8 @@ def _validate_inputs(
     if source_account.tenant_id != tenant.id:
         raise SupplierPaymentError('source_account must belong to the caller\'s tenant')
 
-    if branch is not None and branch.tenant_id != tenant.id:
-        raise SupplierPaymentError('branch must belong to the caller\'s tenant')
-
     if (
-        branch is not None
-        and source_account.branch_id is not None
+        source_account.branch_id is not None
         and source_account.branch_id != branch.id
     ):
         raise SupplierPaymentError(

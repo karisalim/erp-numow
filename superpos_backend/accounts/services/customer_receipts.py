@@ -77,6 +77,12 @@ def _validate_inputs(
 
     Runs before the atomic block opens so we never spend a DB row-lock
     on input that was always going to fail.
+
+    Branch is REQUIRED for receipts (hardening fix): every posted
+    settlement document is a branch event so reports, shift reconciliation,
+    and per-branch closing balances can attribute the row to a physical
+    location. The model column stays nullable for legacy/forward
+    compatibility, but the service layer rejects None.
     """
     if amount is None:
         raise CustomerReceiptError('amount is required')
@@ -88,6 +94,11 @@ def _validate_inputs(
     if amount_dec <= 0:
         raise CustomerReceiptError('amount must be > 0')
 
+    if branch is None:
+        raise CustomerReceiptError('branch is required')
+    if branch.tenant_id != tenant.id:
+        raise CustomerReceiptError('branch must belong to the caller\'s tenant')
+
     if customer.tenant_id != tenant.id:
         raise CustomerReceiptError('customer must belong to the caller\'s tenant')
     if payment_method.tenant_id != tenant.id:
@@ -95,15 +106,11 @@ def _validate_inputs(
     if destination_account.tenant_id != tenant.id:
         raise CustomerReceiptError('destination_account must belong to the caller\'s tenant')
 
-    if branch is not None and branch.tenant_id != tenant.id:
-        raise CustomerReceiptError('branch must belong to the caller\'s tenant')
-
-    # A branch-scoped destination_account must match the receipt's branch
-    # if one was supplied. Tenant-wide accounts (branch_id IS NULL on the
-    # account) can land any branch's receipts.
+    # A branch-scoped destination_account must match the receipt's branch.
+    # Tenant-wide accounts (branch_id IS NULL on the account) — e.g. a
+    # shared HQ bank — can land any branch's receipts.
     if (
-        branch is not None
-        and destination_account.branch_id is not None
+        destination_account.branch_id is not None
         and destination_account.branch_id != branch.id
     ):
         raise CustomerReceiptError(
