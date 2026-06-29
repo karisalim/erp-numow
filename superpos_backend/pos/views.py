@@ -13,10 +13,18 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.models import Branch
 from accounts.permissions import IsCashierOrAbove, IsManagerOrAbove
-from .filters import ProductFilter, SaleFilter, StockMovementFilter
-from .models import Category, InventoryBatch, Product, Sale, SaleItem, StockMovement
+from .filters import (
+    BranchWarehouseFilter, ProductFilter, SaleFilter,
+    StockMovementFilter, WarehouseFilter,
+)
+from .models import (
+    BranchWarehouse, Category, InventoryBatch, Product,
+    Sale, SaleItem, StockMovement, Warehouse,
+)
 from .serializers import (
+    BranchWarehouseSerializer,
     CategorySerializer,
     InventoryBatchSerializer,
     ProductSerializer,
@@ -27,6 +35,7 @@ from .serializers import (
     SaleSerializer,
     StockAdjustmentSerializer,
     StockMovementSerializer,
+    WarehouseSerializer,
 )
 
 
@@ -1193,3 +1202,122 @@ def dashboard_daily_stats(request):
         'avg_basket':        round(float(agg['avg'] or 0), 2),
         'total_items':       float(total_items),
     })
+
+
+# ── Dynamic Warehouses / Stores (Phase 1.5 foundation) ────────────────────────
+# Backend foundation only. Manager+ writes, Cashier+ reads — mirrors the
+# master-data convention used by ProductListCreateView / BranchV2*. Deactivate
+# (POST .../deactivate/) instead of hard-delete; there is no DELETE endpoint.
+
+class WarehouseListCreateView(TenantMixin, generics.ListCreateAPIView):
+    queryset         = Warehouse.objects.all()
+    serializer_class = WarehouseSerializer
+    filterset_class  = WarehouseFilter
+    search_fields    = ['code', 'name']
+    ordering_fields  = ['name', 'code', 'created_at']
+    ordering         = ['name']
+
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+
+class WarehouseDetailView(TenantMixin, generics.RetrieveUpdateAPIView):
+    """GET / PATCH a warehouse. No DELETE — deactivate instead."""
+
+    queryset          = Warehouse.objects.all()
+    serializer_class  = WarehouseSerializer
+    http_method_names = ['get', 'patch', 'head', 'options']
+
+    def get_permissions(self):
+        if self.request.method in ('PUT', 'PATCH'):
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+
+class WarehouseDeactivateView(TenantMixin, generics.GenericAPIView):
+    """POST — soft-delete by flipping `is_active=False`."""
+
+    queryset           = Warehouse.objects.all()
+    serializer_class   = WarehouseSerializer
+    permission_classes = [IsManagerOrAbove]
+
+    def post(self, request, *args, **kwargs):
+        warehouse = self.get_object()
+        if warehouse.is_active:
+            warehouse.is_active = False
+            warehouse.save(update_fields=['is_active', 'updated_at'])
+        return Response(self.get_serializer(warehouse).data)
+
+
+class BranchWarehouseListCreateView(TenantMixin, generics.ListCreateAPIView):
+    queryset         = BranchWarehouse.objects.select_related('branch', 'warehouse').all()
+    serializer_class = BranchWarehouseSerializer
+    filterset_class  = BranchWarehouseFilter
+    ordering_fields  = ['branch', 'role', 'created_at']
+    ordering         = ['branch_id', 'role']
+
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+
+class BranchWarehouseDetailView(TenantMixin, generics.RetrieveUpdateAPIView):
+    queryset          = BranchWarehouse.objects.select_related('branch', 'warehouse').all()
+    serializer_class  = BranchWarehouseSerializer
+    http_method_names = ['get', 'patch', 'head', 'options']
+
+    def get_permissions(self):
+        if self.request.method in ('PUT', 'PATCH'):
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+
+class BranchWarehouseDeactivateView(TenantMixin, generics.GenericAPIView):
+    queryset           = BranchWarehouse.objects.select_related('branch', 'warehouse').all()
+    serializer_class   = BranchWarehouseSerializer
+    permission_classes = [IsManagerOrAbove]
+
+    def post(self, request, *args, **kwargs):
+        link = self.get_object()
+        if link.is_active:
+            link.is_active = False
+            link.save(update_fields=['is_active', 'updated_at'])
+        return Response(self.get_serializer(link).data)
+
+
+class BranchNestedWarehouseListCreateView(TenantMixin, generics.ListCreateAPIView):
+    """`/api/branches/{branch_pk}/warehouses/` — links scoped to one branch.
+
+    Convenience surface from MASTER_DATA_CONTRACT.md §4.4. The branch comes
+    from the URL (validated against the tenant) and is injected before
+    serializer validation so the body never needs to repeat it.
+    """
+
+    queryset         = BranchWarehouse.objects.select_related('branch', 'warehouse').all()
+    serializer_class = BranchWarehouseSerializer
+    filterset_class  = BranchWarehouseFilter
+    ordering         = ['role']
+
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+    def _branch(self):
+        return get_object_or_404(Branch, pk=self.kwargs['branch_pk'], tenant=self._tenant())
+
+    def get_queryset(self):
+        return super().get_queryset().filter(branch=self._branch())
+
+    def create(self, request, *args, **kwargs):
+        branch = self._branch()
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        data['branch'] = branch.pk
+        serializer = self.get_serializer(data=data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(tenant=self._tenant())
+        headers = self.get_success_headers(serializer.data)
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)

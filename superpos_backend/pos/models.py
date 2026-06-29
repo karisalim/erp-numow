@@ -266,6 +266,15 @@ class StockMovement(models.Model):
         'accounts.Branch', on_delete=models.CASCADE,
         null=True, blank=True, related_name='stock_movements', db_index=True,
     )
+    # Per-warehouse inventory tracking (Phase 1.5 Dynamic Warehouses slice).
+    # Nullable for backward compatibility: legacy rows and existing
+    # creation paths that don't pass a warehouse stay valid. SET_NULL (not
+    # CASCADE) keeps this append-only ledger history intact if a warehouse
+    # row is ever removed — though warehouses are deactivated, never deleted.
+    warehouse     = models.ForeignKey(
+        'pos.Warehouse', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='stock_movements', db_index=True,
+    )
     qty           = models.DecimalField(max_digits=8, decimal_places=3)
     movement_type = models.CharField(max_length=20, choices=MovementType.choices)
     sale          = models.ForeignKey(
@@ -518,3 +527,113 @@ class IdempotencyRecord(models.Model):
 
     def __str__(self):
         return f'Idem[{self.tenant_id}/{self.key}] {self.method} {self.path}'
+
+
+# ── Dynamic Warehouses / Stores (Phase 1.5 foundation) ────────────────────────
+# Backend foundation only — see MASTER_DATA_CONTRACT.md §5. A tenant defines
+# warehouses/stores; branches link to them via BranchWarehouse with a role
+# (sales, purchase_receiving, kitchen, …). No transfers / no posting here.
+
+class Warehouse(models.Model):
+    """A tenant-scoped stock location (store, kitchen, bar, damage bin, …).
+
+    Linked to branches only through `BranchWarehouse` — this model is
+    deliberately tenant-level with no direct branch FK so there is a single,
+    unambiguous branch↔warehouse linking path. Deactivate (set
+    `is_active=False`) instead of hard-deleting when referenced by movements.
+    """
+
+    class WarehouseType(models.TextChoices):
+        MAIN         = 'main',         'Main'
+        SALES        = 'sales',        'Sales'
+        RAW_MATERIAL = 'raw_material', 'Raw Material'
+        RETURNS      = 'returns',      'Returns'
+        DAMAGE       = 'damage',       'Damage'
+        PRODUCTION   = 'production',   'Production'
+        OTHER        = 'other',        'Other'
+
+    tenant         = models.ForeignKey(
+        'accounts.Tenant', on_delete=models.CASCADE,
+        related_name='warehouses', db_index=True,
+    )
+    code           = models.CharField(max_length=40, db_index=True)
+    name           = models.CharField(max_length=255)
+    warehouse_type = models.CharField(
+        max_length=20, choices=WarehouseType.choices,
+        default=WarehouseType.MAIN,
+    )
+    description    = models.TextField(blank=True, default='')
+    is_active      = models.BooleanField(default=True)
+    created_at     = models.DateTimeField(auto_now_add=True)
+    updated_at     = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name']
+        constraints = [
+            # `code` is a required human identifier and must be unique per
+            # tenant (the same code may exist in a different tenant).
+            models.UniqueConstraint(
+                fields=['tenant', 'code'],
+                name='pos_warehouse_tenant_code_uniq',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.code} — {self.name}'
+
+
+class BranchWarehouse(models.Model):
+    """Links a branch to a warehouse for a specific operational role.
+
+    Role-based (per MASTER_DATA_CONTRACT.md §5.4.4): one warehouse can serve
+    several roles for a branch (separate rows), and each (branch, role) has at
+    most one active default. This is the canonical home for a branch's default
+    sales/purchase/returns/damage warehouse.
+    """
+
+    class Role(models.TextChoices):
+        SALES              = 'sales',              'Sales'
+        PURCHASE_RECEIVING = 'purchase_receiving', 'Purchase Receiving'
+        KITCHEN            = 'kitchen',            'Kitchen'
+        BAR                = 'bar',                'Bar'
+        RETURNS            = 'returns',            'Returns'
+        DAMAGED            = 'damaged',            'Damaged'
+
+    tenant     = models.ForeignKey(
+        'accounts.Tenant', on_delete=models.CASCADE,
+        related_name='branch_warehouses', db_index=True,
+    )
+    branch     = models.ForeignKey(
+        'accounts.Branch', on_delete=models.CASCADE,
+        related_name='branch_warehouses', db_index=True,
+    )
+    warehouse  = models.ForeignKey(
+        Warehouse, on_delete=models.CASCADE,
+        related_name='branch_links', db_index=True,
+    )
+    role       = models.CharField(max_length=20, choices=Role.choices)
+    is_default = models.BooleanField(default=False)
+    is_active  = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['branch_id', 'role']
+        constraints = [
+            # No duplicate *active* link for the same branch+warehouse+role.
+            # Inactive (superseded) links are allowed to coexist as history.
+            models.UniqueConstraint(
+                fields=['tenant', 'branch', 'warehouse', 'role'],
+                condition=models.Q(is_active=True),
+                name='pos_branchwh_active_uniq',
+            ),
+            # At most one active default per (branch, role).
+            models.UniqueConstraint(
+                fields=['branch', 'role'],
+                condition=models.Q(is_active=True, is_default=True),
+                name='pos_branchwh_one_default_per_role',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.branch_id}:{self.warehouse_id} [{self.role}]'

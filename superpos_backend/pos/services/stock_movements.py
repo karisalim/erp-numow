@@ -82,6 +82,15 @@ def _ensure_branch_tenant(product: Product, branch) -> None:
         )
 
 
+def _ensure_warehouse_tenant(product: Product, warehouse) -> None:
+    if warehouse is None:
+        return
+    if warehouse.tenant_id != product.tenant_id:
+        raise StockMovementError(
+            'warehouse and product must belong to the same tenant',
+        )
+
+
 def _latest_quantity_after(product: Product) -> Optional[Decimal]:
     """Last `quantity_after` seen for this tenant/product, or None.
 
@@ -112,6 +121,7 @@ def record_stock_in(
     quantity,
     movement_type: str = StockMovement.MovementType.RECEIVE_IN,
     branch=None,
+    warehouse=None,
     source_document_type: str = '',
     source_document_id: Optional[int] = None,
     actor_user=None,
@@ -133,6 +143,7 @@ def record_stock_in(
         )
     qty = _coerce_qty(quantity)
     _ensure_branch_tenant(product, branch)
+    _ensure_warehouse_tenant(product, warehouse)
 
     locked = Product.objects.select_for_update().get(pk=product.pk)
 
@@ -153,6 +164,7 @@ def record_stock_in(
         tenant=locked.tenant,
         product=locked,
         branch=branch,
+        warehouse=warehouse,
         qty=qty,
         movement_type=movement_type,
         quantity_before=quantity_before,
@@ -171,6 +183,7 @@ def record_stock_out(
     quantity,
     movement_type: str = StockMovement.MovementType.SALE_OUT,
     branch=None,
+    warehouse=None,
     source_document_type: str = '',
     source_document_id: Optional[int] = None,
     actor_user=None,
@@ -189,6 +202,7 @@ def record_stock_out(
         )
     qty = _coerce_qty(quantity)
     _ensure_branch_tenant(product, branch)
+    _ensure_warehouse_tenant(product, warehouse)
 
     locked = Product.objects.select_for_update().get(pk=product.pk)
 
@@ -205,6 +219,7 @@ def record_stock_out(
         tenant=locked.tenant,
         product=locked,
         branch=branch,
+        warehouse=warehouse,
         qty=qty,
         movement_type=movement_type,
         quantity_before=quantity_before,

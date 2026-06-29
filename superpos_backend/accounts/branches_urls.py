@@ -8,6 +8,12 @@ shape so existing UI code is not broken — both surfaces hit the same model.
 
 from django.urls import path
 
+# Phase 1.5 Dynamic Warehouses — the BranchWarehouse model lives in the `pos`
+# app, so the nested `/api/branches/{id}/warehouses/` view is imported from
+# there. Safe: `pos.views` imports only accounts models/permissions (leaf
+# modules), never accounts views/urls, so no circular import.
+from pos.views import BranchNestedWarehouseListCreateView
+
 from .views import (
     BranchDeactivateView,
     BranchPaymentMethodDeactivateView,
@@ -31,4 +37,7 @@ urlpatterns = [
     path('<int:branch_pk>/payment-methods/',                     BranchPaymentMethodListCreateView.as_view(), name='branch-payment-method-list'),
     path('<int:branch_pk>/payment-methods/<int:pk>/',            BranchPaymentMethodDetailView.as_view(),     name='branch-payment-method-detail'),
     path('<int:branch_pk>/payment-methods/<int:pk>/deactivate/', BranchPaymentMethodDeactivateView.as_view(), name='branch-payment-method-deactivate'),
+
+    # Phase 1.5 Dynamic Warehouses — branch-scoped warehouse links.
+    path('<int:branch_pk>/warehouses/', BranchNestedWarehouseListCreateView.as_view(), name='branch-warehouse-nested-list'),
 ]

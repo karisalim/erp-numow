@@ -30,6 +30,16 @@ urlpatterns = [
     # Stock movements — per-product audit trail + ad-hoc receive/adjust
     path('stock-movements/', views.StockMovementListCreateView.as_view(), name='stock-movement-list'),
 
+    # Inventory — Warehouses (Phase 1.5 Dynamic Warehouses foundation)
+    path('inventory/warehouses/',                     views.WarehouseListCreateView.as_view(), name='warehouse-list'),
+    path('inventory/warehouses/<int:pk>/',            views.WarehouseDetailView.as_view(),     name='warehouse-detail'),
+    path('inventory/warehouses/<int:pk>/deactivate/', views.WarehouseDeactivateView.as_view(), name='warehouse-deactivate'),
+
+    # Inventory — Branch↔Warehouse links (role-based)
+    path('inventory/branch-warehouses/',                     views.BranchWarehouseListCreateView.as_view(), name='branch-warehouse-list'),
+    path('inventory/branch-warehouses/<int:pk>/',            views.BranchWarehouseDetailView.as_view(),     name='branch-warehouse-detail'),
+    path('inventory/branch-warehouses/<int:pk>/deactivate/', views.BranchWarehouseDeactivateView.as_view(), name='branch-warehouse-deactivate'),
+
     # Sales — list / create
     path('sales/',        views.SaleListCreateView.as_view(), name='sale-list'),
     path('sales/export/', views.sales_export,                 name='sale-export'),

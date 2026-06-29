@@ -1,5 +1,5 @@
 import django_filters
-from .models import Product, Sale, StockMovement
+from .models import BranchWarehouse, Product, Sale, StockMovement, Warehouse
 
 
 class ProductFilter(django_filters.FilterSet):
@@ -38,7 +38,33 @@ class StockMovementFilter(django_filters.FilterSet):
 
     class Meta:
         model  = StockMovement
-        fields = ['movement_type', 'product_id']
+        fields = ['movement_type', 'product_id', 'warehouse']
+
+
+class WarehouseFilter(django_filters.FilterSet):
+    """Filters for the tenant warehouse catalog."""
+
+    # `active` is the contract-facing alias for the `is_active` column.
+    active = django_filters.BooleanFilter(field_name='is_active')
+
+    class Meta:
+        model  = Warehouse
+        fields = ['warehouse_type', 'is_active']
+
+
+class BranchWarehouseFilter(django_filters.FilterSet):
+    """Filters for branch↔warehouse links.
+
+    The prompt's `is_default_sales/purchase/returns/damage` filters collapse
+    into `role` + `is_default` under the role-based model.
+    """
+
+    active         = django_filters.BooleanFilter(field_name='is_active')
+    warehouse_type = django_filters.CharFilter(field_name='warehouse__warehouse_type')
+
+    class Meta:
+        model  = BranchWarehouse
+        fields = ['branch', 'warehouse', 'role', 'is_default', 'is_active']
 
 
 class SaleFilter(django_filters.FilterSet):

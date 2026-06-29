@@ -13,7 +13,9 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from accounts.models import Branch, Tenant, Terminal, User
-from pos.models import Category, Payment, Product, Sale
+from pos.models import (
+    BranchWarehouse, Category, Payment, Product, Sale, StockMovement, Warehouse,
+)
 from pos.views import _parse_weight_encoded_barcode
 
 
@@ -279,3 +281,228 @@ class ReceiptLayoutTests(APITestCase):
         url = reverse('sale-receipt', kwargs={'sale_uuid': sale_uuid})
         resp = self.client.get(url)
         self.assertEqual(resp.json()['config']['receipt_header'], 'NEW POLICY TEXT')
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Phase 1.5 — Dynamic Warehouses / Branch Warehouses (backend foundation)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _WarehouseTestBase(APITestCase):
+    """Two-tenant fixture for warehouse isolation + linking tests."""
+
+    @classmethod
+    def setUpTestData(cls):
+        # Tenant A
+        cls.tenant = Tenant.objects.create(name='Tenant A')
+        cls.branch = Branch.objects.create(tenant=cls.tenant, name='A-Main')
+        cls.manager = User.objects.create_user(
+            username='mgr_a', password='pw', role=User.Role.MANAGER,
+            tenant=cls.tenant, branch=cls.branch,
+        )
+        cls.cashier = User.objects.create_user(
+            username='csh_a', password='pw', role=User.Role.CASHIER,
+            tenant=cls.tenant, branch=cls.branch,
+        )
+        cls.category = Category.objects.create(tenant=cls.tenant, name='Drinks')
+        cls.product = Product.objects.create(
+            tenant=cls.tenant, category=cls.category,
+            name='Cola', barcode='COLA-1', sku='SKU-COLA',
+            price=Decimal('10.00'), cost=Decimal('6.00'),
+            tax_rate=Decimal('0.00'), stock=Decimal('100'),
+        )
+
+        # Tenant B (foreign — for isolation / cross-tenant tests)
+        cls.tenant_b = Tenant.objects.create(name='Tenant B')
+        cls.branch_b = Branch.objects.create(tenant=cls.tenant_b, name='B-Main')
+        cls.manager_b = User.objects.create_user(
+            username='mgr_b', password='pw', role=User.Role.MANAGER,
+            tenant=cls.tenant_b, branch=cls.branch_b,
+        )
+        cls.warehouse_b = Warehouse.objects.create(
+            tenant=cls.tenant_b, code='WB-1', name='B Store',
+        )
+
+    def _wh(self, tenant, code='WA-1', name='A Store', **kw):
+        return Warehouse.objects.create(tenant=tenant, code=code, name=name, **kw)
+
+
+class WarehouseApiTests(_WarehouseTestBase):
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.manager)
+
+    def test_create_list_retrieve_update_deactivate(self):
+        # Create
+        resp = self.client.post(reverse('warehouse-list'), {
+            'code': 'MAIN', 'name': 'Main Store', 'warehouse_type': 'main',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        wh_id = resp.json()['id']
+        # The view injects tenant — never trusted from the body.
+        self.assertEqual(Warehouse.objects.get(pk=wh_id).tenant_id, self.tenant.id)
+
+        # List
+        resp = self.client.get(reverse('warehouse-list'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = [w['id'] for w in resp.json()['results']]
+        self.assertIn(wh_id, ids)
+
+        # Retrieve
+        resp = self.client.get(reverse('warehouse-detail', kwargs={'pk': wh_id}))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()['warehouse_type'], 'main')
+
+        # Update
+        resp = self.client.patch(reverse('warehouse-detail', kwargs={'pk': wh_id}),
+                                 {'name': 'Renamed Store'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+        self.assertEqual(resp.json()['name'], 'Renamed Store')
+
+        # Deactivate (soft delete)
+        resp = self.client.post(reverse('warehouse-deactivate', kwargs={'pk': wh_id}))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+        self.assertFalse(Warehouse.objects.get(pk=wh_id).is_active)
+
+    def test_tenant_isolation(self):
+        # Tenant B's warehouse must be invisible to Tenant A.
+        resp = self.client.get(reverse('warehouse-list'))
+        ids = [w['id'] for w in resp.json()['results']]
+        self.assertNotIn(self.warehouse_b.id, ids)
+
+        resp = self.client.get(reverse('warehouse-detail', kwargs={'pk': self.warehouse_b.id}))
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_code_unique_per_tenant_but_shared_across_tenants(self):
+        self.client.post(reverse('warehouse-list'),
+                         {'code': 'DUP', 'name': 'First'}, format='json')
+        # Same code, same tenant → rejected.
+        resp = self.client.post(reverse('warehouse-list'),
+                                {'code': 'DUP', 'name': 'Second'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # Same code in a different tenant → allowed.
+        self.client.force_authenticate(user=self.manager_b)
+        resp = self.client.post(reverse('warehouse-list'),
+                                {'code': 'DUP', 'name': 'B Dup'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+
+    def test_cashier_cannot_write_but_can_read(self):
+        self.client.force_authenticate(user=self.cashier)
+        # Read OK
+        self.assertEqual(self.client.get(reverse('warehouse-list')).status_code,
+                         status.HTTP_200_OK)
+        # Create forbidden
+        resp = self.client.post(reverse('warehouse-list'),
+                                {'code': 'X', 'name': 'X'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        # Deactivate forbidden
+        wh = self._wh(self.tenant)
+        resp = self.client.post(reverse('warehouse-deactivate', kwargs={'pk': wh.id}))
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class BranchWarehouseApiTests(_WarehouseTestBase):
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.manager)
+        self.warehouse = self._wh(self.tenant)
+
+    def _link_body(self, **over):
+        body = {'branch': self.branch.id, 'warehouse': self.warehouse.id,
+                'role': 'sales', 'is_default': False}
+        body.update(over)
+        return body
+
+    def test_create_link(self):
+        resp = self.client.post(reverse('branch-warehouse-list'),
+                                self._link_body(is_default=True), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        link = BranchWarehouse.objects.get(pk=resp.json()['id'])
+        self.assertEqual(link.tenant_id, self.tenant.id)
+        self.assertEqual(link.role, 'sales')
+
+    def test_cross_tenant_link_rejected(self):
+        # Branch of tenant A + warehouse of tenant B → 400.
+        resp = self.client.post(reverse('branch-warehouse-list'),
+                                self._link_body(warehouse=self.warehouse_b.id),
+                                format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_duplicate_active_link_rejected(self):
+        self.client.post(reverse('branch-warehouse-list'), self._link_body(), format='json')
+        resp = self.client.post(reverse('branch-warehouse-list'), self._link_body(), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_one_default_per_branch_per_role(self):
+        wh2 = self._wh(self.tenant, code='WA-2', name='A Store 2')
+        # First default for (branch, sales) → OK.
+        resp = self.client.post(reverse('branch-warehouse-list'),
+                                self._link_body(is_default=True), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        # Second default for the same (branch, sales) via another warehouse → 400.
+        resp = self.client.post(reverse('branch-warehouse-list'),
+                                self._link_body(warehouse=wh2.id, is_default=True),
+                                format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # A different role on the same branch can still be its own default.
+        resp = self.client.post(reverse('branch-warehouse-list'),
+                                self._link_body(warehouse=wh2.id, role='returns',
+                                                is_default=True),
+                                format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+
+    def test_nested_branch_endpoint_injects_branch(self):
+        url = reverse('branch-warehouse-nested-list', kwargs={'branch_pk': self.branch.id})
+        # Body omits `branch` — the URL supplies it.
+        resp = self.client.post(url, {'warehouse': self.warehouse.id, 'role': 'kitchen'},
+                                format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        self.assertEqual(BranchWarehouse.objects.get(pk=resp.json()['id']).branch_id,
+                         self.branch.id)
+
+        # Listing the nested endpoint is scoped to that branch only.
+        resp = self.client.get(url)
+        self.assertTrue(all(row['branch'] == self.branch.id for row in resp.json()['results']))
+
+
+class StockMovementWarehouseTests(_WarehouseTestBase):
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.manager)
+        self.warehouse = self._wh(self.tenant)
+
+    def test_create_with_warehouse_persists_and_is_filterable(self):
+        resp = self.client.post(reverse('stock-movement-list'), {
+            'product': self.product.id, 'qty': '5.000',
+            'movement_type': 'receive_in', 'warehouse': self.warehouse.id,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        self.assertEqual(resp.json()['warehouse'], self.warehouse.id)
+
+        mv = StockMovement.objects.get(pk=resp.json()['id'])
+        self.assertEqual(mv.warehouse_id, self.warehouse.id)
+
+        # Filterable by ?warehouse=
+        resp = self.client.get(reverse('stock-movement-list'), {'warehouse': self.warehouse.id})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(all(r['warehouse'] == self.warehouse.id for r in resp.json()['results']))
+        self.assertGreaterEqual(len(resp.json()['results']), 1)
+
+    def test_create_without_warehouse_still_works(self):
+        """Backward compatibility — warehouse is optional; ledger still chains."""
+        resp = self.client.post(reverse('stock-movement-list'), {
+            'product': self.product.id, 'qty': '3.000', 'movement_type': 'receive_in',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        mv = StockMovement.objects.get(pk=resp.json()['id'])
+        self.assertIsNone(mv.warehouse_id)
+        # Running-quantity columns are still populated by the service.
+        self.assertIsNotNone(mv.quantity_after)
+
+    def test_cross_tenant_warehouse_rejected_on_movement(self):
+        resp = self.client.post(reverse('stock-movement-list'), {
+            'product': self.product.id, 'qty': '1.000',
+            'movement_type': 'receive_in', 'warehouse': self.warehouse_b.id,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)

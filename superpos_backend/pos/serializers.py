@@ -6,9 +6,10 @@ from django.db.models import F
 from django.utils import timezone
 from rest_framework import serializers
 
+from accounts.models import Branch
 from .models import (
-    Category, InsufficientStockError, InventoryBatch,
-    Payment, Product, Sale, SaleItem, StockMovement,
+    BranchWarehouse, Category, InsufficientStockError, InventoryBatch,
+    Payment, Product, Sale, SaleItem, StockMovement, Warehouse,
 )
 
 logger = logging.getLogger(__name__)
@@ -111,7 +112,7 @@ class StockMovementSerializer(serializers.ModelSerializer):
     class Meta:
         model  = StockMovement
         fields = [
-            'id', 'product', 'product_name', 'branch',
+            'id', 'product', 'product_name', 'branch', 'warehouse',
             'qty', 'movement_type', 'movement_type_display',
             'quantity_in', 'quantity_out',
             'quantity_before', 'quantity_after',
@@ -162,10 +163,27 @@ class StockMovementSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         if request and getattr(request.user, 'tenant', None):
             self.fields['product'].queryset = Product.objects.filter(tenant=request.user.tenant)
+            self.fields['warehouse'].queryset = Warehouse.objects.filter(tenant=request.user.tenant)
 
     def validate_qty(self, value):
         if value == 0:
             raise serializers.ValidationError('Qty must be non-zero.')
+        return value
+
+    def validate_warehouse(self, value):
+        """Warehouse (when supplied) must belong to the caller's tenant.
+
+        Nullable on the model, so omitted/None is fine — but a supplied
+        warehouse id from another tenant must not pollute the ledger.
+        """
+        if value is None:
+            return value
+        request = self.context.get('request')
+        tenant = getattr(getattr(request, 'user', None), 'tenant', None)
+        if tenant is not None and value.tenant_id != tenant.id:
+            raise serializers.ValidationError(
+                "warehouse must belong to the caller's tenant.",
+            )
         return value
 
     def validate_branch(self, value):
@@ -213,6 +231,7 @@ class StockMovementSerializer(serializers.ModelSerializer):
         magnitude     = abs(signed_qty)
         product       = validated_data['product']
         branch        = validated_data.get('branch')
+        warehouse     = validated_data.get('warehouse')
         note          = validated_data.get('note', '') or ''
         sale          = validated_data.get('sale')
         source_document_type = validated_data.get('source_document_type', '') or ''
@@ -242,6 +261,7 @@ class StockMovementSerializer(serializers.ModelSerializer):
                 quantity=magnitude,
                 movement_type=movement_type,
                 branch=branch,
+                warehouse=warehouse,
                 source_document_type=source_document_type,
                 source_document_id=source_document_id,
                 actor_user=actor_user,
@@ -270,6 +290,106 @@ class StockAdjustmentSerializer(serializers.Serializer):
         request = self.context.get('request')
         if request and getattr(request.user, 'tenant', None):
             self.fields['product'].queryset = Product.objects.filter(tenant=request.user.tenant)
+
+
+# ── Dynamic Warehouses (Phase 1.5 foundation) ─────────────────────────────────
+
+class WarehouseSerializer(serializers.ModelSerializer):
+    warehouse_type_display = serializers.CharField(
+        source='get_warehouse_type_display', read_only=True,
+    )
+
+    class Meta:
+        model  = Warehouse
+        fields = [
+            'id', 'code', 'name', 'warehouse_type', 'warehouse_type_display',
+            'description', 'is_active', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'warehouse_type_display', 'created_at', 'updated_at']
+
+    def validate_code(self, value):
+        """`code` is unique per tenant — friendly 400 backing the DB constraint."""
+        request = self.context.get('request')
+        tenant = getattr(getattr(request, 'user', None), 'tenant', None)
+        if tenant is None:
+            return value
+        qs = Warehouse.objects.filter(tenant=tenant, code=value)
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError(
+                'A warehouse with this code already exists for this tenant.',
+            )
+        return value
+
+
+class BranchWarehouseSerializer(serializers.ModelSerializer):
+    role_display = serializers.CharField(source='get_role_display', read_only=True)
+
+    class Meta:
+        model  = BranchWarehouse
+        fields = [
+            'id', 'branch', 'warehouse', 'role', 'role_display',
+            'is_default', 'is_active', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'role_display', 'created_at', 'updated_at']
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        request = self.context.get('request')
+        tenant = getattr(getattr(request, 'user', None), 'tenant', None)
+        if tenant is not None:
+            self.fields['branch'].queryset = Branch.objects.filter(tenant=tenant)
+            self.fields['warehouse'].queryset = Warehouse.objects.filter(tenant=tenant)
+
+    def validate(self, attrs):
+        request = self.context.get('request')
+        tenant = getattr(getattr(request, 'user', None), 'tenant', None)
+
+        # Merge incoming data over the existing instance so PATCH validates
+        # against the would-be final row, not just the supplied fields.
+        branch     = attrs.get('branch',     getattr(self.instance, 'branch', None))
+        warehouse  = attrs.get('warehouse',  getattr(self.instance, 'warehouse', None))
+        role       = attrs.get('role',       getattr(self.instance, 'role', None))
+        is_default = attrs.get('is_default', getattr(self.instance, 'is_default', False))
+        is_active  = attrs.get('is_active',  getattr(self.instance, 'is_active', True))
+
+        # Cross-tenant guard: branch & warehouse must be in the caller's tenant
+        # and must share the same tenant as each other.
+        if tenant is not None:
+            if branch is not None and branch.tenant_id != tenant.id:
+                raise serializers.ValidationError(
+                    {'branch': "branch must belong to the caller's tenant."})
+            if warehouse is not None and warehouse.tenant_id != tenant.id:
+                raise serializers.ValidationError(
+                    {'warehouse': "warehouse must belong to the caller's tenant."})
+        if (branch is not None and warehouse is not None
+                and branch.tenant_id != warehouse.tenant_id):
+            raise serializers.ValidationError(
+                'branch and warehouse must belong to the same tenant.')
+
+        # Friendly pre-checks mirroring the DB partial-unique constraints.
+        if is_active:
+            dup = BranchWarehouse.objects.filter(
+                tenant=tenant, branch=branch, warehouse=warehouse,
+                role=role, is_active=True,
+            )
+            if self.instance is not None:
+                dup = dup.exclude(pk=self.instance.pk)
+            if dup.exists():
+                raise serializers.ValidationError(
+                    'An active link for this branch, warehouse, and role already exists.')
+
+            if is_default:
+                clash = BranchWarehouse.objects.filter(
+                    branch=branch, role=role, is_active=True, is_default=True,
+                )
+                if self.instance is not None:
+                    clash = clash.exclude(pk=self.instance.pk)
+                if clash.exists():
+                    raise serializers.ValidationError(
+                        'This branch already has a default warehouse for this role.')
+        return attrs
 
 
 # ── Sale serializers ──────────────────────────────────────────────────────────
