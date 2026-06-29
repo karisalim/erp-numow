@@ -76,10 +76,21 @@ class PurchaseReceiptSerializer(serializers.Serializer):
 class StockMovementSerializer(serializers.ModelSerializer):
     """Read + create stock movements.
 
-    On create the matching `Product.stock` is incremented/decremented so the
-    inventory totals stay coherent with the audit log. Whoever posts the
-    movement passes `qty` as a positive number; the sign is derived from the
-    movement type (outflows get negated automatically).
+    Create goes through `pos.services.stock_movements` so every new row
+    carries `quantity_before` / `quantity_after` (the running ledger
+    columns added in the stock-hardening slice). Bypassing the service
+    would store NULL there and silently regress the statement summary,
+    which is exactly the bug this serializer used to ship — direct
+    `StockMovement.objects.create(**validated_data)` left both columns
+    null even though the service knew how to populate them. The service
+    also handles the row-level lock on `Product.stock`, so callers stop
+    racing with `Product.deduct_stock` checkouts.
+
+    The caller still passes a positive `qty` magnitude; direction is
+    encoded by `movement_type`. ADJUSTMENT may carry a negative qty,
+    which routes through `record_stock_out` (preserving the legacy
+    serializer's accept-signed-qty behavior — see `create` for the
+    full routing table).
 
     Read fields added by the stock-hardening slice:
         quantity_in / quantity_out — derived per-row magnitudes (use
@@ -157,24 +168,95 @@ class StockMovementSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('Qty must be non-zero.')
         return value
 
+    def validate_branch(self, value):
+        """Branch (when supplied) must belong to the caller's tenant.
+
+        The model column is nullable, so omitted/None is fine — but if the
+        client *did* send a branch id, we must not silently accept a
+        foreign-tenant branch and pollute the ledger.
+        """
+        if value is None:
+            return value
+        request = self.context.get('request')
+        tenant = getattr(getattr(request, 'user', None), 'tenant', None)
+        if tenant is not None and value.tenant_id != tenant.id:
+            raise serializers.ValidationError(
+                "branch must belong to the caller's tenant.",
+            )
+        return value
+
     def create(self, validated_data):
+        """Route the POST through the running-quantity service.
+
+        Movement-type routing (mirrors and extends the legacy
+        `OUTFLOW_TYPES` rule so the API stays backward compatible):
+
+            PURCHASE_IN / RECEIVE_IN / RETURN_IN  → record_stock_in
+            SALE_OUT                              → record_stock_out
+            ADJUSTMENT, qty >= 0                  → record_stock_in
+            ADJUSTMENT, qty <  0                  → record_stock_out (abs)
+
+        The legacy serializer accepted a signed qty for ADJUSTMENT and
+        let `Product.stock` go up or down accordingly; we preserve that
+        signal here by inspecting the sign before calling the service.
+
+        Any service-layer rule violation (cross-tenant branch, zero qty
+        sneaking past, …) surfaces as a 400 — wrapped here so DRF
+        renders it consistently with other validation errors instead of
+        leaking the bare exception.
+        """
+        # Import locally to avoid circular import (services -> models).
+        from pos.services import stock_movements as svc
+
         movement_type = validated_data['movement_type']
-        qty = validated_data['qty']
+        signed_qty    = validated_data['qty']
+        magnitude     = abs(signed_qty)
+        product       = validated_data['product']
+        branch        = validated_data.get('branch')
+        note          = validated_data.get('note', '') or ''
+        sale          = validated_data.get('sale')
+        source_document_type = validated_data.get('source_document_type', '') or ''
+        source_document_id   = validated_data.get('source_document_id')
 
-        # Outflows are stored as negative; inflows positive. Callers pass a
-        # positive magnitude; we apply the sign here.
-        if movement_type in self.OUTFLOW_TYPES:
-            qty = -abs(qty)
+        # Actor: prefer the value the client supplied (admin / import
+        # path); otherwise fall back to the authenticated user.
+        request = self.context.get('request')
+        actor_user = (
+            validated_data.get('actor_user')
+            or getattr(request, 'user', None)
+        )
+
+        # Route: which service handles this movement_type?
+        if movement_type == StockMovement.MovementType.SALE_OUT:
+            recorder = svc.record_stock_out
+        elif movement_type == StockMovement.MovementType.ADJUSTMENT:
+            # Signed-qty contract: negative qty → decrease stock.
+            recorder = svc.record_stock_out if signed_qty < 0 else svc.record_stock_in
         else:
-            qty = abs(qty)
-        validated_data['qty'] = qty
+            # PURCHASE_IN / RECEIVE_IN / RETURN_IN
+            recorder = svc.record_stock_in
 
-        tenant = self.context.get('request').user.tenant
-        validated_data['tenant'] = tenant
-        movement = StockMovement.objects.create(**validated_data)
+        try:
+            movement = recorder(
+                product=product,
+                quantity=magnitude,
+                movement_type=movement_type,
+                branch=branch,
+                source_document_type=source_document_type,
+                source_document_id=source_document_id,
+                actor_user=actor_user,
+                note=note,
+            )
+        except svc.StockMovementError as exc:
+            raise serializers.ValidationError({'detail': str(exc)})
 
-        # Apply the delta to Product.stock atomically.
-        Product.objects.filter(pk=movement.product_id).update(stock=F('stock') + qty)
+        # Legacy `sale` FK isn't part of the service signature — attach
+        # it after the service has done the heavy lifting so existing
+        # callers (if any) that link a movement to a Sale still work.
+        if sale is not None:
+            movement.sale = sale
+            movement.save(update_fields=['sale', 'updated_at'])
+
         return movement
 
 
