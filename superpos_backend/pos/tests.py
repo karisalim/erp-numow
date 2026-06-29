@@ -16,6 +16,7 @@ from accounts.models import Branch, Tenant, Terminal, User
 from pos.models import (
     BranchWarehouse, Category, Payment, Product, Sale, StockMovement, Warehouse,
 )
+from pos.services import stock_movements as stock_movement_service
 from pos.views import _parse_weight_encoded_barcode
 
 
@@ -400,6 +401,21 @@ class WarehouseApiTests(_WarehouseTestBase):
         resp = self.client.post(reverse('warehouse-deactivate', kwargs={'pk': wh.id}))
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
+    def test_invalid_warehouse_type_is_rejected(self):
+        resp = self.client.post(reverse('warehouse-list'), {
+            'code': 'BAD', 'name': 'Bad Type', 'warehouse_type': 'invalid',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_deactivate_is_idempotent(self):
+        wh = self._wh(self.tenant, code='WA-2', name='A Store 2')
+        first = self.client.post(reverse('warehouse-deactivate', kwargs={'pk': wh.id}))
+        second = self.client.post(reverse('warehouse-deactivate', kwargs={'pk': wh.id}))
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        wh.refresh_from_db()
+        self.assertFalse(wh.is_active)
+
 
 class BranchWarehouseApiTests(_WarehouseTestBase):
 
@@ -432,6 +448,21 @@ class BranchWarehouseApiTests(_WarehouseTestBase):
         self.client.post(reverse('branch-warehouse-list'), self._link_body(), format='json')
         resp = self.client.post(reverse('branch-warehouse-list'), self._link_body(), format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_deactivate_is_idempotent_and_preserves_history(self):
+        resp = self.client.post(reverse('branch-warehouse-list'), self._link_body(), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        link_id = resp.json()['id']
+
+        first = self.client.post(reverse('branch-warehouse-deactivate', kwargs={'pk': link_id}))
+        second = self.client.post(reverse('branch-warehouse-deactivate', kwargs={'pk': link_id}))
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+
+        link = BranchWarehouse.objects.get(pk=link_id)
+        self.assertFalse(link.is_active)
+        self.assertEqual(link.branch_id, self.branch.id)
+        self.assertEqual(link.warehouse_id, self.warehouse.id)
 
     def test_one_default_per_branch_per_role(self):
         wh2 = self._wh(self.tenant, code='WA-2', name='A Store 2')
@@ -499,6 +530,32 @@ class StockMovementWarehouseTests(_WarehouseTestBase):
         self.assertIsNone(mv.warehouse_id)
         # Running-quantity columns are still populated by the service.
         self.assertIsNotNone(mv.quantity_after)
+
+    def test_service_records_warehouse_for_in_and_out_movements(self):
+        inbound = stock_movement_service.record_stock_in(
+            product=self.product,
+            quantity='2.000',
+            movement_type=StockMovement.MovementType.RECEIVE_IN,
+            warehouse=self.warehouse,
+        )
+        self.assertEqual(inbound.warehouse_id, self.warehouse.id)
+
+        outbound = stock_movement_service.record_stock_out(
+            product=self.product,
+            quantity='1.000',
+            movement_type=StockMovement.MovementType.SALE_OUT,
+            warehouse=self.warehouse,
+        )
+        self.assertEqual(outbound.warehouse_id, self.warehouse.id)
+
+    def test_service_rejects_cross_tenant_warehouse(self):
+        with self.assertRaises(stock_movement_service.StockMovementError):
+            stock_movement_service.record_stock_in(
+                product=self.product,
+                quantity='1.000',
+                movement_type=StockMovement.MovementType.RECEIVE_IN,
+                warehouse=self.warehouse_b,
+            )
 
     def test_cross_tenant_warehouse_rejected_on_movement(self):
         resp = self.client.post(reverse('stock-movement-list'), {
