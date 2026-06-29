@@ -274,6 +274,20 @@ class StockMovement(models.Model):
     )
     note          = models.CharField(max_length=200, blank=True, default='')
 
+    # ── Running quantity ledger (Phase 1.5 stock-hardening slice) ───────────
+    # `quantity_before` is the product's stock immediately before this
+    # movement was applied; `quantity_after` is what it became after the
+    # movement's signed delta landed. Together they let the frontend render
+    # a real ledger column pair without recomputing anything.
+    #
+    # Both nullable so the additive migration lands without touching
+    # legacy rows. New movements written through
+    # `pos.services.stock_movements` always populate them; rows written
+    # via the legacy serializer create-path keep NULL (statement summaries
+    # tolerate the gap — see `get_product_stock_statement_summary`).
+    quantity_before = models.DecimalField(max_digits=14, decimal_places=3, null=True, blank=True)
+    quantity_after  = models.DecimalField(max_digits=14, decimal_places=3, null=True, blank=True)
+
     # ── Universal movement linkage (Phase 1.5 Slice D) ───────────────────────
     # `sale` above is a hard-coded FK to the legacy Sale model — it can't
     # represent a movement caused by a (future) PurchaseInvoice, OpenOrder,

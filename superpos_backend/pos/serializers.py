@@ -80,23 +80,71 @@ class StockMovementSerializer(serializers.ModelSerializer):
     inventory totals stay coherent with the audit log. Whoever posts the
     movement passes `qty` as a positive number; the sign is derived from the
     movement type (outflows get negated automatically).
+
+    Read fields added by the stock-hardening slice:
+        quantity_in / quantity_out — derived per-row magnitudes (use
+            `abs(qty)` so legacy SALE_OUT rows with negative qty surface
+            on the right side)
+        quantity_before / quantity_after — running ledger balance pair
+            populated by the service layer. Always read-only — clients
+            cannot spoof balance fields by sending them in the payload.
     """
 
     product_name      = serializers.CharField(source='product.name', read_only=True)
     movement_type_display = serializers.CharField(
         source='get_movement_type_display', read_only=True,
     )
+    quantity_in  = serializers.SerializerMethodField()
+    quantity_out = serializers.SerializerMethodField()
 
     class Meta:
         model  = StockMovement
         fields = [
-            'id', 'product', 'product_name',
+            'id', 'product', 'product_name', 'branch',
             'qty', 'movement_type', 'movement_type_display',
+            'quantity_in', 'quantity_out',
+            'quantity_before', 'quantity_after',
+            'source_document_type', 'source_document_id',
+            'actor_user',
             'sale', 'note', 'created_at',
         ]
-        read_only_fields = ['id', 'product_name', 'movement_type_display', 'created_at']
+        read_only_fields = [
+            'id', 'product_name', 'movement_type_display',
+            'quantity_in', 'quantity_out',
+            'quantity_before', 'quantity_after',
+            'created_at',
+        ]
 
     OUTFLOW_TYPES = {StockMovement.MovementType.SALE_OUT}
+
+    # Direction-classification used to derive `quantity_in` / `quantity_out`
+    # at read time. Kept in sync with `pos.services.stock_movements` —
+    # ADJUSTMENT lives in both because the legacy schema collapses both
+    # adjustment directions into one enum value.
+    _IN_TYPES  = {
+        StockMovement.MovementType.PURCHASE_IN,
+        StockMovement.MovementType.RECEIVE_IN,
+        StockMovement.MovementType.RETURN_IN,
+        StockMovement.MovementType.ADJUSTMENT,
+    }
+    _OUT_TYPES = {
+        StockMovement.MovementType.SALE_OUT,
+        StockMovement.MovementType.ADJUSTMENT,
+    }
+
+    def get_quantity_in(self, obj):
+        if obj.movement_type in self._OUT_TYPES:
+            # ADJUSTMENT is in both sets — historical behavior treats it
+            # as OUT for balance purposes, so quantity_in is 0 for those.
+            return '0.000'
+        if obj.movement_type in self._IN_TYPES:
+            return f'{abs(obj.qty or Decimal("0")):.3f}'
+        return '0.000'
+
+    def get_quantity_out(self, obj):
+        if obj.movement_type in self._OUT_TYPES:
+            return f'{abs(obj.qty or Decimal("0")):.3f}'
+        return '0.000'
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

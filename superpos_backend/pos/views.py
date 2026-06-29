@@ -11,6 +11,7 @@ from django.utils import timezone
 from rest_framework import generics, permissions, status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from accounts.permissions import IsCashierOrAbove, IsManagerOrAbove
 from .filters import ProductFilter, SaleFilter, StockMovementFilter
@@ -397,32 +398,121 @@ def products_import(request):
 
 # ── Inventory batches ─────────────────────────────────────────────────────────
 
-class ProductStockMovementListView(TenantMixin, generics.ListAPIView):
-    """GET /api/products/{pk}/stock-movements/ — per-product audit trail.
+class ProductStockMovementListView(APIView):
+    """GET /api/products/{pk}/stock-movements/ — per-product stock statement.
 
-    Read-only counterpart to `StockMovementListCreateView` (which also
-    accepts POST for legacy "Receive Stock" UX). Always tenant-scoped via
-    `TenantMixin`. Optional `branch` filter for per-branch slices.
+    Returns the summary envelope (opening_quantity, totals, net_change,
+    closing_quantity, filters, date range) plus the row list — same
+    shape as the financial statement endpoints introduced in the
+    balance_before hardening slice. Honors the standard filter set:
+    branch / movement_type / source_document_type / source_document_id /
+    actor_user / date_from / date_to.
     """
 
-    serializer_class   = StockMovementSerializer
     permission_classes = [IsManagerOrAbove]
-    ordering           = ['-id']
+    http_method_names = ['get', 'head', 'options']
 
-    def get_queryset(self):
-        tenant = self._tenant()
+    def get(self, request, pk):
+        from pos.services import stock_movements as svc
+        from accounts.models import Branch as _Branch
+        from accounts.models import User as _User
+
+        tenant = getattr(request.user, 'tenant', None)
         if tenant is None:
-            return StockMovement.objects.none()
-        qs = StockMovement.objects.filter(
-            tenant=tenant, product_id=self.kwargs['pk'],
+            return Response(
+                {'detail': 'User is not associated with a tenant.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        product = Product.objects.filter(tenant=tenant, pk=pk).first()
+        if product is None:
+            return Response(
+                {'detail': 'Product not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        params = request.query_params
+
+        branch = None
+        if branch_id := params.get('branch'):
+            branch = _Branch.objects.filter(tenant=tenant, pk=branch_id).first()
+            if branch is None:
+                return Response(
+                    {'detail': 'Branch not found.'},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+        actor_user = None
+        if actor_user_id := params.get('actor_user'):
+            actor_user = _User.objects.filter(tenant=tenant, pk=actor_user_id).first()
+            if actor_user is None:
+                return Response(
+                    {'detail': 'User not found.'},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+        try:
+            source_document_id = (
+                int(params['source_document_id'])
+                if params.get('source_document_id') else None
+            )
+        except (TypeError, ValueError):
+            return Response(
+                {'detail': 'source_document_id must be an integer.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        summary = svc.get_product_stock_statement_summary(
+            product,
+            branch=branch,
+            movement_type=params.get('movement_type') or None,
+            source_document_type=params.get('source_document_type') or None,
+            source_document_id=source_document_id,
+            actor_user=actor_user,
+            # Accept both `occurred_from`/`occurred_to` (legacy) and
+            # `date_from`/`date_to` (v3.6 statement-contract name).
+            occurred_from=params.get('occurred_from') or params.get('date_from') or None,
+            occurred_to=params.get('occurred_to')   or params.get('date_to')   or None,
         )
-        branch = self.request.query_params.get('branch')
-        if branch:
-            qs = qs.filter(branch_id=branch)
-        movement_type = self.request.query_params.get('movement_type')
-        if movement_type:
-            qs = qs.filter(movement_type=movement_type)
-        return qs.order_by('id')
+        return Response(_serialize_stock_statement_summary(summary, request=request))
+
+
+_QTY_QUANT = Decimal('0.001')
+
+
+def _serialize_stock_statement_summary(summary, *, request):
+    """Convert service-layer summary into JSON-ready body.
+
+    Quantities are quantized to 3 decimal places so the response shape
+    stays stable for the frontend whether totals are zero ('0.000') or
+    have fractions ('12.345'). Datetimes render ISO-8601. The queryset
+    is rendered through `StockMovementSerializer` with request context
+    so per-tenant FK filtering still applies.
+    """
+    def _qty(v):
+        if v is None:
+            return None
+        return f'{Decimal(v).quantize(_QTY_QUANT):.3f}'
+
+    def _dt(v):
+        if v is None:
+            return None
+        if hasattr(v, 'isoformat'):
+            return v.isoformat()
+        return str(v)
+
+    return {
+        'opening_quantity': _qty(summary['opening_quantity']),
+        'total_in':         _qty(summary['total_in']),
+        'total_out':        _qty(summary['total_out']),
+        'net_change':       _qty(summary['net_change']),
+        'closing_quantity': _qty(summary['closing_quantity']),
+        'date_from':        _dt(summary['date_from']),
+        'date_to':          _dt(summary['date_to']),
+        'filters':          summary['filters'],
+        'movements':        StockMovementSerializer(
+            summary['movements'], many=True, context={'request': request},
+        ).data,
+    }
 
 
 class ProductStockBalanceView(generics.GenericAPIView):

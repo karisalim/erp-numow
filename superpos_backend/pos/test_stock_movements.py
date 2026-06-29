@@ -159,7 +159,10 @@ class StockMovementApiTests(_StockFixtureMixin, APITestCase):
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
         body = resp.json()
-        rows = body['results'] if isinstance(body, dict) and 'results' in body else body
+        # Stock-hardening slice: per-product endpoint now returns a
+        # statement-summary envelope with `movements` instead of a flat
+        # list. Same convention as the financial/AR/AP statement APIs.
+        rows = body['movements']
         self.assertEqual(len(rows), 1)
         self.assertEqual(Decimal(str(rows[0]['qty'])), Decimal('4'))
 
