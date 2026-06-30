@@ -40,6 +40,10 @@ urlpatterns = [
     path('inventory/branch-warehouses/<int:pk>/',            views.BranchWarehouseDetailView.as_view(),     name='branch-warehouse-detail'),
     path('inventory/branch-warehouses/<int:pk>/deactivate/', views.BranchWarehouseDeactivateView.as_view(), name='branch-warehouse-deactivate'),
 
+    # Purchase Invoices (Phase 1.5 Slice H — create-and-post stock purchases)
+    path('purchase-invoices/',           views.PurchaseInvoiceListCreateView.as_view(), name='purchase-invoice-list'),
+    path('purchase-invoices/<int:pk>/',  views.PurchaseInvoiceDetailView.as_view(),     name='purchase-invoice-detail'),
+
     # Sales — list / create
     path('sales/',        views.SaleListCreateView.as_view(), name='sale-list'),
     path('sales/export/', views.sales_export,                 name='sale-export'),

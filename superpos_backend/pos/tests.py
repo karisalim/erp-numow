@@ -12,10 +12,18 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from accounts.models import Branch, Tenant, Terminal, User
-from pos.models import (
-    BranchWarehouse, Category, Payment, Product, Sale, StockMovement, Warehouse,
+from unittest.mock import patch
+
+from accounts.models import (
+    Branch, FinancialAccount, PaymentMethod, Supplier, Tenant, Terminal, User,
 )
+from accounts.services import account_movements as account_service
+from accounts.services import supplier_ap as supplier_ap_service
+from pos.models import (
+    BranchWarehouse, Category, Payment, Product, PurchaseInvoice,
+    PurchaseInvoiceLine, Sale, StockMovement, Warehouse,
+)
+from pos.services import purchase_invoices as purchase_invoice_service
 from pos.services import stock_movements as stock_movement_service
 from pos.views import _parse_weight_encoded_barcode
 
@@ -563,3 +571,356 @@ class StockMovementWarehouseTests(_WarehouseTestBase):
             'movement_type': 'receive_in', 'warehouse': self.warehouse_b.id,
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Phase 1.5 Slice H — Purchase Invoice Posting (backend foundation)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _PurchaseInvoiceTestBase(APITestCase):
+    """Two-tenant fixture with supplier, cashbox, payment method, and a
+    default purchase_receiving warehouse for tenant A."""
+
+    @classmethod
+    def setUpTestData(cls):
+        # ── Tenant A ──
+        cls.tenant = Tenant.objects.create(name='Purch Tenant A')
+        cls.branch = Branch.objects.create(tenant=cls.tenant, name='A-Main')
+        cls.manager = User.objects.create_user(
+            username='pmgr_a', password='pw', role=User.Role.MANAGER,
+            tenant=cls.tenant, branch=cls.branch,
+        )
+        cls.cashier = User.objects.create_user(
+            username='pcsh_a', password='pw', role=User.Role.CASHIER,
+            tenant=cls.tenant, branch=cls.branch,
+        )
+        cls.category = Category.objects.create(tenant=cls.tenant, name='Drinks')
+        cls.product = Product.objects.create(
+            tenant=cls.tenant, category=cls.category,
+            name='Cola', barcode='COLA-1', sku='SKU-COLA',
+            price=Decimal('10.00'), cost=Decimal('6.00'),
+            tax_rate=Decimal('0.00'), stock=Decimal('100'),
+        )
+        cls.supplier = Supplier.objects.create(tenant=cls.tenant, name='Acme Supply')
+        cls.cashbox = FinancialAccount.objects.create(
+            tenant=cls.tenant, name='Main Cashbox',
+            account_type=FinancialAccount.AccountType.CASHBOX,
+            opening_balance=Decimal('1000.00'),
+        )
+        cls.cash_method = PaymentMethod.objects.create(
+            tenant=cls.tenant, name='Cash',
+            method_type=PaymentMethod.MethodType.CASH,
+        )
+        cls.warehouse = Warehouse.objects.create(
+            tenant=cls.tenant, code='WH-A', name='A Store',
+        )
+        # Default purchase-receiving link for warehouse auto-resolution.
+        cls.recv_link = BranchWarehouse.objects.create(
+            tenant=cls.tenant, branch=cls.branch, warehouse=cls.warehouse,
+            role=BranchWarehouse.Role.PURCHASE_RECEIVING,
+            is_default=True, is_active=True,
+        )
+
+        # ── Tenant B (foreign — for cross-tenant + isolation tests) ──
+        cls.tenant_b = Tenant.objects.create(name='Purch Tenant B')
+        cls.branch_b = Branch.objects.create(tenant=cls.tenant_b, name='B-Main')
+        cls.supplier_b = Supplier.objects.create(tenant=cls.tenant_b, name='B Supply')
+        cls.warehouse_b = Warehouse.objects.create(
+            tenant=cls.tenant_b, code='WH-B', name='B Store',
+        )
+        cls.cashbox_b = FinancialAccount.objects.create(
+            tenant=cls.tenant_b, name='B Cashbox',
+            account_type=FinancialAccount.AccountType.CASHBOX,
+        )
+        cls.manager_b = User.objects.create_user(
+            username='pmgr_b', password='pw', role=User.Role.MANAGER,
+            tenant=cls.tenant_b, branch=cls.branch_b,
+        )
+
+    def _body(self, **over):
+        body = {
+            'branch':   self.branch.id,
+            'supplier': self.supplier.id,
+            'lines': [{
+                'product':   self.product.id,
+                'warehouse': self.warehouse.id,
+                'qty':       '50.000',
+                'unit_cost': '9.00',
+            }],
+        }
+        body.update(over)
+        return body
+
+
+class PurchaseInvoicePostingTests(_PurchaseInvoiceTestBase):
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.manager)
+
+    def test_cash_purchase_increases_stock_updates_cost_decreases_cashbox(self):
+        body = self._body(
+            paid_amount='450.00', source_account=self.cashbox.id,
+            payment_method=self.cash_method.id,
+        )
+        resp = self.client.post(reverse('purchase-invoice-list'), body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        data = resp.json()
+        self.assertEqual(data['payment_status'], 'paid')
+        self.assertEqual(data['total_amount'], '450.00')
+        self.assertEqual(data['credit_amount'], '0.00')
+
+        # Stock 100 → 150 in the chosen warehouse.
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, Decimal('150.000'))
+        # Moving average: (100*6 + 50*9) / 150 = 7.00
+        self.assertEqual(self.product.cost, Decimal('7.00'))
+
+        mv = StockMovement.objects.get(
+            source_document_type='purchase_invoice',
+            source_document_id=data['id'],
+        )
+        self.assertEqual(mv.movement_type, StockMovement.MovementType.PURCHASE_IN)
+        self.assertEqual(mv.warehouse_id, self.warehouse.id)
+
+        # Cashbox 1000 → 550 (credit 450 leaves the asset account).
+        self.assertEqual(
+            account_service.get_account_current_balance(self.cashbox),
+            Decimal('550.00'),
+        )
+        # No AP movement for a fully-paid purchase.
+        self.assertEqual(
+            supplier_ap_service.get_supplier_balance(self.supplier),
+            Decimal('0.00'),
+        )
+
+    def test_credit_purchase_increases_stock_and_supplier_ap(self):
+        body = self._body()  # paid_amount defaults to 0 → fully on credit
+        resp = self.client.post(reverse('purchase-invoice-list'), body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        data = resp.json()
+        self.assertEqual(data['payment_status'], 'unpaid')
+        self.assertEqual(data['credit_amount'], '450.00')
+
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, Decimal('150.000'))
+
+        # Supplier AP 0 → 450 (credit increases the liability).
+        self.assertEqual(
+            supplier_ap_service.get_supplier_balance(self.supplier),
+            Decimal('450.00'),
+        )
+        # Cashbox untouched.
+        self.assertEqual(
+            account_service.get_account_current_balance(self.cashbox),
+            Decimal('1000.00'),
+        )
+
+    def test_partial_purchase_creates_finance_and_ap_effects(self):
+        body = self._body(paid_amount='200.00', source_account=self.cashbox.id)
+        resp = self.client.post(reverse('purchase-invoice-list'), body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        data = resp.json()
+        self.assertEqual(data['payment_status'], 'partially_paid')
+        self.assertEqual(data['paid_amount'], '200.00')
+        self.assertEqual(data['credit_amount'], '250.00')
+
+        # Cashbox 1000 → 800, AP 0 → 250.
+        self.assertEqual(
+            account_service.get_account_current_balance(self.cashbox),
+            Decimal('800.00'),
+        )
+        self.assertEqual(
+            supplier_ap_service.get_supplier_balance(self.supplier),
+            Decimal('250.00'),
+        )
+
+    def test_default_purchase_receiving_warehouse_is_resolved(self):
+        # Omit warehouse on the line — service resolves the default link.
+        body = self._body(lines=[{
+            'product': self.product.id, 'qty': '10.000', 'unit_cost': '5.00',
+        }])
+        resp = self.client.post(reverse('purchase-invoice-list'), body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        line = PurchaseInvoiceLine.objects.get(purchase_invoice_id=resp.json()['id'])
+        self.assertEqual(line.warehouse_id, self.warehouse.id)
+        mv = StockMovement.objects.get(
+            source_document_type='purchase_invoice',
+            source_document_id=resp.json()['id'],
+        )
+        self.assertEqual(mv.warehouse_id, self.warehouse.id)
+
+    def test_explicit_warehouse_is_accepted(self):
+        other = Warehouse.objects.create(tenant=self.tenant, code='WH-A2', name='A2')
+        body = self._body(lines=[{
+            'product': self.product.id, 'warehouse': other.id,
+            'qty': '5.000', 'unit_cost': '5.00',
+        }])
+        resp = self.client.post(reverse('purchase-invoice-list'), body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        line = PurchaseInvoiceLine.objects.get(purchase_invoice_id=resp.json()['id'])
+        self.assertEqual(line.warehouse_id, other.id)
+
+    def test_tax_and_discount_stored_in_totals(self):
+        body = self._body(lines=[{
+            'product': self.product.id, 'warehouse': self.warehouse.id,
+            'qty': '10.000', 'unit_cost': '10.00',
+            'discount_amount': '5.00', 'tax_amount': '14.00',
+        }])
+        resp = self.client.post(reverse('purchase-invoice-list'), body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        data = resp.json()
+        self.assertEqual(data['subtotal'], '100.00')
+        self.assertEqual(data['discount_total'], '5.00')
+        self.assertEqual(data['tax_total'], '14.00')
+        # total = subtotal - discount + tax = 100 - 5 + 14 = 109
+        self.assertEqual(data['total_amount'], '109.00')
+
+    def test_non_stock_line_type_rejected(self):
+        body = self._body(lines=[{
+            'product': self.product.id, 'warehouse': self.warehouse.id,
+            'qty': '1.000', 'unit_cost': '5.00', 'line_type': 'expense',
+        }])
+        resp = self.client.post(reverse('purchase-invoice-list'), body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_paid_amount_over_total_rejected(self):
+        body = self._body(paid_amount='500.00', source_account=self.cashbox.id)
+        resp = self.client.post(reverse('purchase-invoice-list'), body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_zero_and_negative_qty_rejected(self):
+        for bad in ('0', '-3'):
+            body = self._body(lines=[{
+                'product': self.product.id, 'warehouse': self.warehouse.id,
+                'qty': bad, 'unit_cost': '5.00',
+            }])
+            resp = self.client.post(reverse('purchase-invoice-list'), body, format='json')
+            self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, bad)
+
+    def test_cross_tenant_refs_rejected(self):
+        for field, value in [
+            ('supplier', self.supplier_b.id),
+            ('source_account', self.cashbox_b.id),
+        ]:
+            body = self._body(paid_amount='10.00', source_account=self.cashbox.id)
+            body[field] = value
+            resp = self.client.post(reverse('purchase-invoice-list'), body, format='json')
+            self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, field)
+
+        # Cross-tenant warehouse on a line.
+        body = self._body(lines=[{
+            'product': self.product.id, 'warehouse': self.warehouse_b.id,
+            'qty': '1.000', 'unit_cost': '5.00',
+        }])
+        resp = self.client.post(reverse('purchase-invoice-list'), body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_cashier_cannot_post(self):
+        self.client.force_authenticate(user=self.cashier)
+        resp = self.client.post(reverse('purchase-invoice-list'),
+                                self._body(), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_atomic_rollback_when_ap_posting_fails(self):
+        """If AP posting raises, the whole document (invoice, lines, stock,
+        cost, finance) rolls back — nothing is persisted."""
+        invoices_before = PurchaseInvoice.objects.count()
+        movements_before = StockMovement.objects.count()
+
+        with patch.object(
+            purchase_invoice_service.ap, 'record_supplier_ap_credit',
+            side_effect=RuntimeError('boom'),
+        ):
+            with self.assertRaises(RuntimeError):
+                purchase_invoice_service.post_purchase_invoice(
+                    tenant=self.tenant,
+                    branch=self.branch,
+                    supplier=self.supplier,
+                    lines=[{
+                        'product': self.product,
+                        'warehouse': self.warehouse,
+                        'qty': Decimal('5'),
+                        'unit_cost': Decimal('9.00'),
+                    }],
+                    paid_amount=Decimal('0'),  # fully credit → triggers AP post
+                )
+
+        self.assertEqual(PurchaseInvoice.objects.count(), invoices_before)
+        self.assertEqual(StockMovement.objects.count(), movements_before)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, Decimal('100.000'))  # unchanged
+        self.assertEqual(self.product.cost, Decimal('6.00'))       # unchanged
+
+
+class PurchaseInvoiceIdempotencyTests(_PurchaseInvoiceTestBase):
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.manager)
+
+    def test_replay_returns_original_and_posts_once(self):
+        body = self._body(paid_amount='450.00', source_account=self.cashbox.id)
+        url = reverse('purchase-invoice-list')
+
+        first = self.client.post(url, body, format='json', HTTP_IDEMPOTENCY_KEY='pi-key-1')
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED, first.content)
+
+        second = self.client.post(url, body, format='json', HTTP_IDEMPOTENCY_KEY='pi-key-1')
+        self.assertEqual(second.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second.json()['id'], first.json()['id'])
+
+        # Only one invoice + one stock movement actually posted.
+        self.assertEqual(PurchaseInvoice.objects.filter(tenant=self.tenant).count(), 1)
+        self.assertEqual(
+            StockMovement.objects.filter(source_document_type='purchase_invoice').count(), 1,
+        )
+
+    def test_same_key_different_payload_conflicts(self):
+        url = reverse('purchase-invoice-list')
+        self.client.post(url, self._body(paid_amount='450.00', source_account=self.cashbox.id),
+                         format='json', HTTP_IDEMPOTENCY_KEY='pi-key-2')
+        resp = self.client.post(
+            url, self._body(),  # different payload (no payment)
+            format='json', HTTP_IDEMPOTENCY_KEY='pi-key-2',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+
+
+class PurchaseInvoiceReadScopingTests(_PurchaseInvoiceTestBase):
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.manager)
+        resp = self.client.post(reverse('purchase-invoice-list'),
+                                self._body(), format='json')
+        self.invoice_id = resp.json()['id']
+
+    def test_list_and_detail_are_tenant_scoped(self):
+        # Tenant B manager cannot see tenant A's invoice.
+        self.client.force_authenticate(user=self.manager_b)
+        listing = self.client.get(reverse('purchase-invoice-list'))
+        ids = [r['id'] for r in listing.json()['results']]
+        self.assertNotIn(self.invoice_id, ids)
+
+        detail = self.client.get(
+            reverse('purchase-invoice-detail', kwargs={'pk': self.invoice_id}),
+        )
+        self.assertEqual(detail.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class LegacyInventoryPurchaseCompatTests(_PurchaseInvoiceTestBase):
+    """The legacy POST /api/inventory/purchase/ stays inventory-only and is
+    not affected by the new PurchaseInvoice flow."""
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.manager)
+
+    def test_legacy_purchase_still_increments_stock_without_a_document(self):
+        before = self.product.stock
+        resp = self.client.post(reverse('inventory-purchase'), {
+            'product': self.product.id, 'qty': '20', 'cost_price': '7.50',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, before + Decimal('20'))
+        # Legacy path creates no PurchaseInvoice document.
+        self.assertEqual(PurchaseInvoice.objects.count(), 0)

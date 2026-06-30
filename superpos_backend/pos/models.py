@@ -637,3 +637,129 @@ class BranchWarehouse(models.Model):
 
     def __str__(self):
         return f'{self.branch_id}:{self.warehouse_id} [{self.role}]'
+
+
+# ── Purchase Invoices (Phase 1.5 Slice H — posting foundation) ─────────────────
+# Real posted purchase document for STOCK-ITEM lines only. Posting increases
+# stock in a warehouse (+ moving-average cost on Product.cost), credits the
+# source cash/bank account for the paid amount, and credits Supplier AP for
+# the unpaid amount — all atomically. See pos/services/purchase_invoices.py.
+#
+# Accounting decisions for this slice (documented intentionally):
+#   * Inventory is tracked by StockMovement quantity + Product.cost moving
+#     average. There is NO Inventory GL FinancialAccount posting yet, so the
+#     debit side of the purchase is represented by stock value, not a GL row.
+#   * tax_amount / tax_total are STORED but NOT posted to any tax ledger —
+#     v3.6 does not define purchase-tax accounting (DOMAIN §18 is sales-only).
+#   * Only line_type='stock_item' is accepted for posting in this slice.
+
+class PurchaseInvoice(models.Model):
+    class PostingStatus(models.TextChoices):
+        DRAFT  = 'draft',  'Draft'
+        POSTED = 'posted', 'Posted'
+
+    class PaymentStatus(models.TextChoices):
+        UNPAID         = 'unpaid',         'Unpaid'
+        PARTIALLY_PAID = 'partially_paid', 'Partially Paid'
+        PAID           = 'paid',           'Paid'
+
+    tenant   = models.ForeignKey(
+        'accounts.Tenant', on_delete=models.CASCADE,
+        related_name='purchase_invoices', db_index=True,
+    )
+    branch   = models.ForeignKey(
+        'accounts.Branch', on_delete=models.PROTECT,
+        related_name='purchase_invoices', db_index=True,
+    )
+    supplier = models.ForeignKey(
+        'accounts.Supplier', on_delete=models.PROTECT,
+        related_name='purchase_invoices', db_index=True,
+    )
+    reference = models.CharField(max_length=120, blank=True, default='')
+
+    # Totals — computed server-side from the lines during posting.
+    subtotal       = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    discount_total = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    tax_total      = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    total_amount   = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    paid_amount    = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    credit_amount  = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+
+    # Payment routing — both nullable (a fully-credit purchase needs neither).
+    payment_method = models.ForeignKey(
+        'accounts.PaymentMethod', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='purchase_invoices',
+    )
+    source_account = models.ForeignKey(
+        'accounts.FinancialAccount', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='purchase_invoices',
+    )
+
+    posting_status = models.CharField(
+        max_length=12, choices=PostingStatus.choices, default=PostingStatus.POSTED,
+    )
+    payment_status = models.CharField(
+        max_length=16, choices=PaymentStatus.choices, default=PaymentStatus.UNPAID,
+    )
+    posted_at  = models.DateTimeField(null=True, blank=True)
+    actor_user = models.ForeignKey(
+        'accounts.User', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='purchase_invoices',
+    )
+    notes      = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['tenant', '-created_at'], name='pos_pinv_tenant_recent_idx'),
+            models.Index(fields=['supplier', '-created_at'], name='pos_pinv_supplier_recent_idx'),
+        ]
+
+    def __str__(self):
+        return f'PINV[{self.id}] {self.supplier_id} total={self.total_amount}'
+
+
+class PurchaseInvoiceLine(models.Model):
+    class LineType(models.TextChoices):
+        STOCK_ITEM  = 'stock_item',  'Stock Item'
+        EXPENSE     = 'expense',     'Expense'
+        FIXED_ASSET = 'fixed_asset', 'Fixed Asset'
+        SERVICE     = 'service',     'Service'
+        NON_STOCK   = 'non_stock',   'Non Stock'
+
+    tenant           = models.ForeignKey(
+        'accounts.Tenant', on_delete=models.CASCADE,
+        related_name='purchase_invoice_lines', db_index=True,
+    )
+    purchase_invoice = models.ForeignKey(
+        PurchaseInvoice, on_delete=models.CASCADE, related_name='lines',
+    )
+    product   = models.ForeignKey(
+        Product, on_delete=models.PROTECT,
+        null=True, blank=True, related_name='purchase_invoice_lines',
+    )
+    # Resolved warehouse the stock landed in (may be auto-resolved from the
+    # branch's default purchase_receiving link when omitted on input).
+    warehouse = models.ForeignKey(
+        Warehouse, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='purchase_invoice_lines',
+    )
+    line_type       = models.CharField(
+        max_length=20, choices=LineType.choices, default=LineType.STOCK_ITEM,
+    )
+    qty             = models.DecimalField(max_digits=14, decimal_places=3)
+    unit_cost       = models.DecimalField(max_digits=14, decimal_places=2)
+    discount_amount = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    tax_amount      = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    line_total      = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    notes           = models.CharField(max_length=200, blank=True, default='')
+    created_at      = models.DateTimeField(auto_now_add=True)
+    updated_at      = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['id']
+
+    def __str__(self):
+        return f'PINVLine[{self.id}] {self.product_id} qty={self.qty}'

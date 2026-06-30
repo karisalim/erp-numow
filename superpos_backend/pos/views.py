@@ -21,7 +21,7 @@ from .filters import (
 )
 from .models import (
     BranchWarehouse, Category, InventoryBatch, Product,
-    Sale, SaleItem, StockMovement, Warehouse,
+    PurchaseInvoice, Sale, SaleItem, StockMovement, Warehouse,
 )
 from .serializers import (
     BranchWarehouseSerializer,
@@ -29,6 +29,7 @@ from .serializers import (
     InventoryBatchSerializer,
     ProductSerializer,
     ProductStockUpdateSerializer,
+    PurchaseInvoiceSerializer,
     PurchaseReceiptSerializer,
     ReceiptSerializer,
     SaleListSerializer,
@@ -37,6 +38,7 @@ from .serializers import (
     StockMovementSerializer,
     WarehouseSerializer,
 )
+from .services import idempotency
 
 
 # ── Tenant isolation mixin ────────────────────────────────────────────────────
@@ -1321,3 +1323,76 @@ class BranchNestedWarehouseListCreateView(TenantMixin, generics.ListCreateAPIVie
         serializer.save(tenant=self._tenant())
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+
+
+# ── Purchase Invoices (Phase 1.5 Slice H — posting) ───────────────────────────
+
+class PurchaseInvoiceListCreateView(TenantMixin, generics.ListCreateAPIView):
+    """GET list + POST create-and-post a stock-item purchase invoice.
+
+    POST runs the full atomic posting (stock + moving-avg cost + finance/AP)
+    via the serializer → `pos.services.purchase_invoices`. Supports an
+    optional `Idempotency-Key` header so a retried POST replays the original
+    response instead of double-posting.
+    """
+
+    queryset = (
+        PurchaseInvoice.objects
+        .select_related('supplier', 'branch', 'source_account', 'payment_method')
+        .prefetch_related('lines', 'lines__product')
+        .all()
+    )
+    serializer_class = PurchaseInvoiceSerializer
+    ordering         = ['-created_at']
+
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+    def perform_create(self, serializer):
+        # tenant + actor are resolved from the request context inside the
+        # serializer/service, so no tenant kwarg is injected here.
+        serializer.save()
+
+    def create(self, request, *args, **kwargs):
+        tenant = self._tenant()
+        key = (request.headers.get('Idempotency-Key') or '').strip()
+
+        look = idempotency.lookup(
+            tenant=tenant, key=key, payload=request.data,
+            method=request.method, path=request.path, user=request.user,
+        )
+        if look.replay:
+            return Response(look.body, status=look.status)
+        if look.conflict:
+            return Response(
+                {'error': {
+                    'code': 'IDEMPOTENCY_CONFLICT',
+                    'detail': 'Idempotency-Key reused with a different payload.',
+                }},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        response = super().create(request, *args, **kwargs)
+
+        idempotency.save(
+            tenant=tenant, key=key, payload=request.data,
+            method=request.method, path=request.path,
+            response_status=response.status_code, response_body=response.data,
+            user=request.user,
+        )
+        return response
+
+
+class PurchaseInvoiceDetailView(TenantMixin, generics.RetrieveAPIView):
+    """GET one purchase invoice. No update/delete in this slice."""
+
+    queryset = (
+        PurchaseInvoice.objects
+        .select_related('supplier', 'branch', 'source_account', 'payment_method')
+        .prefetch_related('lines', 'lines__product')
+        .all()
+    )
+    serializer_class   = PurchaseInvoiceSerializer
+    permission_classes = [IsCashierOrAbove]

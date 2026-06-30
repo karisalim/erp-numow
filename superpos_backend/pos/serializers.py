@@ -6,10 +6,11 @@ from django.db.models import F
 from django.utils import timezone
 from rest_framework import serializers
 
-from accounts.models import Branch
+from accounts.models import Branch, FinancialAccount, PaymentMethod, Supplier
 from .models import (
     BranchWarehouse, Category, InsufficientStockError, InventoryBatch,
-    Payment, Product, Sale, SaleItem, StockMovement, Warehouse,
+    Payment, Product, PurchaseInvoice, PurchaseInvoiceLine,
+    Sale, SaleItem, StockMovement, Warehouse,
 )
 
 logger = logging.getLogger(__name__)
@@ -390,6 +391,114 @@ class BranchWarehouseSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError(
                         'This branch already has a default warehouse for this role.')
         return attrs
+
+
+# ── Purchase Invoices (Phase 1.5 Slice H) ─────────────────────────────────────
+
+class PurchaseInvoiceLineSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source='product.name', read_only=True)
+
+    class Meta:
+        model  = PurchaseInvoiceLine
+        fields = [
+            'id', 'product', 'product_name', 'warehouse', 'line_type',
+            'qty', 'unit_cost', 'discount_amount', 'tax_amount',
+            'line_total', 'notes',
+        ]
+        read_only_fields = ['id', 'product_name', 'line_total']
+
+    def validate_qty(self, value):
+        if value is None or value <= 0:
+            raise serializers.ValidationError('qty must be > 0')
+        return value
+
+    def validate_line_type(self, value):
+        if value and value != PurchaseInvoiceLine.LineType.STOCK_ITEM:
+            raise serializers.ValidationError(
+                "Only 'stock_item' lines are supported in this slice.")
+        return value
+
+    def validate(self, attrs):
+        line_type = attrs.get('line_type') or PurchaseInvoiceLine.LineType.STOCK_ITEM
+        if line_type == PurchaseInvoiceLine.LineType.STOCK_ITEM and attrs.get('product') is None:
+            raise serializers.ValidationError(
+                {'product': 'product is required for a stock_item line.'})
+        for fld in ('unit_cost', 'discount_amount', 'tax_amount'):
+            val = attrs.get(fld)
+            if val is not None and val < 0:
+                raise serializers.ValidationError({fld: f'{fld} must be >= 0'})
+        return attrs
+
+
+class PurchaseInvoiceSerializer(serializers.ModelSerializer):
+    lines         = PurchaseInvoiceLineSerializer(many=True)
+    supplier_name = serializers.CharField(source='supplier.name', read_only=True)
+    branch_name   = serializers.CharField(source='branch.name', read_only=True)
+
+    class Meta:
+        model  = PurchaseInvoice
+        fields = [
+            'id', 'branch', 'branch_name', 'supplier', 'supplier_name',
+            'reference',
+            'subtotal', 'discount_total', 'tax_total', 'total_amount',
+            'paid_amount', 'credit_amount',
+            'payment_method', 'source_account',
+            'posting_status', 'payment_status', 'posted_at',
+            'actor_user', 'notes', 'lines',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'branch_name', 'supplier_name',
+            'subtotal', 'discount_total', 'tax_total', 'total_amount',
+            'credit_amount', 'posting_status', 'payment_status', 'posted_at',
+            'actor_user', 'created_at', 'updated_at',
+        ]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        request = self.context.get('request')
+        tenant = getattr(getattr(request, 'user', None), 'tenant', None)
+        if tenant is not None:
+            self.fields['branch'].queryset         = Branch.objects.filter(tenant=tenant)
+            self.fields['supplier'].queryset       = Supplier.objects.filter(tenant=tenant)
+            self.fields['payment_method'].queryset = PaymentMethod.objects.filter(tenant=tenant)
+            self.fields['source_account'].queryset = FinancialAccount.objects.filter(tenant=tenant)
+            line_fields = self.fields['lines'].child.fields
+            line_fields['product'].queryset   = Product.objects.filter(tenant=tenant)
+            line_fields['warehouse'].queryset = Warehouse.objects.filter(tenant=tenant)
+
+    def validate(self, attrs):
+        paid = attrs.get('paid_amount') or Decimal('0')
+        if paid < 0:
+            raise serializers.ValidationError({'paid_amount': 'paid_amount must be >= 0'})
+        if not attrs.get('lines'):
+            raise serializers.ValidationError({'lines': 'at least one line is required'})
+        return attrs
+
+    def create(self, validated_data):
+        # Local import to avoid any serializer ↔ service import cycle.
+        from pos.services import purchase_invoices as svc
+
+        request = self.context.get('request')
+        tenant  = getattr(getattr(request, 'user', None), 'tenant', None)
+        actor   = getattr(request, 'user', None)
+        lines   = validated_data.pop('lines')
+        try:
+            invoice = svc.post_purchase_invoice(
+                tenant=tenant,
+                branch=validated_data['branch'],
+                supplier=validated_data['supplier'],
+                lines=lines,
+                payment_method=validated_data.get('payment_method'),
+                source_account=validated_data.get('source_account'),
+                paid_amount=validated_data.get('paid_amount') or Decimal('0'),
+                reference=validated_data.get('reference', '') or '',
+                notes=validated_data.get('notes', '') or '',
+                actor_user=actor,
+            )
+        except svc.PurchaseInvoiceError as exc:
+            raise serializers.ValidationError({'detail': str(exc)})
+        return invoice
 
 
 # ── Sale serializers ──────────────────────────────────────────────────────────
