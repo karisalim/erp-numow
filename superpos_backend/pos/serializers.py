@@ -6,7 +6,9 @@ from django.db.models import F
 from django.utils import timezone
 from rest_framework import serializers
 
-from accounts.models import Branch, FinancialAccount, PaymentMethod, Supplier
+from accounts.models import (
+    Branch, Customer, FinancialAccount, PaymentMethod, Supplier,
+)
 from .models import (
     BranchWarehouse, Category, InsufficientStockError, InventoryBatch,
     Payment, Product, PurchaseInvoice, PurchaseInvoiceLine,
@@ -505,14 +507,17 @@ class PurchaseInvoiceSerializer(serializers.ModelSerializer):
 
 class SaleItemSerializer(serializers.ModelSerializer):
     """
-    Client sends: product (id), qty, price_each.
-    Server fills:  product_name, barcode, line_total automatically.
+    Client sends: product (id), qty, price_each, optional warehouse.
+    Server fills:  product_name, barcode, line_total, unit_cost automatically.
     """
 
     class Meta:
         model  = SaleItem
-        fields = ['id', 'product', 'product_name', 'barcode', 'qty', 'price_each', 'line_total']
-        read_only_fields = ['id', 'product_name', 'barcode', 'line_total']
+        fields = [
+            'id', 'product', 'product_name', 'barcode',
+            'qty', 'price_each', 'line_total', 'unit_cost', 'warehouse',
+        ]
+        read_only_fields = ['id', 'product_name', 'barcode', 'line_total', 'unit_cost']
 
 
 class SaleSerializer(serializers.ModelSerializer):
@@ -555,6 +560,7 @@ class SaleSerializer(serializers.ModelSerializer):
             'cashier', 'cashier_name',
             'branch', 'branch_name',
             'terminal', 'terminal_name',
+            'customer',
             'subtotal', 'tax_amount', 'total',
             'discount_type', 'discount_value',
             'method', 'paid', 'amount_paid', 'change',
@@ -568,6 +574,16 @@ class SaleSerializer(serializers.ModelSerializer):
             'subtotal', 'tax_amount', 'total', 'change',
             'created_at',
         ]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        request = self.context.get('request')
+        tenant = getattr(getattr(request, 'user', None), 'tenant', None)
+        if tenant is not None:
+            self.fields['customer'].queryset = Customer.objects.filter(tenant=tenant)
+            item_fields = self.fields['items'].child.fields
+            item_fields['product'].queryset = Product.objects.filter(tenant=tenant)
+            item_fields['warehouse'].queryset = Warehouse.objects.filter(tenant=tenant)
 
     def get_cashier_name(self, obj):
         if obj.cashier:
@@ -612,6 +628,10 @@ class SaleSerializer(serializers.ModelSerializer):
         if discount_type == Sale.DiscountType.PERCENT and discount_value > 100:
             errors['discount_value'] = 'Percent discount cannot exceed 100%.'
 
+        # Credit sales settle into Customer AR, so a customer is mandatory.
+        if data.get('method') == Sale.Method.CREDIT and not data.get('customer'):
+            errors['customer'] = 'A customer is required for a credit sale.'
+
         if errors:
             raise serializers.ValidationError(errors)
 
@@ -646,21 +666,36 @@ class SaleSerializer(serializers.ModelSerializer):
         else:
             discount_amount = Decimal('0')
 
-        total = subtotal + tax_amount - discount_amount
-        paid  = validated_data.get('paid', Decimal('0'))
-
-        if paid < total:
-            raise serializers.ValidationError({
-                'paid': (
-                    f'Insufficient payment. '
-                    f'Total is {total:.2f}, received {float(paid):.2f}.'
-                )
-            })
-
-        change = paid - total
+        total  = subtotal + tax_amount - discount_amount
         method = validated_data.get('method', Sale.Method.CASH)
+        paid   = validated_data.get('paid', Decimal('0'))
+
+        # Credit sales settle the full total into Customer AR — no cash is
+        # tendered now, so the "paid >= total" rule and change don't apply.
+        if method == Sale.Method.CREDIT:
+            change = Decimal('0')
+        else:
+            if paid < total:
+                raise serializers.ValidationError({
+                    'paid': (
+                        f'Insufficient payment. '
+                        f'Total is {total:.2f}, received {float(paid):.2f}.'
+                    )
+                })
+            change = paid - total
+
         # Fast-indexed mirror for reporting (per Sale model docstring).
         validated_data['payment_method_hint'] = method
+        customer = validated_data.get('customer')
+
+        # Ledger integration (Phase 1.5 Slice I) — resolve the branch's default
+        # sales warehouse once. None when unconfigured → legacy behavior.
+        from pos.services import sale_posting
+        request = self.context.get('request')
+        actor   = getattr(request, 'user', None)
+        tenant  = validated_data.get('tenant') or getattr(actor, 'tenant', None)
+        branch  = validated_data.get('branch')
+        default_warehouse = sale_posting.resolve_sales_warehouse(tenant=tenant, branch=branch)
 
         with transaction.atomic():
             sale = Sale.objects.create(
@@ -676,6 +711,10 @@ class SaleSerializer(serializers.ModelSerializer):
                 item_data['product_name'] = product.name        if product else ''
                 item_data['barcode']      = product.barcode or '' if product else ''
                 item_data['line_total']   = item_data['qty'] * item_data['price_each']
+                # Cost snapshot for future COGS; explicit-or-default warehouse.
+                item_data['unit_cost']    = product.cost if product else Decimal('0')
+                if item_data.get('warehouse') is None:
+                    item_data['warehouse'] = default_warehouse
                 SaleItem.objects.create(sale=sale, **item_data)
 
             # Payment ledger — separate row so reporting queries don't have
@@ -692,6 +731,25 @@ class SaleSerializer(serializers.ModelSerializer):
 
             if sale.status == Sale.Status.COMPLETED:
                 self._apply_stock(sale)
+                # Post the financial / AR effect. Runs in this atomic block so
+                # any posting failure rolls back the whole sale.
+                #
+                # A *configured* branch (one that has BranchPaymentMethod
+                # routing) must never silently skip posting: a missing /
+                # inactive / misconfigured route — or an AR / account rule
+                # violation — surfaces as a 400 and rolls the sale back. Only a
+                # genuinely legacy branch (no routing at all) is allowed to skip
+                # (with a warning) — see sale_posting.post_sale_ledgers.
+                try:
+                    sale_posting.post_sale_ledgers(
+                        sale=sale, method=method, customer=customer, actor_user=actor,
+                    )
+                except (
+                    sale_posting.SalePostingError,
+                    sale_posting.ar.CustomerARError,
+                    sale_posting.fa.AccountMovementError,
+                ) as exc:
+                    raise serializers.ValidationError({'payment': str(exc)})
 
         return sale
 
@@ -699,16 +757,22 @@ class SaleSerializer(serializers.ModelSerializer):
 
     @staticmethod
     def _apply_stock(sale: Sale) -> None:
-        """Deduct each line's qty from Product.stock under a row lock.
+        """Deduct each line's qty from the global Product.stock under a row lock.
 
         Oversells are allowed (per FLOW.md) and produce a warning, but the
         actual decrement still goes through `Product.deduct_stock(...,
         allow_oversell=True)` so two concurrent checkouts of the last unit
         can't both succeed without one of them being flagged.
+
+        Warehouse note: each movement records `item.warehouse` purely for
+        traceability (which location the goods left). The authoritative on-hand
+        quantity is still the single global `Product.stock` counter — there is
+        no per-warehouse balance yet (deferred to a future slice). So the
+        warehouse on the movement *labels* the outflow; it does not *scope* it.
         """
         warnings = []
         with transaction.atomic():
-            for item in sale.items.select_related('product').all():
+            for item in sale.items.select_related('product', 'warehouse').all():
                 if not item.product:
                     continue
 
@@ -738,9 +802,14 @@ class SaleSerializer(serializers.ModelSerializer):
                 StockMovement.objects.create(
                     tenant=sale.tenant,
                     product=product,
+                    branch=sale.branch,
+                    warehouse=item.warehouse,
                     qty=-qty_delta,
                     movement_type=StockMovement.MovementType.SALE_OUT,
                     sale=sale,
+                    source_document_type='sale',
+                    source_document_id=sale.id,
+                    actor_user=sale.cashier,
                     note=note,
                 )
 

@@ -58,7 +58,11 @@ class Product(models.Model):
     price    = models.DecimalField(max_digits=10, decimal_places=2)
     cost     = models.DecimalField(max_digits=10, decimal_places=2)
     tax_rate = models.DecimalField(max_digits=5, decimal_places=4, default=0.10)
-    # Stock tracked as Decimal so weighted SKUs (0.5 kg) deduct correctly.
+    # Global cached on-hand quantity (tenant-wide, NOT per-warehouse). Decimal
+    # so weighted SKUs (0.5 kg) deduct correctly. Warehouse-aware movements
+    # (SaleItem.warehouse / StockMovement.warehouse) record WHERE stock moved
+    # for traceability, but this single counter remains the authoritative
+    # quantity — per-warehouse stock balances are deferred to a future slice.
     stock    = models.DecimalField(max_digits=10, decimal_places=3, default=0)
     reorder  = models.DecimalField(max_digits=10, decimal_places=3, default=10)
     color    = models.CharField(max_length=20, default='#6B7280')
@@ -161,6 +165,7 @@ class Sale(models.Model):
         CASH   = 'cash',   'Cash'
         CARD   = 'card',   'Card'
         WALLET = 'wallet', 'Wallet'
+        CREDIT = 'credit', 'Credit'
 
     class Status(models.TextChoices):
         COMPLETED = 'completed', 'Completed'
@@ -190,6 +195,12 @@ class Sale(models.Model):
     )
     terminal = models.ForeignKey(
         'accounts.Terminal', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='sales',
+    )
+    # Credit (AR) sales reference the customer who owes the balance. Nullable
+    # so cash/card/wallet sales (the common case) stay exactly as before.
+    customer = models.ForeignKey(
+        'accounts.Customer', on_delete=models.SET_NULL,
         null=True, blank=True, related_name='sales',
     )
     subtotal   = models.DecimalField(max_digits=10, decimal_places=2)
@@ -236,6 +247,19 @@ class SaleItem(models.Model):
     qty          = models.DecimalField(max_digits=8, decimal_places=3)
     price_each   = models.DecimalField(max_digits=10, decimal_places=2)
     line_total   = models.DecimalField(max_digits=10, decimal_places=2)
+    # Cost snapshot taken from Product.cost at sale time (Phase 1.5 Slice I).
+    # Default 0 keeps the column additive; future COGS reporting reads it so
+    # historical margin survives later cost changes.
+    unit_cost    = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    # Warehouse the stock left from (explicit per-line, or the branch's
+    # default sales warehouse). Nullable so legacy rows / unconfigured tenants
+    # are unaffected. Traceability only: this records WHERE the goods left from;
+    # it does NOT maintain a per-warehouse balance — the on-hand quantity stays
+    # on the global Product.stock (per-warehouse balances are a deferred slice).
+    warehouse    = models.ForeignKey(
+        'pos.Warehouse', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='sale_items',
+    )
     created_at   = models.DateTimeField(auto_now_add=True)
     updated_at   = models.DateTimeField(auto_now=True)
 
@@ -266,8 +290,11 @@ class StockMovement(models.Model):
         'accounts.Branch', on_delete=models.CASCADE,
         null=True, blank=True, related_name='stock_movements', db_index=True,
     )
-    # Per-warehouse inventory tracking (Phase 1.5 Dynamic Warehouses slice).
-    # Nullable for backward compatibility: legacy rows and existing
+    # Per-warehouse traceability (Phase 1.5 Dynamic Warehouses slice): records
+    # which location this movement affected. It does NOT drive a per-warehouse
+    # balance — the authoritative on-hand quantity is still the global
+    # Product.stock counter; per-warehouse balances are deferred to a future
+    # slice. Nullable for backward compatibility: legacy rows and existing
     # creation paths that don't pass a warehouse stay valid. SET_NULL (not
     # CASCADE) keeps this append-only ledger history intact if a warehouse
     # row is ever removed — though warehouses are deactivated, never deleted.
@@ -335,6 +362,7 @@ class Payment(models.Model):
         CASH   = 'cash',   'Cash'
         CARD   = 'card',   'Card'
         WALLET = 'wallet', 'Wallet'
+        CREDIT = 'credit', 'Credit'
         MIXED  = 'mixed',  'Mixed'
 
     class Status(models.TextChoices):

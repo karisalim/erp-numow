@@ -15,15 +15,18 @@ from rest_framework.test import APITestCase
 from unittest.mock import patch
 
 from accounts.models import (
-    Branch, FinancialAccount, PaymentMethod, Supplier, Tenant, Terminal, User,
+    Branch, BranchPaymentMethod, Customer, FinancialAccount,
+    FinancialAccountMovement, PaymentMethod, Supplier, Tenant, Terminal, User,
 )
 from accounts.services import account_movements as account_service
+from accounts.services import customer_ar as customer_ar_service
 from accounts.services import supplier_ap as supplier_ap_service
 from pos.models import (
     BranchWarehouse, Category, Payment, Product, PurchaseInvoice,
-    PurchaseInvoiceLine, Sale, StockMovement, Warehouse,
+    PurchaseInvoiceLine, Sale, SaleItem, StockMovement, Warehouse,
 )
 from pos.services import purchase_invoices as purchase_invoice_service
+from pos.services import sale_posting
 from pos.services import stock_movements as stock_movement_service
 from pos.views import _parse_weight_encoded_barcode
 
@@ -924,3 +927,334 @@ class LegacyInventoryPurchaseCompatTests(_PurchaseInvoiceTestBase):
         self.assertEqual(self.product.stock, before + Decimal('20'))
         # Legacy path creates no PurchaseInvoice document.
         self.assertEqual(PurchaseInvoice.objects.count(), 0)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Phase 1.5 Slice I — Sales / POS Posting Ledger Integration
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _SalePostingTestBase(APITestCase):
+    """Tenant A is fully configured (routing + sales warehouse); tenant B is
+    left unconfigured for cross-tenant + legacy-fallback tests."""
+
+    @classmethod
+    def setUpTestData(cls):
+        # ── Tenant A (configured) ──
+        cls.tenant = Tenant.objects.create(name='Sale Tenant A')
+        cls.branch = Branch.objects.create(tenant=cls.tenant, name='A-Main')
+        cls.cashier = User.objects.create_user(
+            username='scsh_a', password='pw', role=User.Role.CASHIER,
+            tenant=cls.tenant, branch=cls.branch,
+        )
+        cls.manager = User.objects.create_user(
+            username='smgr_a', password='pw', role=User.Role.MANAGER,
+            tenant=cls.tenant, branch=cls.branch,
+        )
+        cls.category = Category.objects.create(tenant=cls.tenant, name='Drinks')
+        cls.product = Product.objects.create(
+            tenant=cls.tenant, category=cls.category,
+            name='Cola', barcode='COLA-S1', sku='SKU-COLA-S',
+            price=Decimal('10.00'), cost=Decimal('6.00'),
+            tax_rate=Decimal('0.00'), stock=Decimal('100'),
+        )
+        cls.customer = Customer.objects.create(tenant=cls.tenant, name='Walk-in Co')
+
+        # Financial accounts (asset-like; opening balance 0).
+        cls.cashbox = FinancialAccount.objects.create(
+            tenant=cls.tenant, name='Cashbox',
+            account_type=FinancialAccount.AccountType.CASHBOX)
+        cls.card_acct = FinancialAccount.objects.create(
+            tenant=cls.tenant, name='Card Settlement',
+            account_type=FinancialAccount.AccountType.CARD_SETTLEMENT)
+        cls.wallet_acct = FinancialAccount.objects.create(
+            tenant=cls.tenant, name='Wallet',
+            account_type=FinancialAccount.AccountType.WALLET)
+
+        # Payment methods + branch routing.
+        for mtype, acct in [
+            (PaymentMethod.MethodType.CASH, cls.cashbox),
+            (PaymentMethod.MethodType.CARD, cls.card_acct),
+            (PaymentMethod.MethodType.WALLET, cls.wallet_acct),
+        ]:
+            pm = PaymentMethod.objects.create(
+                tenant=cls.tenant, name=f'{mtype}-pm', method_type=mtype)
+            BranchPaymentMethod.objects.create(
+                tenant=cls.tenant, branch=cls.branch, payment_method=pm,
+                destination_account=acct, is_default=True, is_active=True)
+
+        # Sales warehouse + default sales link.
+        cls.warehouse = Warehouse.objects.create(
+            tenant=cls.tenant, code='WH-SA', name='A Sales Store')
+        BranchWarehouse.objects.create(
+            tenant=cls.tenant, branch=cls.branch, warehouse=cls.warehouse,
+            role=BranchWarehouse.Role.SALES, is_default=True, is_active=True)
+
+        # ── Tenant B (unconfigured — for cross-tenant + legacy fallback) ──
+        cls.tenant_b = Tenant.objects.create(name='Sale Tenant B')
+        cls.branch_b = Branch.objects.create(tenant=cls.tenant_b, name='B-Main')
+        cls.cashier_b = User.objects.create_user(
+            username='scsh_b', password='pw', role=User.Role.CASHIER,
+            tenant=cls.tenant_b, branch=cls.branch_b,
+        )
+        cls.category_b = Category.objects.create(tenant=cls.tenant_b, name='B-Cat')
+        cls.product_b = Product.objects.create(
+            tenant=cls.tenant_b, category=cls.category_b,
+            name='B-Cola', barcode='COLA-B1', sku='SKU-COLA-B',
+            price=Decimal('10.00'), cost=Decimal('6.00'),
+            tax_rate=Decimal('0.00'), stock=Decimal('100'),
+        )
+        cls.customer_b = Customer.objects.create(tenant=cls.tenant_b, name='B Cust')
+        cls.warehouse_b = Warehouse.objects.create(
+            tenant=cls.tenant_b, code='WH-SB', name='B Store')
+
+    def _sale_body(self, method='cash', **over):
+        body = {
+            'items': [{'product': self.product.id, 'qty': '2', 'price_each': '10.00'}],
+            'method': method,
+            'amount_paid': '20.00',
+        }
+        body.update(over)
+        return body
+
+
+class SalePostingTests(_SalePostingTestBase):
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.cashier)
+
+    def test_cash_sale_decreases_stock_and_increases_cashbox(self):
+        resp = self.client.post(reverse('sale-list'), self._sale_body('cash'), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, Decimal('98.000'))
+
+        sale_id = resp.json()['id']
+        mv = StockMovement.objects.get(source_document_type='sale', source_document_id=sale_id)
+        self.assertEqual(mv.movement_type, StockMovement.MovementType.SALE_OUT)
+        self.assertEqual(mv.warehouse_id, self.warehouse.id)
+
+        # Cashbox (asset) debit → balance up by the 20.00 total.
+        self.assertEqual(
+            account_service.get_account_current_balance(self.cashbox), Decimal('20.00'))
+
+    def test_card_sale_routes_to_card_settlement(self):
+        resp = self.client.post(reverse('sale-list'), self._sale_body('card'), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        self.assertEqual(
+            account_service.get_account_current_balance(self.card_acct), Decimal('20.00'))
+        # Cashbox untouched.
+        self.assertEqual(
+            account_service.get_account_current_balance(self.cashbox), Decimal('0.00'))
+
+    def test_wallet_sale_routes_to_wallet_account(self):
+        resp = self.client.post(reverse('sale-list'), self._sale_body('wallet'), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        self.assertEqual(
+            account_service.get_account_current_balance(self.wallet_acct), Decimal('20.00'))
+
+    def test_credit_sale_requires_customer(self):
+        body = self._sale_body('credit')   # no customer
+        body.pop('amount_paid')
+        resp = self.client.post(reverse('sale-list'), body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_credit_sale_increases_customer_ar(self):
+        body = self._sale_body('credit', customer=self.customer.id)
+        body.pop('amount_paid')  # nothing tendered now
+        resp = self.client.post(reverse('sale-list'), body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+
+        # Customer AR (asset) debit → owes the 20.00 total.
+        self.assertEqual(
+            customer_ar_service.get_customer_balance(self.customer), Decimal('20.00'))
+        # Stock still leaves; no cashbox movement.
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, Decimal('98.000'))
+        self.assertEqual(
+            account_service.get_account_current_balance(self.cashbox), Decimal('0.00'))
+
+    def test_default_sales_warehouse_is_resolved(self):
+        resp = self.client.post(reverse('sale-list'), self._sale_body('cash'), format='json')
+        sale_id = resp.json()['id']
+        item = SaleItem.objects.get(sale_id=sale_id)
+        self.assertEqual(item.warehouse_id, self.warehouse.id)
+        self.assertEqual(item.unit_cost, Decimal('6.00'))  # cost snapshot
+
+    def test_explicit_line_warehouse_is_accepted(self):
+        other = Warehouse.objects.create(tenant=self.tenant, code='WH-SA2', name='A2')
+        body = self._sale_body('cash')
+        body['items'][0]['warehouse'] = other.id
+        resp = self.client.post(reverse('sale-list'), body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        item = SaleItem.objects.get(sale_id=resp.json()['id'])
+        self.assertEqual(item.warehouse_id, other.id)
+
+    def test_cross_tenant_product_rejected(self):
+        body = self._sale_body('cash')
+        body['items'][0]['product'] = self.product_b.id
+        resp = self.client.post(reverse('sale-list'), body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_cross_tenant_customer_rejected(self):
+        body = self._sale_body('credit', customer=self.customer_b.id)
+        body.pop('amount_paid')
+        resp = self.client.post(reverse('sale-list'), body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_cross_tenant_warehouse_rejected(self):
+        body = self._sale_body('cash')
+        body['items'][0]['warehouse'] = self.warehouse_b.id
+        resp = self.client.post(reverse('sale-list'), body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_oversell_still_allowed_with_warning(self):
+        self.product.stock = Decimal('0')
+        self.product.save(update_fields=['stock'])
+        resp = self.client.post(reverse('sale-list'), self._sale_body('cash'), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        self.assertTrue(resp.json()['warnings'])
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, Decimal('-2.000'))
+
+    def test_atomic_rollback_when_finance_posting_fails(self):
+        sales_before = Sale.objects.count()
+        moves_before = StockMovement.objects.count()
+        with patch.object(
+            sale_posting.fa, 'record_account_debit',
+            side_effect=RuntimeError('boom'),
+        ):
+            with self.assertRaises(RuntimeError):
+                self.client.post(reverse('sale-list'), self._sale_body('cash'), format='json')
+
+        self.assertEqual(Sale.objects.count(), sales_before)
+        self.assertEqual(StockMovement.objects.count(), moves_before)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, Decimal('100.000'))
+        self.assertEqual(
+            account_service.get_account_current_balance(self.cashbox), Decimal('0.00'))
+
+    def test_warehouse_is_traceability_only_global_stock_is_shared(self):
+        """SaleItem.warehouse / StockMovement.warehouse record WHERE stock left
+        (traceability), but there is no per-warehouse balance yet: sales from
+        two different sales warehouses both decrement the single global
+        Product.stock. Per-warehouse balances are a deferred slice."""
+        wh2 = Warehouse.objects.create(tenant=self.tenant, code='WH-SA3', name='A3')
+
+        # Sale 1 from the branch's default sales warehouse.
+        r1 = self.client.post(reverse('sale-list'), self._sale_body('cash'), format='json')
+        self.assertEqual(r1.status_code, status.HTTP_201_CREATED, r1.content)
+
+        # Sale 2 from an explicit, different warehouse.
+        body = self._sale_body('cash')
+        body['items'][0]['warehouse'] = wh2.id
+        r2 = self.client.post(reverse('sale-list'), body, format='json')
+        self.assertEqual(r2.status_code, status.HTTP_201_CREATED, r2.content)
+
+        # Each movement is tagged with its own warehouse (traceability).
+        mv1 = StockMovement.objects.get(
+            source_document_id=r1.json()['id'], source_document_type='sale')
+        mv2 = StockMovement.objects.get(
+            source_document_id=r2.json()['id'], source_document_type='sale')
+        self.assertEqual(mv1.warehouse_id, self.warehouse.id)
+        self.assertEqual(mv2.warehouse_id, wh2.id)
+
+        # But on-hand is a single global counter: 100 - 2 - 2 = 96 (NOT split
+        # per warehouse). This asserts the deferred-balance contract.
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, Decimal('96.000'))
+
+
+class SalePostingHardeningTests(_SalePostingTestBase):
+    """A configured branch must never silently skip ledger posting: a missing
+    or inactive route for the chosen method is a 400 + full rollback. Only a
+    genuinely unconfigured (legacy) branch may skip — and even then, loudly."""
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.cashier)
+
+    def _assert_nothing_persisted(self, sales_before, moves_before):
+        self.assertEqual(Sale.objects.count(), sales_before)
+        self.assertEqual(StockMovement.objects.count(), moves_before)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, Decimal('100.000'))
+        self.assertEqual(
+            account_service.get_account_current_balance(self.cashbox), Decimal('0.00'))
+
+    def test_configured_branch_inactive_route_returns_400_and_rolls_back(self):
+        # Deactivate the cash route on an otherwise-configured branch.
+        BranchPaymentMethod.objects.filter(
+            tenant=self.tenant, branch=self.branch,
+            payment_method__method_type=PaymentMethod.MethodType.CASH,
+        ).update(is_active=False)
+
+        sales_before = Sale.objects.count()
+        moves_before = StockMovement.objects.count()
+        resp = self.client.post(reverse('sale-list'), self._sale_body('cash'), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
+        self._assert_nothing_persisted(sales_before, moves_before)
+
+    def test_configured_branch_missing_route_returns_400_and_rolls_back(self):
+        # Remove the cash route entirely; the branch still has card + wallet, so
+        # it is "configured" and a cash sale must not silently skip.
+        BranchPaymentMethod.objects.filter(
+            tenant=self.tenant, branch=self.branch,
+            payment_method__method_type=PaymentMethod.MethodType.CASH,
+        ).delete()
+
+        sales_before = Sale.objects.count()
+        moves_before = StockMovement.objects.count()
+        resp = self.client.post(reverse('sale-list'), self._sale_body('cash'), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
+        self._assert_nothing_persisted(sales_before, moves_before)
+
+    def test_legacy_branch_skips_posting_but_warns(self):
+        # Tenant B branch has no routing at all → legacy skip, with a WARNING so
+        # the skip is never silent.
+        self.client.force_authenticate(user=self.cashier_b)
+        body = {
+            'items': [{'product': self.product_b.id, 'qty': '2', 'price_each': '10.00'}],
+            'method': 'cash', 'amount_paid': '20.00',
+        }
+        with self.assertLogs('pos.services.sale_posting', level='WARNING') as logs:
+            resp = self.client.post(reverse('sale-list'), body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        self.assertTrue(
+            any('without financial routing' in line.lower() for line in logs.output))
+        self.assertEqual(
+            FinancialAccountMovement.objects.filter(tenant=self.tenant_b).count(), 0)
+
+
+class SaleLegacyAndScopingTests(_SalePostingTestBase):
+
+    def test_unconfigured_tenant_sale_still_posts_without_ledger(self):
+        """Tenant B has no BranchPaymentMethod / sales warehouse → the sale
+        still succeeds (legacy), stock drops, but no GL movement is created."""
+        self.client.force_authenticate(user=self.cashier_b)
+        body = {
+            'items': [{'product': self.product_b.id, 'qty': '2', 'price_each': '10.00'}],
+            'method': 'cash', 'amount_paid': '20.00',
+        }
+        resp = self.client.post(reverse('sale-list'), body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+
+        self.product_b.refresh_from_db()
+        self.assertEqual(self.product_b.stock, Decimal('98.000'))
+        # No financial movement posted for tenant B.
+        self.assertEqual(
+            FinancialAccountMovement.objects.filter(tenant=self.tenant_b).count(), 0)
+        # Movement has no warehouse (none configured).
+        mv = StockMovement.objects.get(source_document_id=resp.json()['id'],
+                                       source_document_type='sale')
+        self.assertIsNone(mv.warehouse_id)
+
+    def test_list_is_tenant_scoped(self):
+        self.client.force_authenticate(user=self.cashier)
+        sale_id = self.client.post(
+            reverse('sale-list'), self._sale_body('cash'), format='json').json()['id']
+
+        # Tenant B manager-less cashier cannot see tenant A's sale.
+        self.client.force_authenticate(user=self.cashier_b)
+        listing = self.client.get(reverse('sale-list'))
+        ids = [r['id'] for r in listing.json()['results']]
+        self.assertNotIn(sale_id, ids)
