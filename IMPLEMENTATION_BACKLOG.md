@@ -458,3 +458,46 @@ The MVP slice is ready for implementation when:
 - open-order APIs exist and are tested
 - the React UI can open a table, add items, send to kitchen, request a bill, and pay
 - payment conversion creates a final SalesInvoice without violating the contract
+
+---
+
+## Deferred Accounting Gaps
+
+These are known accounting simplifications taken to ship earlier slices (notably
+Phase 1.5 Slice H — Purchase Invoice Posting). They are intentional and documented,
+not bugs. Each must be reconciled before the system can produce a fully balanced
+general ledger / trial balance. Planning-only — no code is implied by this list.
+
+- [ ] Inventory GL / full double-entry purchase posting is deferred.
+  - Current state: inventory is tracked by `StockMovement` quantity + `Product.cost`
+    only. The purchase posts the funding side (cash/bank credit and/or Supplier AP
+    credit) but does **not** post the inventory-value debit, so there is no Inventory
+    GL account and the ledger does not fully balance in classic double-entry terms.
+  - To resolve: add an `inventory` FinancialAccount type and post the inventory-value
+    debit on `PURCHASE_IN` (per FLOW_v3_6 §11.1).
+  - Affected: [superpos_backend/accounts/models.py](superpos_backend/accounts/models.py) (AccountType), [superpos_backend/pos/services/purchase_invoices.py](superpos_backend/pos/services/purchase_invoices.py)
+
+- [ ] Purchase tax is stored but not posted until input-VAT rules are defined.
+  - Current state: `tax_amount` / `tax_total` are saved on the purchase document but
+    no tax ledger entry is created. v3.6 leaves purchase-tax accounting undefined
+    (DOMAIN §18 covers sales tax only).
+  - To resolve: define the input-VAT / tax-recoverable account and posting rule, then
+    route purchase `tax_total` to it.
+  - Affected: [superpos_backend/pos/services/purchase_invoices.py](superpos_backend/pos/services/purchase_invoices.py)
+
+- [ ] `Product.cost` is used as the temporary moving-average cost field until ProductUnit exists.
+  - Current state: the weighted moving-average cost (FLOW_v3_6 §7.1) is written to
+    `Product.cost` because `ProductUnit.avg_cost` does not exist yet (ProductUnit
+    redesign is out of scope). Sales still do not compute COGS.
+  - To resolve: when ProductUnit lands, move moving-average cost onto
+    `ProductUnit.avg_cost` and have COGS read from it.
+  - Affected: [superpos_backend/pos/models.py](superpos_backend/pos/models.py), [superpos_backend/pos/services/purchase_invoices.py](superpos_backend/pos/services/purchase_invoices.py)
+
+- [ ] SupplierPayment allocation to specific purchase invoices is deferred.
+  - Current state: a purchase records `paid_amount` / `credit_amount` directly on the
+    invoice. There is no separate settlement document that allocates a later
+    SupplierPayment against specific outstanding purchase invoices (FIFO / manual /
+    partial allocation per DOMAIN §12.4).
+  - To resolve: add purchase-invoice allocation on `SupplierPayment` so credit
+    purchases can be settled and aged against named invoices.
+  - Affected: [superpos_backend/accounts/services/supplier_payments.py](superpos_backend/accounts/services/supplier_payments.py), [superpos_backend/pos/models.py](superpos_backend/pos/models.py)
