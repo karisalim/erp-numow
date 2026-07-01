@@ -23,7 +23,7 @@ from accounts.services import customer_ar as customer_ar_service
 from accounts.services import supplier_ap as supplier_ap_service
 from pos.models import (
     BranchWarehouse, Category, Payment, Product, PurchaseInvoice,
-    PurchaseInvoiceLine, Sale, SaleItem, StockMovement, Warehouse,
+    PurchaseInvoiceLine, Sale, SaleItem, StockMovement, Warehouse, WarehouseStock,
 )
 from pos.services import purchase_invoices as purchase_invoice_service
 from pos.services import sale_posting
@@ -1258,3 +1258,207 @@ class SaleLegacyAndScopingTests(_SalePostingTestBase):
         listing = self.client.get(reverse('sale-list'))
         ids = [r['id'] for r in listing.json()['results']]
         self.assertNotIn(sale_id, ids)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Phase 1.5 Slice J — Per-Warehouse Stock Balance (WarehouseStock)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class WarehouseStockServiceTests(APITestCase):
+    """Service-layer tests for the cached per-warehouse balance."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.tenant = Tenant.objects.create(name='WHS Tenant A')
+        cls.category = Category.objects.create(tenant=cls.tenant, name='Cat')
+        cls.product = Product.objects.create(
+            tenant=cls.tenant, category=cls.category,
+            name='Widget', barcode='W-1', sku='SKU-W',
+            price=Decimal('10.00'), cost=Decimal('5.00'),
+            tax_rate=Decimal('0.00'), stock=Decimal('0'),
+        )
+        cls.wh1 = Warehouse.objects.create(tenant=cls.tenant, code='WH1', name='Store 1')
+        cls.wh2 = Warehouse.objects.create(tenant=cls.tenant, code='WH2', name='Store 2')
+        cls.tenant_b = Tenant.objects.create(name='WHS Tenant B')
+        cls.wh_b = Warehouse.objects.create(tenant=cls.tenant_b, code='WHB', name='B Store')
+
+    def _in(self, wh, qty):
+        return stock_movement_service.record_stock_in(
+            product=self.product, quantity=qty,
+            movement_type=StockMovement.MovementType.RECEIVE_IN, warehouse=wh,
+        )
+
+    def _out(self, wh, qty):
+        return stock_movement_service.record_stock_out(
+            product=self.product, quantity=qty,
+            movement_type=StockMovement.MovementType.SALE_OUT, warehouse=wh,
+        )
+
+    def test_stock_in_creates_and_increments_row(self):
+        self._in(self.wh1, Decimal('10'))
+        ws = WarehouseStock.objects.get(product=self.product, warehouse=self.wh1)
+        self.assertEqual(ws.quantity, Decimal('10.000'))
+
+    def test_repeated_movements_accumulate_in_one_row(self):
+        self._in(self.wh1, Decimal('10'))
+        self._in(self.wh1, Decimal('5'))
+        self._out(self.wh1, Decimal('4'))
+        rows = WarehouseStock.objects.filter(product=self.product, warehouse=self.wh1)
+        self.assertEqual(rows.count(), 1)
+        self.assertEqual(rows.first().quantity, Decimal('11.000'))  # 10 + 5 - 4
+
+    def test_separate_warehouses_have_independent_balances(self):
+        self._in(self.wh1, Decimal('10'))
+        self._in(self.wh2, Decimal('3'))
+        self.assertEqual(
+            WarehouseStock.objects.get(product=self.product, warehouse=self.wh1).quantity,
+            Decimal('10.000'))
+        self.assertEqual(
+            WarehouseStock.objects.get(product=self.product, warehouse=self.wh2).quantity,
+            Decimal('3.000'))
+        # Global Product.stock is the single shared counter (sum of the two).
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, Decimal('13.000'))
+
+    def test_warehouse_none_updates_product_only_no_row(self):
+        self._in(None, Decimal('7'))
+        self.assertEqual(WarehouseStock.objects.filter(product=self.product).count(), 0)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, Decimal('7.000'))
+
+    def test_cross_tenant_warehouse_rejected(self):
+        with self.assertRaises(stock_movement_service.StockMovementError):
+            self._in(self.wh_b, Decimal('5'))
+        self.assertEqual(WarehouseStock.objects.filter(warehouse=self.wh_b).count(), 0)
+
+    def test_oversell_allows_negative_warehouse_balance(self):
+        self._in(self.wh1, Decimal('2'))
+        self._out(self.wh1, Decimal('5'))
+        ws = WarehouseStock.objects.get(product=self.product, warehouse=self.wh1)
+        self.assertEqual(ws.quantity, Decimal('-3.000'))
+
+    def test_direct_apply_warehouse_delta_is_noop_for_none(self):
+        result = stock_movement_service.apply_warehouse_delta(
+            product=self.product, warehouse=None, delta=Decimal('5'))
+        self.assertIsNone(result)
+        self.assertEqual(WarehouseStock.objects.count(), 0)
+
+    def test_cached_matches_movement_derived_balance(self):
+        self._in(self.wh1, Decimal('10'))
+        self._in(self.wh2, Decimal('4'))
+        self._out(self.wh1, Decimal('3'))
+        for wh in (self.wh1, self.wh2):
+            cached = WarehouseStock.objects.get(product=self.product, warehouse=wh).quantity
+            derived = stock_movement_service.get_product_stock_balance(self.product, warehouse=wh)
+            self.assertEqual(cached, derived)
+
+    def test_sum_of_warehouse_stock_reconciles_with_product_stock(self):
+        from django.db.models import Sum
+        self._in(self.wh1, Decimal('10'))
+        self._in(self.wh2, Decimal('4'))
+        self._out(self.wh1, Decimal('3'))
+        total = (WarehouseStock.objects.filter(product=self.product)
+                 .aggregate(s=Sum('quantity'))['s'])
+        self.product.refresh_from_db()
+        self.assertEqual(total, self.product.stock)  # all movements carried a warehouse
+
+
+class WarehouseStockPurchaseTests(_PurchaseInvoiceTestBase):
+    """The purchase-invoice posting path feeds the receiving warehouse."""
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.manager)
+
+    def test_purchase_invoice_increments_receiving_warehouse_stock(self):
+        resp = self.client.post(reverse('purchase-invoice-list'), self._body(), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        ws = WarehouseStock.objects.get(product=self.product, warehouse=self.warehouse)
+        self.assertEqual(ws.quantity, Decimal('50.000'))
+
+
+class WarehouseStockSaleAndApiTests(_SalePostingTestBase):
+    """Sale, void, and the read-only WarehouseStock endpoints (tenant A is
+    fully configured with a default sales warehouse)."""
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.cashier)
+
+    def _seed(self, warehouse, qty):
+        stock_movement_service.record_stock_in(
+            product=self.product, quantity=qty,
+            movement_type=StockMovement.MovementType.RECEIVE_IN, warehouse=warehouse,
+        )
+
+    def test_cash_sale_decrements_default_sales_warehouse(self):
+        self._seed(self.warehouse, Decimal('50'))
+        resp = self.client.post(reverse('sale-list'), self._sale_body('cash'), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        ws = WarehouseStock.objects.get(product=self.product, warehouse=self.warehouse)
+        self.assertEqual(ws.quantity, Decimal('48.000'))  # 50 - 2
+
+    def test_explicit_warehouse_sale_decrements_that_warehouse_only(self):
+        other = Warehouse.objects.create(tenant=self.tenant, code='WH-EXP', name='Exp')
+        self._seed(other, Decimal('20'))
+        body = self._sale_body('cash')
+        body['items'][0]['warehouse'] = other.id
+        resp = self.client.post(reverse('sale-list'), body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        self.assertEqual(
+            WarehouseStock.objects.get(product=self.product, warehouse=other).quantity,
+            Decimal('18.000'))
+        # Default sales warehouse untouched.
+        self.assertFalse(
+            WarehouseStock.objects.filter(product=self.product, warehouse=self.warehouse).exists())
+
+    def test_unconfigured_tenant_sale_creates_no_warehouse_stock(self):
+        self.client.force_authenticate(user=self.cashier_b)
+        body = {
+            'items': [{'product': self.product_b.id, 'qty': '2', 'price_each': '10.00'}],
+            'method': 'cash', 'amount_paid': '20.00',
+        }
+        resp = self.client.post(reverse('sale-list'), body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        self.assertEqual(WarehouseStock.objects.filter(tenant=self.tenant_b).count(), 0)
+
+    def test_void_restores_warehouse_stock(self):
+        self._seed(self.warehouse, Decimal('10'))
+        sale_id = self.client.post(
+            reverse('sale-list'), self._sale_body('cash'), format='json').json()['id']
+        self.assertEqual(
+            WarehouseStock.objects.get(product=self.product, warehouse=self.warehouse).quantity,
+            Decimal('8.000'))
+        void = self.client.post(reverse('sale-void-pk', args=[sale_id]))
+        self.assertEqual(void.status_code, status.HTTP_200_OK, void.content)
+        self.assertEqual(
+            WarehouseStock.objects.get(product=self.product, warehouse=self.warehouse).quantity,
+            Decimal('10.000'))
+
+    def test_list_endpoint_is_manager_only_and_tenant_scoped(self):
+        self._seed(self.warehouse, Decimal('5'))
+        # Cashier is below Manager → 403.
+        self.assertEqual(
+            self.client.get(reverse('warehouse-stock-list')).status_code,
+            status.HTTP_403_FORBIDDEN)
+        # Manager → 200, sees the tenant's row.
+        self.client.force_authenticate(user=self.manager)
+        r = self.client.get(reverse('warehouse-stock-list'))
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        rows = r.json()['results']
+        self.assertTrue(any(row['warehouse'] == self.warehouse.id for row in rows))
+
+    def test_list_endpoint_is_read_only(self):
+        self.client.force_authenticate(user=self.manager)
+        r = self.client.post(reverse('warehouse-stock-list'), {}, format='json')
+        self.assertEqual(r.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def test_product_and_warehouse_scoped_endpoints(self):
+        self._seed(self.warehouse, Decimal('9'))
+        self.client.force_authenticate(user=self.manager)
+        r1 = self.client.get(reverse('product-warehouse-stock', args=[self.product.id]))
+        self.assertEqual(r1.status_code, status.HTTP_200_OK)
+        self.assertTrue(any(
+            row['warehouse'] == self.warehouse.id for row in r1.json()['results']))
+        r2 = self.client.get(reverse('warehouse-inventory', args=[self.warehouse.id]))
+        self.assertEqual(r2.status_code, status.HTTP_200_OK)
+        self.assertTrue(any(
+            row['product'] == self.product.id for row in r2.json()['results']))

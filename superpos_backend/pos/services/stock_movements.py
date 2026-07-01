@@ -43,7 +43,7 @@ from typing import Optional
 from django.db import models as db_models, transaction
 from django.db.models import QuerySet, Sum
 
-from pos.models import Product, StockMovement
+from pos.models import Product, StockMovement, WarehouseStock
 
 
 class StockMovementError(Exception):
@@ -89,6 +89,36 @@ def _ensure_warehouse_tenant(product: Product, warehouse) -> None:
         raise StockMovementError(
             'warehouse and product must belong to the same tenant',
         )
+
+
+def apply_warehouse_delta(*, product: Product, warehouse, delta) -> Optional[WarehouseStock]:
+    """Adjust the cached per-warehouse balance for `product` by `delta`.
+
+    No-op (returns None) when `warehouse` is None — legacy / unconfigured
+    callers keep the global-only behavior, preserving the invariant
+    `Σ WarehouseStock(product) + unassigned == Product.stock`.
+
+    Locks the `WarehouseStock` row (`select_for_update`) so two concurrent
+    movements on the same (product, warehouse) can't lose an update. **Never
+    touches `Product.stock`** — the caller already updates that exactly once,
+    so there is no double counting. Must run inside a transaction (all callers
+    already open one).
+    """
+    if warehouse is None:
+        return None
+    _ensure_warehouse_tenant(product, warehouse)
+
+    row, _created = (
+        WarehouseStock.objects
+        .select_for_update()
+        .get_or_create(
+            tenant=product.tenant, product=product, warehouse=warehouse,
+            defaults={'quantity': Decimal('0')},
+        )
+    )
+    row.quantity = (row.quantity or Decimal('0')) + Decimal(str(delta))
+    row.save(update_fields=['quantity', 'updated_at'])
+    return row
 
 
 def _latest_quantity_after(product: Product) -> Optional[Decimal]:
@@ -160,6 +190,10 @@ def record_stock_in(
     locked.stock = (locked.stock or Decimal('0')) + qty
     locked.save(update_fields=['stock', 'updated_at'])
 
+    # Mirror the increase into the cached per-warehouse balance (no-op when
+    # warehouse is None → legacy global-only behavior).
+    apply_warehouse_delta(product=locked, warehouse=warehouse, delta=qty)
+
     return StockMovement.objects.create(
         tenant=locked.tenant,
         product=locked,
@@ -215,6 +249,10 @@ def record_stock_out(
     locked.stock = (locked.stock or Decimal('0')) - qty
     locked.save(update_fields=['stock', 'updated_at'])
 
+    # Mirror the decrease into the cached per-warehouse balance (no-op when
+    # warehouse is None → legacy global-only behavior).
+    apply_warehouse_delta(product=locked, warehouse=warehouse, delta=-qty)
+
     return StockMovement.objects.create(
         tenant=locked.tenant,
         product=locked,
@@ -233,17 +271,21 @@ def record_stock_out(
 
 # ── Reads ────────────────────────────────────────────────────────────────────
 
-def get_product_stock_balance(product: Product, *, branch=None) -> Decimal:
+def get_product_stock_balance(product: Product, *, branch=None, warehouse=None) -> Decimal:
     """Derive current stock from the StockMovement ledger.
 
     Sum of in-direction qty minus sum of out-direction qty (uses `abs`
     so legacy negative-qty SALE_OUT rows still subtract correctly).
     Always tenant-scoped via `product.tenant`. Pass `branch` for a
-    per-branch sub-balance.
+    per-branch sub-balance, or `warehouse` for a per-warehouse sub-balance
+    (the movement-derived counterpart of the cached `WarehouseStock`, used
+    for reconciliation/verification).
     """
     qs = StockMovement.objects.filter(tenant=product.tenant, product=product)
     if branch is not None:
         qs = qs.filter(branch=branch)
+    if warehouse is not None:
+        qs = qs.filter(warehouse=warehouse)
 
     inflow = Decimal('0')
     outflow = Decimal('0')
@@ -426,6 +468,7 @@ def _resolve_opening_quantity(*, product, branch, first_row, occurred_from):
 
 __all__ = [
     'StockMovementError',
+    'apply_warehouse_delta',
     'record_stock_in',
     'record_stock_out',
     'get_product_stock_balance',

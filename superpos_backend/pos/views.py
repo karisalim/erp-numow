@@ -17,11 +17,11 @@ from accounts.models import Branch
 from accounts.permissions import IsCashierOrAbove, IsManagerOrAbove
 from .filters import (
     BranchWarehouseFilter, ProductFilter, SaleFilter,
-    StockMovementFilter, WarehouseFilter,
+    StockMovementFilter, WarehouseFilter, WarehouseStockFilter,
 )
 from .models import (
     BranchWarehouse, Category, InventoryBatch, Product,
-    PurchaseInvoice, Sale, SaleItem, StockMovement, Warehouse,
+    PurchaseInvoice, Sale, SaleItem, StockMovement, Warehouse, WarehouseStock,
 )
 from .serializers import (
     BranchWarehouseSerializer,
@@ -37,6 +37,7 @@ from .serializers import (
     StockAdjustmentSerializer,
     StockMovementSerializer,
     WarehouseSerializer,
+    WarehouseStockSerializer,
 )
 from .services import idempotency
 
@@ -925,6 +926,8 @@ def void_sale(request, pk=None, sale_uuid=None):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    from pos.services import stock_movements as stock_svc
+
     with transaction.atomic():
         sale.status = Sale.Status.VOIDED
         sale.save(update_fields=['status', 'updated_at'])
@@ -932,7 +935,7 @@ def void_sale(request, pk=None, sale_uuid=None):
         # Restore product stock + record the reversing movement. Keep qty as
         # Decimal so weighted items (e.g., 0.5 kg) round-trip without
         # truncating to zero.
-        for item in sale.items.all():
+        for item in sale.items.select_related('product', 'warehouse').all():
             if not item.product_id:
                 continue
             qty = item.qty
@@ -940,9 +943,16 @@ def void_sale(request, pk=None, sale_uuid=None):
                 Product.objects.filter(pk=item.product_id).update(
                     stock=F('stock') + qty,
                 )
+                # Restore the cached per-warehouse balance to the same
+                # warehouse the goods originally left from (no-op when the
+                # line has no warehouse — legacy / unconfigured sale).
+                stock_svc.apply_warehouse_delta(
+                    product=item.product, warehouse=item.warehouse, delta=qty,
+                )
             StockMovement.objects.create(
                 tenant        = tenant,
                 product_id    = item.product_id,
+                warehouse     = item.warehouse,
                 qty           = qty,
                 movement_type = StockMovement.MovementType.RETURN_IN,
                 sale          = sale,
@@ -1323,6 +1333,56 @@ class BranchNestedWarehouseListCreateView(TenantMixin, generics.ListCreateAPIVie
         serializer.save(tenant=self._tenant())
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+
+
+# ── Per-Warehouse Stock Balances (Phase 1.5 Slice J — read-only) ──────────────
+# Cached balances maintained from stock movements only; there is intentionally
+# no POST/PATCH/DELETE — changing stock goes through a movement, never a direct
+# balance write (mirrors how Product.stock has no direct "set" endpoint).
+
+class WarehouseStockListView(TenantMixin, generics.ListAPIView):
+    """GET /api/inventory/warehouse-stock/ — cached per-warehouse balances.
+
+    Filter by ?warehouse= / ?product= / ?low_stock= / ?has_stock=.
+    """
+
+    queryset           = WarehouseStock.objects.select_related('product', 'warehouse').all()
+    serializer_class   = WarehouseStockSerializer
+    permission_classes = [IsManagerOrAbove]
+    filterset_class    = WarehouseStockFilter
+    ordering_fields    = ['quantity', 'updated_at']
+    ordering           = ['product_id', 'warehouse_id']
+
+
+class ProductWarehouseStockView(TenantMixin, generics.ListAPIView):
+    """GET /api/products/{pk}/warehouse-stock/ — one product across all warehouses."""
+
+    serializer_class   = WarehouseStockSerializer
+    permission_classes = [IsManagerOrAbove]
+
+    def get_queryset(self):
+        return (
+            WarehouseStock.objects
+            .select_related('product', 'warehouse')
+            .filter(tenant=self._tenant(), product_id=self.kwargs['pk'])
+            .order_by('warehouse_id')
+        )
+
+
+class WarehouseInventoryView(TenantMixin, generics.ListAPIView):
+    """GET /api/inventory/warehouses/{pk}/stock/ — all product balances in a warehouse."""
+
+    serializer_class   = WarehouseStockSerializer
+    permission_classes = [IsManagerOrAbove]
+    filterset_class    = WarehouseStockFilter
+
+    def get_queryset(self):
+        return (
+            WarehouseStock.objects
+            .select_related('product', 'warehouse')
+            .filter(tenant=self._tenant(), warehouse_id=self.kwargs['pk'])
+            .order_by('product_id')
+        )
 
 
 # ── Purchase Invoices (Phase 1.5 Slice H — posting) ───────────────────────────

@@ -12,7 +12,7 @@ from accounts.models import (
 from .models import (
     BranchWarehouse, Category, InsufficientStockError, InventoryBatch,
     Payment, Product, PurchaseInvoice, PurchaseInvoiceLine,
-    Sale, SaleItem, StockMovement, Warehouse,
+    Sale, SaleItem, StockMovement, Warehouse, WarehouseStock,
 )
 
 logger = logging.getLogger(__name__)
@@ -324,6 +324,30 @@ class WarehouseSerializer(serializers.ModelSerializer):
                 'A warehouse with this code already exists for this tenant.',
             )
         return value
+
+
+class WarehouseStockSerializer(serializers.ModelSerializer):
+    """Read-only cached per-(product, warehouse) balance (Phase 1.5 Slice J).
+
+    Fully read-only: balances are maintained from stock movements via
+    `pos.services.stock_movements.apply_warehouse_delta`, never written through
+    the API.
+    """
+
+    product_name   = serializers.CharField(source='product.name', read_only=True)
+    product_sku    = serializers.CharField(source='product.sku',  read_only=True)
+    warehouse_name = serializers.CharField(source='warehouse.name', read_only=True)
+    warehouse_code = serializers.CharField(source='warehouse.code', read_only=True)
+
+    class Meta:
+        model  = WarehouseStock
+        fields = [
+            'id',
+            'product', 'product_name', 'product_sku',
+            'warehouse', 'warehouse_name', 'warehouse_code',
+            'quantity', 'created_at', 'updated_at',
+        ]
+        read_only_fields = fields
 
 
 class BranchWarehouseSerializer(serializers.ModelSerializer):
@@ -770,6 +794,8 @@ class SaleSerializer(serializers.ModelSerializer):
         no per-warehouse balance yet (deferred to a future slice). So the
         warehouse on the movement *labels* the outflow; it does not *scope* it.
         """
+        from pos.services import stock_movements as stock_svc
+
         warnings = []
         with transaction.atomic():
             for item in sale.items.select_related('product', 'warehouse').all():
@@ -811,6 +837,14 @@ class SaleSerializer(serializers.ModelSerializer):
                     source_document_id=sale.id,
                     actor_user=sale.cashier,
                     note=note,
+                )
+
+                # Mirror the deduction into the cached per-warehouse balance.
+                # The sale path deducts via Product.deduct_stock (not the
+                # stock-movements service), so it calls the same helper here.
+                # No-op when item.warehouse is None (unconfigured tenant).
+                stock_svc.apply_warehouse_delta(
+                    product=product, warehouse=item.warehouse, delta=-qty_delta,
                 )
 
                 if product.stock < product.reorder:

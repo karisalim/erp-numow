@@ -667,6 +667,62 @@ class BranchWarehouse(models.Model):
         return f'{self.branch_id}:{self.warehouse_id} [{self.role}]'
 
 
+class WarehouseStock(models.Model):
+    """Cached per-(product, warehouse) on-hand quantity (Phase 1.5 Slice J).
+
+    Mirrors `Product.stock` (the global cached balance) one level down: one row
+    per warehouse a product has moved through. The append-only `StockMovement`
+    ledger stays the audit source of truth — this table is a fast,
+    transactionally-maintained cache updated only through
+    `pos.services.stock_movements.apply_warehouse_delta`.
+
+    Only maintained when a movement carries a warehouse; legacy / unconfigured
+    movements (warehouse=None) leave this table untouched, so the invariant is
+    `Σ WarehouseStock(product) + unassigned == Product.stock`. Grounded in
+    MASTER_DATA_CONTRACT.md §5 ("quantities tracked per product + unit +
+    warehouse"); the product-unit dimension is deferred until ProductUnit exists.
+    """
+
+    tenant     = models.ForeignKey(
+        'accounts.Tenant', on_delete=models.CASCADE,
+        related_name='warehouse_stocks', db_index=True,
+    )
+    product    = models.ForeignKey(
+        Product, on_delete=models.CASCADE,
+        related_name='warehouse_stocks', db_index=True,
+    )
+    # PROTECT: warehouses are deactivated, never deleted — protecting the FK
+    # keeps a balance from ever pointing at a vanished location.
+    warehouse  = models.ForeignKey(
+        Warehouse, on_delete=models.PROTECT,
+        related_name='stock_levels', db_index=True,
+    )
+    # Signed, may go negative — oversell is allowed exactly like the global
+    # Product.stock (which intentionally carries no >= 0 constraint). 14/3
+    # matches StockMovement's running-quantity columns.
+    quantity   = models.DecimalField(max_digits=14, decimal_places=3, default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['product_id', 'warehouse_id']
+        constraints = [
+            # Exactly one balance row per (tenant, product, warehouse); also the
+            # get_or_create upsert key.
+            models.UniqueConstraint(
+                fields=['tenant', 'product', 'warehouse'],
+                name='pos_warehousestock_uniq',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['tenant', 'warehouse'], name='pos_whstock_tenant_wh_idx'),
+            models.Index(fields=['tenant', 'product'],   name='pos_whstock_tenant_prod_idx'),
+        ]
+
+    def __str__(self):
+        return f'product={self.product_id} @ warehouse={self.warehouse_id} = {self.quantity}'
+
+
 # ── Purchase Invoices (Phase 1.5 Slice H — posting foundation) ─────────────────
 # Real posted purchase document for STOCK-ITEM lines only. Posting increases
 # stock in a warehouse (+ moving-average cost on Product.cost), credits the

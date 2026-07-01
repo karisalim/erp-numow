@@ -17,6 +17,8 @@ urlpatterns = [
     # Phase 1.5 Slice D — per-product ledger views (read-only).
     path('products/<int:pk>/stock-movements/', views.ProductStockMovementListView.as_view(), name='product-stock-movements'),
     path('products/<int:pk>/stock-balance/',   views.ProductStockBalanceView.as_view(),      name='product-stock-balance'),
+    # Phase 1.5 Slice J — per-warehouse balances for one product (read-only).
+    path('products/<int:pk>/warehouse-stock/', views.ProductWarehouseStockView.as_view(),    name='product-warehouse-stock'),
 
     # Inventory — batches (CRUD)
     path('inventory/batches/',          views.InventoryBatchListCreateView.as_view(), name='batch-list'),
@@ -39,6 +41,10 @@ urlpatterns = [
     path('inventory/branch-warehouses/',                     views.BranchWarehouseListCreateView.as_view(), name='branch-warehouse-list'),
     path('inventory/branch-warehouses/<int:pk>/',            views.BranchWarehouseDetailView.as_view(),     name='branch-warehouse-detail'),
     path('inventory/branch-warehouses/<int:pk>/deactivate/', views.BranchWarehouseDeactivateView.as_view(), name='branch-warehouse-deactivate'),
+
+    # Inventory — per-warehouse stock balances (Phase 1.5 Slice J, read-only)
+    path('inventory/warehouse-stock/',           views.WarehouseStockListView.as_view(), name='warehouse-stock-list'),
+    path('inventory/warehouses/<int:pk>/stock/', views.WarehouseInventoryView.as_view(), name='warehouse-inventory'),
 
     # Purchase Invoices (Phase 1.5 Slice H — create-and-post stock purchases)
     path('purchase-invoices/',           views.PurchaseInvoiceListCreateView.as_view(), name='purchase-invoice-list'),

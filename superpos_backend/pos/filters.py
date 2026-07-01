@@ -1,5 +1,7 @@
 import django_filters
-from .models import BranchWarehouse, Product, Sale, StockMovement, Warehouse
+from .models import (
+    BranchWarehouse, Product, Sale, StockMovement, Warehouse, WarehouseStock,
+)
 
 
 class ProductFilter(django_filters.FilterSet):
@@ -65,6 +67,30 @@ class BranchWarehouseFilter(django_filters.FilterSet):
     class Meta:
         model  = BranchWarehouse
         fields = ['branch', 'warehouse', 'role', 'is_default', 'is_active']
+
+
+class WarehouseStockFilter(django_filters.FilterSet):
+    """Filters for cached per-warehouse stock balances (read-only resource)."""
+
+    low_stock = django_filters.BooleanFilter(method='filter_low_stock')
+    has_stock = django_filters.BooleanFilter(method='filter_has_stock')
+
+    class Meta:
+        model  = WarehouseStock
+        fields = ['warehouse', 'product']
+
+    def filter_low_stock(self, queryset, name, value):
+        if value:
+            from django.db.models import F
+            return queryset.filter(quantity__lte=F('product__reorder'))
+        return queryset
+
+    def filter_has_stock(self, queryset, name, value):
+        # Non-zero balance (positive or negative), i.e. the product has moved
+        # through this warehouse.
+        if value:
+            return queryset.exclude(quantity=0)
+        return queryset
 
 
 class SaleFilter(django_filters.FilterSet):
