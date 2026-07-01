@@ -43,7 +43,7 @@ urlpatterns = [
     path('inventory/branch-warehouses/<int:pk>/deactivate/', views.BranchWarehouseDeactivateView.as_view(), name='branch-warehouse-deactivate'),
 
     # Inventory — per-warehouse stock balances (Phase 1.5 Slice J, read-only)
-    path('inventory/warehouse-stock/',           views.WarehouseStockListView.as_view(), name='warehouse-stock-list'),
+    path('inventory/warehouse-stocks/',           views.WarehouseStockListView.as_view(), name='warehouse-stock-list'),
     path('inventory/warehouses/<int:pk>/stock/', views.WarehouseInventoryView.as_view(), name='warehouse-inventory'),
 
     # Purchase Invoices (Phase 1.5 Slice H — create-and-post stock purchases)
