@@ -23,6 +23,7 @@ import type { UserRole } from './types';
 
 // New ERP modules are lazy-loaded so the POS-critical main bundle stays lean.
 const CustomersPage  = React.lazy(() => import('./pages/customers/CustomersPage').then(m => ({ default: m.CustomersPage })));
+const SuppliersPage  = React.lazy(() => import('./pages/suppliers/SuppliersPage').then(m => ({ default: m.SuppliersPage })));
 
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { isAuthenticated } = useAuthStore();
@@ -96,6 +97,7 @@ export const App: React.FC = () => {
       <Route path="/settings" element={<Guarded min="Manager"><SettingsPage /></Guarded>} />
 
       <Route path="/customers" element={<Guarded min="Manager"><Lazy><CustomersPage /></Lazy></Guarded>} />
+      <Route path="/suppliers" element={<Guarded min="Manager"><Lazy><SuppliersPage /></Lazy></Guarded>} />
 
       <Route path="/" element={<Navigate to="/pos" replace />} />
       <Route path="*" element={<Navigate to="/pos" replace />} />
