@@ -27,6 +27,7 @@ const SuppliersPage  = React.lazy(() => import('./pages/suppliers/SuppliersPage'
 const PurchasesPage  = React.lazy(() => import('./pages/purchases/PurchasesPage').then(m => ({ default: m.PurchasesPage })));
 const PurchaseDetailPage = React.lazy(() => import('./pages/purchases/PurchaseDetailPage').then(m => ({ default: m.PurchaseDetailPage })));
 const PurchaseCreatePage = React.lazy(() => import('./pages/purchases/PurchaseCreatePage').then(m => ({ default: m.PurchaseCreatePage })));
+const WarehousesPage = React.lazy(() => import('./pages/warehouses/WarehousesPage').then(m => ({ default: m.WarehousesPage })));
 
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { isAuthenticated } = useAuthStore();
@@ -104,6 +105,7 @@ export const App: React.FC = () => {
       <Route path="/purchases" element={<Guarded min="Manager"><Lazy><PurchasesPage /></Lazy></Guarded>} />
       <Route path="/purchases/new" element={<Guarded min="Manager"><Lazy><PurchaseCreatePage /></Lazy></Guarded>} />
       <Route path="/purchases/:id" element={<Guarded min="Manager"><Lazy><PurchaseDetailPage /></Lazy></Guarded>} />
+      <Route path="/warehouses" element={<Guarded min="Manager"><Lazy><WarehousesPage /></Lazy></Guarded>} />
 
       <Route path="/" element={<Navigate to="/pos" replace />} />
       <Route path="*" element={<Navigate to="/pos" replace />} />
