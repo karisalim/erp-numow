@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AxiosError } from 'axios';
 import apiClient from '../api/client';
-import { useAppStore } from '../store/appStore';
 import { useAuthStore } from '../store/authStore';
 import type { AppUser, BadgeKind, UserRole } from '../types';
 import { initials } from '../utils/format';
@@ -116,7 +115,6 @@ const MenuItem: React.FC<React.PropsWithChildren<{
  * UsersPage
  * ──────────────────────────────────────────────────────────────────────────── */
 export const UsersPage: React.FC = () => {
-  const { online, pendingSync } = useAppStore();
   const me = useAuthStore((s) => s.user);
 
   const [users,    setUsers]    = useState<AppUser[]>([]);
@@ -253,8 +251,6 @@ export const UsersPage: React.FC = () => {
       <Header
         title="Users & Team"
         subtitle="Role-based access control"
-        online={online}
-        pendingSync={pendingSync}
         right={
           <Button size="sm" onClick={() => setModal({ mode: 'add' })}>
             <Icon name="plus" size={14} /> Add user

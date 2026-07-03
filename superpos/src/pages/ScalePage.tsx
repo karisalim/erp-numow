@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { AxiosError } from 'axios';
 import apiClient from '../api/client';
-import { useAppStore } from '../store/appStore';
 import { useMoney } from '../utils/money';
 import { fmtDecimal } from '../utils/format';
 import type { Product } from '../types';
@@ -124,7 +123,6 @@ const LabelPreviewModal: React.FC<{
  * Scale page.
  * ──────────────────────────────────────────────────────────────────────────── */
 export const ScalePage: React.FC = () => {
-  const { online, pendingSync } = useAppStore();
   const money = useMoney();
 
   const [items,   setItems]   = useState<Product[]>([]);
@@ -367,8 +365,6 @@ export const ScalePage: React.FC = () => {
       <Header
         title="Scale / PLU codes"
         subtitle="Weighted products from the catalog · export to Digi scale"
-        online={online}
-        pendingSync={pendingSync}
         right={
           <>
             <Button variant="secondary" size="sm" onClick={exportCsv} disabled={exporting || loading || exportable.length === 0}>

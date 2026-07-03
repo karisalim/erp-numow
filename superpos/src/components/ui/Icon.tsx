@@ -200,6 +200,75 @@ export const Icon: React.FC<IconProps> = ({ name, size = 18, className = '' }) =
         <path d="M10 12h4"/>
       </svg>
     ),
+    truck: (
+      <svg {...s} {...stroke} viewBox="0 0 24 24">
+        <path d="M3 6h11v9H3zM14 9h4l3 3v3h-7z"/>
+        <circle cx="8" cy="18" r="2"/><circle cx="18" cy="18" r="2"/>
+      </svg>
+    ),
+    bank: (
+      <svg {...s} {...stroke} viewBox="0 0 24 24">
+        <path d="M3 9l9-5 9 5M4 9v9M20 9v9M3 19h18M8 13v3M12 13v3M16 13v3"/>
+      </svg>
+    ),
+    layers: (
+      <svg {...s} {...stroke} viewBox="0 0 24 24">
+        <path d="M12 3l9 5-9 5-9-5 9-5ZM3 13l9 5 9-5"/>
+      </svg>
+    ),
+    tag: (
+      <svg {...s} {...stroke} viewBox="0 0 24 24">
+        <path d="M3 3h7l11 11-7 7L3 10V3Z"/>
+        <path d="M7.5 7.5h.01"/>
+      </svg>
+    ),
+    user: (
+      <svg {...s} {...stroke} viewBox="0 0 24 24">
+        <circle cx="12" cy="8" r="4"/>
+        <path d="M4 21c0-4 4-6 8-6s8 2 8 6"/>
+      </svg>
+    ),
+    doc: (
+      <svg {...s} {...stroke} viewBox="0 0 24 24">
+        <path d="M6 2h8l4 4v16H6V2ZM14 2v4h4M9 13h6M9 17h6"/>
+      </svg>
+    ),
+    shield: (
+      <svg {...s} {...stroke} viewBox="0 0 24 24">
+        <path d="M12 2l8 3v6c0 5-3.5 8-8 11-4.5-3-8-6-8-11V5l8-3Z"/>
+      </svg>
+    ),
+    clock: (
+      <svg {...s} {...stroke} viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>
+      </svg>
+    ),
+    chevL: (
+      <svg {...s} {...stroke} viewBox="0 0 24 24">
+        <path d="m15 6-6 6 6 6"/>
+      </svg>
+    ),
+    edit: (
+      <svg {...s} {...stroke} viewBox="0 0 24 24">
+        <path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5Z"/>
+      </svg>
+    ),
+    download: (
+      <svg {...s} {...stroke} viewBox="0 0 24 24">
+        <path d="M12 3v12M6 11l6 6 6-6M4 21h16"/>
+      </svg>
+    ),
+    menu: (
+      <svg {...s} {...stroke} viewBox="0 0 24 24">
+        <path d="M4 6h16M4 12h16M4 18h16"/>
+      </svg>
+    ),
+    lock: (
+      <svg {...s} {...stroke} viewBox="0 0 24 24">
+        <rect x="5" y="11" width="14" height="10" rx="2"/>
+        <path d="M8 11V7a4 4 0 0 1 8 0v4"/>
+      </svg>
+    ),
   };
 
   const icon = icons[name];

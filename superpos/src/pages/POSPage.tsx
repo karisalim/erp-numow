@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AxiosError } from 'axios';
 import apiClient from '../api/client';
@@ -71,7 +71,7 @@ export const POSPage: React.FC = () => {
     setBarcode, setPaymentMode, setError, setReceiptTxn,
   } = usePosStore();
 
-  const { online, pendingSync, setOnline, incrementPendingSync } = useAppStore();
+  const online = useAppStore((s) => s.online);
 
   const [editing, setEditing]             = useState<string | null>(null);
   const [activeCategory, setActiveCategory] = useState('All');
@@ -218,6 +218,12 @@ export const POSPage: React.FC = () => {
     }
   }, [addItem, money, setBarcode, setError, user?.tenant_scale_barcode_prefix]);
 
+  /* ─── Idempotency key: one per checkout attempt ───────────────────────── */
+  // Generated lazily on the first submit of a cart and reused on retries, so
+  // a double-click or a retried request after a network hiccup can never
+  // create two sales. Cleared only after the backend confirms success.
+  const idemKeyRef = useRef<string | null>(null);
+
   /* ─── Sale completion: POST /sales/ with the cart ─────────────────────── */
   // Third arg (client-computed change) is ignored — the backend recomputes it.
   const completeSale = async (method: 'cash' | 'card' | 'wallet', paid: number, _change: number) => {
@@ -236,13 +242,15 @@ export const POSPage: React.FC = () => {
       paid: Number(Number(paid).toFixed(2)),
       items,
     };
-    if (!online) body.offline = true;
+
+    if (!idemKeyRef.current) idemKeyRef.current = crypto.randomUUID();
 
     setSaleLoading(true);
     try {
-      const { data } = await apiClient.post<SaleResponseDto>('/sales/', body);
-
-      if (!online) incrementPendingSync();
+      const { data } = await apiClient.post<SaleResponseDto>('/sales/', body, {
+        headers: { 'Idempotency-Key': idemKeyRef.current },
+      });
+      idemKeyRef.current = null;
 
       const txn: CompletedTransaction = {
         id:         data.sale_uuid ?? `SALE-${data.id}`,
@@ -258,11 +266,15 @@ export const POSPage: React.FC = () => {
         ts:         data.created_at ? new Date(data.created_at) : new Date(),
         cashier:    data.cashier_name || user?.name || 'Cashier',
         terminal:   data.terminal_name || user?.terminal_name || 'POS-01',
-        offline:    Boolean(data.offline ?? !online),
+        offline:    false,
       };
 
       // Close payment modal immediately so the user sees the warning toast.
       setPaymentMode(null);
+
+      // Durable receipt URL — a refresh on the receipt page refetches the
+      // sale by UUID instead of losing the transaction.
+      const receiptPath = data.sale_uuid ? `/receipt/${data.sale_uuid}` : '/receipt';
 
       const apiWarnings = Array.isArray(data.warnings) ? data.warnings : [];
       if (apiWarnings.length > 0) {
@@ -272,12 +284,12 @@ export const POSPage: React.FC = () => {
           setReceiptTxn(txn);
           clearCart();
           setWarnings([]);
-          navigate('/receipt');
+          navigate(receiptPath);
         }, 2500);
       } else {
         setReceiptTxn(txn);
         clearCart();
-        navigate('/receipt');
+        navigate(receiptPath);
       }
     } catch (err) {
       if (handle401(err)) return;
@@ -285,7 +297,12 @@ export const POSPage: React.FC = () => {
       let msg = 'Failed to complete the sale. Please try again.';
       if (err instanceof AxiosError) {
         const data = err.response?.data as Record<string, unknown> | undefined;
-        if (typeof data?.detail === 'string') {
+        const errObj = data?.error as { code?: string; detail?: string } | undefined;
+        if (err.response?.status === 409 && errObj?.code === 'IDEMPOTENCY_CONFLICT') {
+          // Same key, different payload — the original submit very likely
+          // succeeded but its response was lost. Don't blind-retry.
+          msg = 'This sale may have already been recorded. Check the Sales screen before retrying.';
+        } else if (typeof data?.detail === 'string') {
           msg = data.detail;
         } else if (data && typeof data === 'object') {
           // DRF field-level errors → flatten the first one for display.
@@ -315,16 +332,8 @@ export const POSPage: React.FC = () => {
       <Header
         title="Point of Sale"
         subtitle={`${user?.tenant_name || 'Supermarket'} · ${user?.branch_name || 'Main Branch'} · ${user?.terminal_name || 'POS-01'}`}
-        online={online}
-        pendingSync={pendingSync}
-        right={
-          <Button variant="ghost" size="sm" onClick={() => setOnline(o => !o)}>
-            <Icon name={online ? 'wifi' : 'wifiOff'} size={14} />
-            Toggle {online ? 'offline' : 'online'}
-          </Button>
-        }
       />
-      {!online && <OfflineBanner pending={pendingSync} />}
+      {!online && <OfflineBanner />}
 
       <div className="flex-1 grid grid-cols-12 gap-5 p-5 min-h-0 bg-neutral-100">
         {/* LEFT — Scan + Quick grid */}

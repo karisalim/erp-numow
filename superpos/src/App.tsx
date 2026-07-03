@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { Suspense } from 'react';
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import './i18n';                              // initialise i18next once at boot
 import { useLanguageSync } from './i18n/useLanguageSync';
@@ -6,6 +6,8 @@ import { useAuthStore } from './store/authStore';
 import { useAppStore } from './store/appStore';
 import { Sidebar } from './components/layout/Sidebar';
 import { OfflineBanner } from './components/layout/OfflineBanner';
+import { RequireRole } from './auth/RequireRole';
+import { LoadingState } from './components/ui/states';
 import { LoginPage } from './pages/LoginPage';
 import { POSPage } from './pages/POSPage';
 import { ReceiptPage } from './pages/ReceiptPage';
@@ -17,6 +19,8 @@ import { UsersPage } from './pages/UsersPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { ScalePage } from './pages/ScalePage';
 import { SubscriptionBlockPage } from './pages/SubscriptionBlockPage';
+import type { UserRole } from './types';
+
 
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { isAuthenticated } = useAuthStore();
@@ -28,12 +32,12 @@ const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) =
 };
 
 const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { online, pendingSync } = useAppStore();
+  const online = useAppStore((s) => s.online);
   return (
     <div className="flex h-screen overflow-hidden bg-neutral-100">
       <Sidebar />
       <div className="flex flex-col flex-1 min-w-0">
-        {!online && <OfflineBanner pending={pendingSync} />}
+        {!online && <OfflineBanner />}
         <main className="flex-1 flex flex-col min-h-0 overflow-hidden">
           {children}
         </main>
@@ -41,6 +45,21 @@ const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     </div>
   );
 };
+
+/** Auth + shell + optional role floor, in one wrapper. */
+const Guarded: React.FC<{ children: React.ReactNode; min?: UserRole }> = ({ children, min }) => (
+  <ProtectedRoute>
+    <AppShell>
+      {min ? <RequireRole min={min}>{children}</RequireRole> : children}
+    </AppShell>
+  </ProtectedRoute>
+);
+
+const Lazy: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <Suspense fallback={<div className="flex-1 grid place-items-center"><LoadingState /></div>}>
+    {children}
+  </Suspense>
+);
 
 export const App: React.FC = () => {
   // Keep i18next + <html dir> in sync with the tenant's saved language and
@@ -58,96 +77,23 @@ export const App: React.FC = () => {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
-      <Route
-        path="/pos"
-        element={
-          <ProtectedRoute>
-            <AppShell>
-              <POSPage />
-            </AppShell>
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/receipt"
-        element={
-          <ProtectedRoute>
-            <AppShell>
-              <ReceiptPage />
-            </AppShell>
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/dashboard"
-        element={
-          <ProtectedRoute>
-            <AppShell>
-              <DashboardPage />
-            </AppShell>
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/products"
-        element={
-          <ProtectedRoute>
-            <AppShell>
-              <ProductsPage />
-            </AppShell>
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/inventory"
-        element={
-          <ProtectedRoute>
-            <AppShell>
-              <InventoryPage />
-            </AppShell>
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/sales"
-        element={
-          <ProtectedRoute>
-            <AppShell>
-              <SalesPage />
-            </AppShell>
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/users"
-        element={
-          <ProtectedRoute>
-            <AppShell>
-              <UsersPage />
-            </AppShell>
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/settings"
-        element={
-          <ProtectedRoute>
-            <AppShell>
-              <SettingsPage />
-            </AppShell>
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/scale"
-        element={
-          <ProtectedRoute>
-            <AppShell>
-              <ScalePage />
-            </AppShell>
-          </ProtectedRoute>
-        }
-      />
+
+      {/* Cashier-accessible routes */}
+      <Route path="/pos" element={<Guarded><POSPage /></Guarded>} />
+      <Route path="/receipt" element={<Guarded><ReceiptPage /></Guarded>} />
+      <Route path="/receipt/:saleUuid" element={<Guarded><ReceiptPage /></Guarded>} />
+      <Route path="/sales" element={<Guarded><SalesPage /></Guarded>} />
+
+      {/* Manager+ routes — RequireRole renders an explicit access-denied
+          screen for direct-URL attempts; the backend still 403s the APIs. */}
+      <Route path="/dashboard" element={<Guarded min="Manager"><DashboardPage /></Guarded>} />
+      <Route path="/products" element={<Guarded min="Manager"><ProductsPage /></Guarded>} />
+      <Route path="/inventory" element={<Guarded min="Manager"><InventoryPage /></Guarded>} />
+      <Route path="/scale" element={<Guarded min="Manager"><ScalePage /></Guarded>} />
+      <Route path="/users" element={<Guarded min="Manager"><UsersPage /></Guarded>} />
+      <Route path="/settings" element={<Guarded min="Manager"><SettingsPage /></Guarded>} />
+
+
       <Route path="/" element={<Navigate to="/pos" replace />} />
       <Route path="*" element={<Navigate to="/pos" replace />} />
     </Routes>

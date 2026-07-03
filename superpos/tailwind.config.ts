@@ -42,6 +42,16 @@ const config: Config = {
           600: '#D97706',
           700: '#B45309',
         },
+        info: {
+          50: '#ECFEFF',
+          500: '#06B6D4',
+          700: '#0E7490',
+        },
+        violet: {
+          50: '#F5F3FF',
+          500: '#8B5CF6',
+          700: '#6D28D9',
+        },
       },
       fontFamily: {
         sans: ['"Segoe UI"', '-apple-system', 'BlinkMacSystemFont', 'system-ui', 'sans-serif'],

@@ -12,8 +12,9 @@ const kindClasses: Record<BadgeKind, string> = {
   success: 'bg-success-50 text-success-700',
   danger:  'bg-danger-50 text-danger-700',
   warn:    'bg-warn-50 text-warn-700',
-  info:    'bg-[#ECFEFF] text-[#0E7490]',
+  info:    'bg-info-50 text-info-700',
   brand:   'bg-brand-50 text-brand-700',
+  violet:  'bg-violet-50 text-violet-700',
 };
 
 export const Badge: React.FC<BadgeProps> = ({ kind = 'gray', size = 'sm', children }) => {

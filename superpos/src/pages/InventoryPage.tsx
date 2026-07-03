@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { AxiosError } from 'axios';
 import apiClient from '../api/client';
-import { useAppStore } from '../store/appStore';
 import { fmtDecimal } from '../utils/format';
 import { Header } from '../components/layout/Header';
 import { Card } from '../components/ui/Card';
@@ -67,7 +66,6 @@ const typeBadge = (type: string): { kind: BadgeKind; label: string } => {
 };
 
 export const InventoryPage: React.FC = () => {
-  const { online, pendingSync } = useAppStore();
 
   // ── Filter + pagination state ──────────────────────────────────────────
   const [startDate, setStartDate] = useState<string>('');
@@ -152,8 +150,6 @@ export const InventoryPage: React.FC = () => {
       <Header
         title="Inventory"
         subtitle="Global stock movements ledger"
-        online={online}
-        pendingSync={pendingSync}
         right={
           <Button size="sm" onClick={() => setReceiving(true)}>
             <Icon name="plus" size={14} /> Receive stock

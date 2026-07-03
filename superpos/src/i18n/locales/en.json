@@ -33,7 +33,16 @@
     "sales": "Sales",
     "users": "Users",
     "settings": "Settings",
-    "signOut": "Sign out"
+    "signOut": "Sign out",
+    "purchases": "Purchases",
+    "customers": "Customers",
+    "suppliers": "Suppliers",
+    "warehouses": "Warehouses",
+    "finance": "Treasury / Finance",
+    "groupOperations": "Operations",
+    "groupCatalog": "Catalog & Stock",
+    "groupFinance": "Finance",
+    "groupAdmin": "Admin"
   },
   "settings": {
     "title": "Settings",
@@ -148,5 +157,9 @@
       "loadFailed": "Failed to load branches.",
       "empty": "No branches yet. Contact support to add your first branch."
     }
+  },
+  "header": {
+    "online": "Online",
+    "offline": "Offline"
   }
 }

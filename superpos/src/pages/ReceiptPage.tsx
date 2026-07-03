@@ -1,15 +1,16 @@
-import React, { useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useEffect, useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
+import apiClient from '../api/client';
 import { usePosStore } from '../store/posStore';
-import { useAppStore } from '../store/appStore';
 import { useAuthStore } from '../store/authStore';
 import { fmtDate } from '../utils/format';
 import { absoluteMediaUrl } from '../utils/media';
+import { saleDetailToTxn, type SaleDetail } from '../utils/sale';
 import { Header } from '../components/layout/Header';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
-import { Badge } from '../components/ui/Badge';
 import { Icon } from '../components/ui/Icon';
+import { LoadingState } from '../components/ui/states';
 
 // Currency formatter — uses the tenant's configured currency, fallback EGP.
 const money = (n: number | string | null | undefined, currency: string): string => {
@@ -19,8 +20,8 @@ const money = (n: number | string | null | undefined, currency: string): string 
 
 export const ReceiptPage: React.FC = () => {
   const navigate = useNavigate();
+  const { saleUuid } = useParams<{ saleUuid: string }>();
   const { receiptTxn, setReceiptTxn } = usePosStore();
-  const { online, pendingSync } = useAppStore();
   const user = useAuthStore((s) => s.user);
   const currency = user?.tenant_currency || 'EGP';
   const showTax  = user?.tenant_show_tax_on_receipt !== false;
@@ -29,6 +30,24 @@ export const ReceiptPage: React.FC = () => {
     .split(/[,;]+/)
     .map((p) => p.trim())
     .filter(Boolean);
+
+  // Durable receipt: when the in-memory transaction is gone (page refresh,
+  // deep link) but the URL carries the sale UUID, refetch the sale and
+  // rebuild the receipt instead of silently bouncing back to the POS.
+  const needsFetch = !receiptTxn && !!saleUuid;
+  const [fetching, setFetching]   = useState(needsFetch);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!needsFetch) return;
+    let cancelled = false;
+    setFetching(true);
+    apiClient.get<SaleDetail>(`/sales/${saleUuid}/`)
+      .then((res) => { if (!cancelled) setReceiptTxn(saleDetailToTxn(res.data)); })
+      .catch(() => { if (!cancelled) setFetchError('Could not load this receipt. It may not exist or you may not have access.'); })
+      .finally(() => { if (!cancelled) setFetching(false); });
+    return () => { cancelled = true; };
+  }, [needsFetch, saleUuid, setReceiptTxn]);
 
   // Auto-trigger the browser's print dialog as soon as the receipt mounts.
   // Wrapped in a short timeout so the receipt has a frame to paint first.
@@ -39,6 +58,19 @@ export const ReceiptPage: React.FC = () => {
   }, [receiptTxn]);
 
   if (!receiptTxn) {
+    if (fetching) {
+      return <div className="flex-1 grid place-items-center"><LoadingState /></div>;
+    }
+    if (fetchError) {
+      return (
+        <div className="flex-1 grid place-items-center p-8">
+          <Card className="p-6 max-w-[420px] text-center">
+            <div className="text-[15px] font-semibold text-danger-600">{fetchError}</div>
+            <Button className="mt-4" onClick={() => navigate('/pos')}>Back to POS</Button>
+          </Card>
+        </div>
+      );
+    }
     navigate('/pos', { replace: true });
     return null;
   }
@@ -63,8 +95,6 @@ export const ReceiptPage: React.FC = () => {
       <Header
         title="Receipt preview"
         subtitle={`Transaction #${shortId} · ${txn.offline ? 'Stored offline' : 'Synced'}`}
-        online={online}
-        pendingSync={pendingSync}
         right={
           <Button variant="ghost" size="sm" onClick={handleDone}>
             <Icon name="x" size={14} /> Close
@@ -173,18 +203,8 @@ export const ReceiptPage: React.FC = () => {
                     ))}
                   </div>
                 )}
-                <div className="mt-2 font-mono text-[10px] break-all">superpos.io/r/{fullId.toLowerCase()}</div>
-                <div className="my-3 grid place-items-center">
-                  <div className="w-20 h-20 grid grid-cols-8 grid-rows-8 gap-px bg-black p-1">
-                    {Array.from({ length: 64 }).map((_, i) => (
-                      <div
-                        key={i}
-                        style={{ background: ((i * 7 + 3) % 5 < 2 || i < 8 || i > 55 || i % 8 === 0 || i % 8 === 7) ? '#000' : '#fff' }}
-                      />
-                    ))}
-                  </div>
-                </div>
-                <div className="text-[10px]">** CUSTOMER COPY **</div>
+                <div className="mt-2 font-mono text-[10px] break-all">Ref: {fullId.toLowerCase()}</div>
+                <div className="mt-2 text-[10px]">** CUSTOMER COPY **</div>
               </div>
             </div>
           </div>
@@ -197,31 +217,23 @@ export const ReceiptPage: React.FC = () => {
                   <Icon name="check" size={22} />
                 </div>
                 <div>
-                  <div className="text-[15px] font-semibold">Payment complete</div>
-                  <div className="text-[12px] text-neutral-500">
-                    Cash drawer opened · Inventory updated{txn.offline ? ' (queued)' : ''}
-                  </div>
+                  <div className="text-[15px] font-semibold">Sale recorded</div>
+                  <div className="text-[12px] text-neutral-500">Inventory updated</div>
                 </div>
               </div>
             </Card>
 
+            {/* Printing goes through the browser's print dialog — there is no
+                direct thermal-printer integration in this version, so no
+                device status is shown. */}
             <Card className="p-5">
-              <div className="text-[12px] font-semibold uppercase tracking-wider text-neutral-500 mb-2">Auto print</div>
-              <div className="bg-neutral-50 border border-neutral-200 rounded-md p-3 flex items-center gap-3">
-                <div className="w-9 h-9 rounded grid place-items-center bg-white border border-neutral-200">
-                  <Icon name="printer" size={18} />
-                </div>
-                <div className="flex-1">
-                  <div className="text-[13px] font-semibold">Star TSP143III · Ready</div>
-                  <div className="text-[11.5px] text-success-700">Receipt sent · 1 copy</div>
-                </div>
-                <Badge kind="success">OK</Badge>
-              </div>
-              <div className="mt-3">
-                <Button variant="secondary" size="md" className="w-full" onClick={() => window.print()}>
-                  <Icon name="printer" size={16} /> Print Receipt
-                </Button>
-              </div>
+              <div className="text-[12px] font-semibold uppercase tracking-wider text-neutral-500 mb-2">Print</div>
+              <p className="text-[12.5px] text-neutral-500 mb-3">
+                Uses the browser print dialog and your system's default printer.
+              </p>
+              <Button variant="secondary" size="md" className="w-full" onClick={() => window.print()}>
+                <Icon name="printer" size={16} /> Print Receipt
+              </Button>
             </Card>
 
             <Card className="p-5">

@@ -1,9 +1,8 @@
-export type BadgeKind = 'gray' | 'success' | 'danger' | 'warn' | 'info' | 'brand';
+export type BadgeKind = 'gray' | 'success' | 'danger' | 'warn' | 'info' | 'brand' | 'violet';
 export type ButtonVariant = 'primary' | 'secondary' | 'tertiary' | 'ghost' | 'danger' | 'success' | 'dark';
 export type ButtonSize = 'sm' | 'md' | 'lg' | 'xl';
 export type PaymentMethod = 'cash' | 'card' | 'wallet';
 export type UserRole = 'Owner' | 'Admin' | 'Manager' | 'Cashier';
-export type CardStage = 'waiting' | 'processing' | 'success' | 'declined';
 
 /**
  * Backend serializes status as lowercase ('completed' | 'voided' | 'refunded').

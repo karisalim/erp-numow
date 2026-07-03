@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { AxiosError } from 'axios';
 import apiClient from '../api/client';
-import { useAppStore } from '../store/appStore';
 import { useAuthStore } from '../store/authStore';
 import { fmtDecimal, stockLabel } from '../utils/format';
 import { Header } from '../components/layout/Header';
@@ -50,7 +49,6 @@ function initialsFor(name: string): string {
 }
 
 export const ProductsPage: React.FC = () => {
-  const { online, pendingSync } = useAppStore();
   const currency = useAuthStore((s) => s.user?.tenant_currency) || 'EGP';
   const money = (n: number | string | null | undefined) => {
     const num = typeof n === 'number' ? n : Number(n ?? 0);
@@ -193,8 +191,6 @@ export const ProductsPage: React.FC = () => {
       <Header
         title="Products"
         subtitle={subtitle}
-        online={online}
-        pendingSync={pendingSync}
         right={
           <>
             <ProductImportControl

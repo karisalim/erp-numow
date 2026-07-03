@@ -4,7 +4,6 @@ import { differenceInDays, format, startOfDay } from 'date-fns';
 import { ar, enUS } from 'date-fns/locale';
 import { useTranslation } from 'react-i18next';
 import apiClient from '../api/client';
-import { useAppStore } from '../store/appStore';
 import { useAuthStore } from '../store/authStore';
 import { absoluteMediaUrl } from '../utils/media';
 import {
@@ -141,7 +140,6 @@ const TABS: { id: TabId; labelKey: string; icon: string; emoji: string }[] = [
  * ──────────────────────────────────────────────────────────────────────────── */
 export const SettingsPage: React.FC = () => {
   const { t } = useTranslation();
-  const { online, pendingSync } = useAppStore();
   const updateUser = useAuthStore((s) => s.updateUser);
 
   const [settings, setSettings]       = useState<TenantSettings>(EMPTY_TENANT);
@@ -602,8 +600,6 @@ export const SettingsPage: React.FC = () => {
       <Header
         title={t('settings.title')}
         subtitle={t('settings.subtitle')}
-        online={online}
-        pendingSync={pendingSync}
         right={
           <div className="flex items-center gap-3">
             {dirty && !saving && (

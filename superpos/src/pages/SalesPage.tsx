@@ -2,12 +2,12 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AxiosError } from 'axios';
 import apiClient from '../api/client';
-import { useAppStore } from '../store/appStore';
 import { useAuthStore } from '../store/authStore';
 import { usePosStore } from '../store/posStore';
 import { methodIcon } from '../utils/format';
+import { saleDetailToTxn, type SaleDetail as SharedSaleDetail } from '../utils/sale';
 import type {
-  BadgeKind, CartItem, CompletedTransaction, PaymentMethod, Product, TransactionStatus,
+  BadgeKind, PaymentMethod, TransactionStatus,
 } from '../types';
 import { Header } from '../components/layout/Header';
 import { Card } from '../components/ui/Card';
@@ -70,23 +70,8 @@ const fmtDateTime = (iso: string): string => {
   return d.toLocaleDateString() + ' ' + d.toLocaleTimeString();
 };
 
-/* ─────────────────────────────────────────────────────────────────────────────
- * Sale detail response — what `/api/sales/<uuid>/` returns. Includes items.
- * ──────────────────────────────────────────────────────────────────────────── */
-interface SaleItemDetail {
-  id: number;
-  product: number | null;
-  product_name: string;
-  barcode?: string;
-  qty: string | number;
-  price_each: string | number;
-  line_total: string | number;
-}
-
-interface SaleDetail extends SaleRow {
-  items: SaleItemDetail[];
-  change?: string | number;
-}
+/* Sale detail response shape lives in utils/sale.ts (shared with ReceiptPage). */
+type SaleDetail = SharedSaleDetail;
 
 const extractDetail = (err: unknown, fallback: string): string => {
   if (err instanceof AxiosError) {
@@ -122,12 +107,28 @@ const TxnDetailModal: React.FC<TxnModalProps> = ({
   const b = statusBadge(localStatus);
   const saleKey  = row.sale_uuid || String(row.id);
 
+  // One idempotency key per open modal: a retried void (double click,
+  // network retry) replays the original reversal instead of running twice.
+  const voidKeyRef = React.useRef<string>(crypto.randomUUID());
+
   const handleVoid = async () => {
     if (voiding || isVoided) return;
-    if (!window.confirm('Are you sure you want to void this transaction?')) return;
+    // The backend records the reason in the AuditLog entry for the void.
+    const reason = window.prompt(
+      'Void this transaction?\n\nEnter a reason (required for the audit trail):',
+    );
+    if (reason === null) return;                    // cancelled
+    if (!reason.trim()) {
+      onToast('error', 'A void reason is required.');
+      return;
+    }
     setVoiding(true);
     try {
-      const { data } = await apiClient.post<SaleDetail>(`/sales/${saleKey}/void/`);
+      const { data } = await apiClient.post<SaleDetail>(
+        `/sales/${saleKey}/void/`,
+        { reason: reason.trim() },
+        { headers: { 'Idempotency-Key': voidKeyRef.current } },
+      );
       const updated: SaleRow = { ...row, status: data.status };
       setLocalStatus(data.status);
       onToast('success', `Transaction ${shortId(row)} voided.`);
@@ -145,44 +146,9 @@ const TxnDetailModal: React.FC<TxnModalProps> = ({
     setReprinting(true);
     try {
       const { data } = await apiClient.get<SaleDetail>(`/sales/${saleKey}/`);
-
-      const items: CartItem[] = data.items.map((it, i) => {
-        const price = toNum(it.price_each);
-        // We don't have the original Product on hand — build a minimal one
-        // that satisfies the receipt renderer (name, price, weighted=false).
-        const product: Product = {
-          id:       it.product ?? `legacy-${it.id}`,
-          barcode:  it.barcode ?? '',
-          sku:      it.barcode ?? '',
-          name:     it.product_name,
-          category: null,
-          price,
-          cost:     0,
-          stock:    0,
-          reorder:  0,
-          color:    '#6B7280',
-        };
-        return { ...product, lineId: `L${i + 1}`, qty: toNum(it.qty) };
-      });
-
-      const txn: CompletedTransaction = {
-        id:         data.sale_uuid ?? `SALE-${data.id}`,
-        sale_uuid:  data.sale_uuid ?? undefined,
-        items,
-        subtotal:   toNum(data.subtotal),
-        tax:        toNum(data.tax_amount),
-        tax_amount: toNum(data.tax_amount),
-        total:      toNum(data.total),
-        method:     data.method,
-        paid:       toNum(data.paid ?? data.total),
-        change:     toNum(data.change ?? 0),
-        ts:         data.created_at ? new Date(data.created_at) : new Date(),
-        cashier:    data.cashier_name || '—',
-        terminal:   data.terminal_name || '',
-        offline:    Boolean(data.offline),
-      };
-      setReceiptTxn(txn);
-      navigate('/receipt');
+      setReceiptTxn(saleDetailToTxn(data));
+      // Durable URL — refreshing the receipt refetches by UUID.
+      navigate(data.sale_uuid ? `/receipt/${data.sale_uuid}` : '/receipt');
     } catch (err) {
       onToast('error', extractDetail(err, 'Failed to load receipt.'));
     } finally {
@@ -291,7 +257,6 @@ const TxnDetailModal: React.FC<TxnModalProps> = ({
  * SalesPage
  * ──────────────────────────────────────────────────────────────────────────── */
 export const SalesPage: React.FC = () => {
-  const { online, pendingSync } = useAppStore();
   const currency  = useAuthStore((s) => s.user?.tenant_currency) || 'EGP';
   const role      = useAuthStore((s) => s.user?.role);
   const isCashier = role === 'Cashier';
@@ -423,8 +388,6 @@ export const SalesPage: React.FC = () => {
       <Header
         title="Sales"
         subtitle="Transaction history · all branches"
-        online={online}
-        pendingSync={pendingSync}
         right={
           <>
             <Button variant="secondary" size="sm" onClick={onExport} disabled={exporting}>

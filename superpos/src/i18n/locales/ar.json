@@ -33,7 +33,16 @@
     "sales": "المبيعات",
     "users": "المستخدمون",
     "settings": "الإعدادات",
-    "signOut": "تسجيل الخروج"
+    "signOut": "تسجيل الخروج",
+    "purchases": "المشتريات",
+    "customers": "العملاء",
+    "suppliers": "الموردون",
+    "warehouses": "المخازن",
+    "finance": "الخزينة / المالية",
+    "groupOperations": "العمليات",
+    "groupCatalog": "الأصناف والمخزون",
+    "groupFinance": "المالية",
+    "groupAdmin": "الإدارة"
   },
   "settings": {
     "title": "الإعدادات",
@@ -148,5 +157,9 @@
       "loadFailed": "فشل تحميل الفروع.",
       "empty": "لا توجد فروع بعد. تواصل مع الدعم لإضافة أول فرع."
     }
+  },
+  "header": {
+    "online": "متصل",
+    "offline": "غير متصل"
   }
 }

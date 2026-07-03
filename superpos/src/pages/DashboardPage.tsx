@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { AxiosError } from 'axios';
 import apiClient from '../api/client';
-import { useAppStore } from '../store/appStore';
 import { useAuthStore } from '../store/authStore';
 import { fmtDecimal } from '../utils/format';
 import type { BadgeKind } from '../types';
@@ -85,7 +84,6 @@ const fmtRangeLabel = (start: string, end: string): string => {
 };
 
 export const DashboardPage: React.FC = () => {
-  const { online, pendingSync, setOnline } = useAppStore();
   const money = useMoney();
   const branchName = useAuthStore((s) => s.user?.branch_name);
 
@@ -177,8 +175,6 @@ export const DashboardPage: React.FC = () => {
       <Header
         title="Dashboard"
         subtitle={subtitle}
-        online={online}
-        pendingSync={pendingSync}
         right={
           <>
             <div className="flex items-center gap-2">
@@ -206,9 +202,6 @@ export const DashboardPage: React.FC = () => {
               onClick={() => { const t = today(); setStartDate(t); setEndDate(t); }}
             >
               Today
-            </Button>
-            <Button variant="ghost" size="sm" onClick={() => setOnline((o) => !o)}>
-              <Icon name={online ? 'wifi' : 'wifiOff'} size={14} /> Toggle
             </Button>
           </>
         }

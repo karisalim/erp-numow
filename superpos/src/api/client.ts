@@ -1,6 +1,10 @@
 import axios, { AxiosError, type InternalAxiosRequestConfig } from 'axios';
 
-const API_URL = 'http://127.0.0.1:8000/api';
+// Single env-driven API base shared with utils/media.ts (VITE_API_URL).
+// Falls back to the local dev backend so `npm run dev` keeps working
+// without a .env file.
+const ENV_API_URL = (import.meta.env.VITE_API_URL as string | undefined) ?? '';
+const API_URL = ENV_API_URL.replace(/\/$/, '') || 'http://127.0.0.1:8000/api';
 
 const apiClient = axios.create({
   baseURL: API_URL,
