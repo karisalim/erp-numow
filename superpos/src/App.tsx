@@ -24,6 +24,9 @@ import type { UserRole } from './types';
 // New ERP modules are lazy-loaded so the POS-critical main bundle stays lean.
 const CustomersPage  = React.lazy(() => import('./pages/customers/CustomersPage').then(m => ({ default: m.CustomersPage })));
 const SuppliersPage  = React.lazy(() => import('./pages/suppliers/SuppliersPage').then(m => ({ default: m.SuppliersPage })));
+const PurchasesPage  = React.lazy(() => import('./pages/purchases/PurchasesPage').then(m => ({ default: m.PurchasesPage })));
+const PurchaseDetailPage = React.lazy(() => import('./pages/purchases/PurchaseDetailPage').then(m => ({ default: m.PurchaseDetailPage })));
+const PurchaseCreatePage = React.lazy(() => import('./pages/purchases/PurchaseCreatePage').then(m => ({ default: m.PurchaseCreatePage })));
 
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { isAuthenticated } = useAuthStore();
@@ -98,6 +101,9 @@ export const App: React.FC = () => {
 
       <Route path="/customers" element={<Guarded min="Manager"><Lazy><CustomersPage /></Lazy></Guarded>} />
       <Route path="/suppliers" element={<Guarded min="Manager"><Lazy><SuppliersPage /></Lazy></Guarded>} />
+      <Route path="/purchases" element={<Guarded min="Manager"><Lazy><PurchasesPage /></Lazy></Guarded>} />
+      <Route path="/purchases/new" element={<Guarded min="Manager"><Lazy><PurchaseCreatePage /></Lazy></Guarded>} />
+      <Route path="/purchases/:id" element={<Guarded min="Manager"><Lazy><PurchaseDetailPage /></Lazy></Guarded>} />
 
       <Route path="/" element={<Navigate to="/pos" replace />} />
       <Route path="*" element={<Navigate to="/pos" replace />} />
