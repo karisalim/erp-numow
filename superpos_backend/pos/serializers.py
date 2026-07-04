@@ -7,7 +7,7 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from accounts.models import (
-    Branch, Customer, FinancialAccount, PaymentMethod, Supplier,
+    Branch, BranchSettings, Customer, FinancialAccount, PaymentMethod, Supplier,
 )
 from .models import (
     BranchWarehouse, Category, InsufficientStockError, InventoryBatch,
@@ -712,6 +712,32 @@ class SaleSerializer(serializers.ModelSerializer):
         validated_data['payment_method_hint'] = method
         customer = validated_data.get('customer')
 
+        # Credit-limit enforcement (Gate A): a credit sale may not push the
+        # customer's AR balance past their limit. limit <= 0 means unlimited
+        # (the field defaults to 0 for every existing customer).
+        if method == Sale.Method.CREDIT and customer is not None:
+            limit = customer.credit_limit or Decimal('0')
+            if limit > 0:
+                from accounts.services import customer_ar as ar_service
+                current_balance = ar_service.get_customer_balance(customer)
+                if current_balance + total > limit:
+                    # Raised during save(), so DRF's as_serializer_error does
+                    # NOT run — wrap values in lists ourselves to keep the
+                    # standard {field: [messages]} error shape.
+                    raise serializers.ValidationError({
+                        'customer': [(
+                            f'Credit limit exceeded: balance {current_balance:.2f} '
+                            f'+ sale {total:.2f} > limit {limit:.2f}.'
+                        )],
+                        'code': 'credit_limit_exceeded',
+                        'detail': (
+                            f'Credit limit exceeded for customer #{customer.pk}.'
+                        ),
+                        'credit_limit': [str(limit)],
+                        'current_balance': [str(current_balance)],
+                        'attempted': [str(total)],
+                    })
+
         # Ledger integration (Phase 1.5 Slice I) — resolve the branch's default
         # sales warehouse once. None when unconfigured → legacy behavior.
         from pos.services import sale_posting
@@ -758,12 +784,14 @@ class SaleSerializer(serializers.ModelSerializer):
                 # Post the financial / AR effect. Runs in this atomic block so
                 # any posting failure rolls back the whole sale.
                 #
-                # A *configured* branch (one that has BranchPaymentMethod
-                # routing) must never silently skip posting: a missing /
-                # inactive / misconfigured route — or an AR / account rule
-                # violation — surfaces as a 400 and rolls the sale back. Only a
-                # genuinely legacy branch (no routing at all) is allowed to skip
-                # (with a warning) — see sale_posting.post_sale_ledgers.
+                # Gate A: every completed cash/card/wallet sale must post to
+                # the ledger. A missing / inactive / misconfigured route — or
+                # an AR / account rule violation — surfaces as a 400 and rolls
+                # the whole sale back (no legacy skip anymore).
+                #
+                # Error shape keeps the legacy `payment` string key (the
+                # frontend displays it) and adds stable machine-readable
+                # `code` / `field` / `detail` keys.
                 try:
                     sale_posting.post_sale_ledgers(
                         sale=sale, method=method, customer=customer, actor_user=actor,
@@ -773,7 +801,14 @@ class SaleSerializer(serializers.ModelSerializer):
                     sale_posting.ar.CustomerARError,
                     sale_posting.fa.AccountMovementError,
                 ) as exc:
-                    raise serializers.ValidationError({'payment': str(exc)})
+                    # Raised during save() — list-wrap the display message to
+                    # match the standard {field: [messages]} error shape.
+                    raise serializers.ValidationError({
+                        'payment': [str(exc)],
+                        'code': getattr(exc, 'code', 'sale_posting_error'),
+                        'field': 'method',
+                        'detail': str(exc),
+                    })
 
         return sale
 
@@ -783,10 +818,11 @@ class SaleSerializer(serializers.ModelSerializer):
     def _apply_stock(sale: Sale) -> None:
         """Deduct each line's qty from the global Product.stock under a row lock.
 
-        Oversells are allowed (per FLOW.md) and produce a warning, but the
-        actual decrement still goes through `Product.deduct_stock(...,
-        allow_oversell=True)` so two concurrent checkouts of the last unit
-        can't both succeed without one of them being flagged.
+        Negative-stock policy (Gate A): oversell is BLOCKED by default. It is
+        allowed only when the branch's `BranchSettings.allow_negative_stock`
+        is True — then the sale succeeds with a warning and the flagged
+        StockMovement, exactly like the pre-gate behavior. A blocked oversell
+        raises a structured ValidationError that rolls the whole sale back.
 
         Warehouse note: each movement records `item.warehouse` purely for
         traceability (which location the goods left). The authoritative on-hand
@@ -795,6 +831,15 @@ class SaleSerializer(serializers.ModelSerializer):
         warehouse on the movement *labels* the outflow; it does not *scope* it.
         """
         from pos.services import stock_movements as stock_svc
+
+        # Branch-level toggle; absent settings row (lazily created elsewhere)
+        # means the default: block negative stock.
+        allow_negative = (
+            BranchSettings.objects
+            .filter(branch=sale.branch)
+            .values_list('allow_negative_stock', flat=True)
+            .first()
+        ) or False
 
         warnings = []
         with transaction.atomic():
@@ -811,6 +856,22 @@ class SaleSerializer(serializers.ModelSerializer):
                 try:
                     product.deduct_stock(qty_delta)
                 except InsufficientStockError as exc:
+                    if not allow_negative:
+                        raise serializers.ValidationError({
+                            'items': (
+                                f'Insufficient stock for "{product.name}": '
+                                f'available {exc.available}, required {exc.requested}.'
+                            ),
+                            'code': 'insufficient_stock',
+                            'detail': (
+                                f'Insufficient stock for "{product.name}"; enable '
+                                f'allow_negative_stock in branch settings to permit oversell.'
+                            ),
+                            'product': str(product.pk),
+                            'warehouse': str(item.warehouse_id) if item.warehouse_id else '',
+                            'available': str(exc.available),
+                            'required': str(exc.requested),
+                        })
                     msg = (
                         f'Only {exc.available} in stock. '
                         f'Sold {exc.requested} of "{product.name}".'

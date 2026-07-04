@@ -7,7 +7,9 @@ Covers:
 """
 
 from decimal import Decimal
+from importlib import import_module
 
+from django.apps import apps as django_apps
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -15,8 +17,9 @@ from rest_framework.test import APITestCase
 from unittest.mock import patch
 
 from accounts.models import (
-    Branch, BranchPaymentMethod, Customer, FinancialAccount,
-    FinancialAccountMovement, PaymentMethod, Supplier, Tenant, Terminal, User,
+    Branch, BranchPaymentMethod, BranchSettings, Customer, CustomerARMovement,
+    FinancialAccount, FinancialAccountMovement, PaymentMethod, Supplier,
+    Tenant, Terminal, User,
 )
 from accounts.services import account_movements as account_service
 from accounts.services import customer_ar as customer_ar_service
@@ -29,6 +32,38 @@ from pos.services import purchase_invoices as purchase_invoice_service
 from pos.services import sale_posting
 from pos.services import stock_movements as stock_movement_service
 from pos.views import _parse_weight_encoded_barcode
+
+
+def _grant_default_routing(tenant, branch):
+    """Gate A test helper: give a branch the default cash/card/wallet routing.
+
+    Mirrors what migration 0017 provisions for real legacy branches — the
+    test DB is created post-migration, so runtime fixtures must self-serve.
+    Returns the accounts keyed by account_type for balance assertions.
+    """
+    accounts = {}
+    for acct_type, name in [
+        (FinancialAccount.AccountType.CASHBOX,         'Main Cashbox'),
+        (FinancialAccount.AccountType.CARD_SETTLEMENT, 'Card Settlement'),
+        (FinancialAccount.AccountType.WALLET,          'Wallet'),
+    ]:
+        accounts[acct_type] = FinancialAccount.objects.create(
+            tenant=tenant, name=f'{name} ({branch.name})', account_type=acct_type,
+        )
+    for mtype, acct_type in [
+        (PaymentMethod.MethodType.CASH,   FinancialAccount.AccountType.CASHBOX),
+        (PaymentMethod.MethodType.CARD,   FinancialAccount.AccountType.CARD_SETTLEMENT),
+        (PaymentMethod.MethodType.WALLET, FinancialAccount.AccountType.WALLET),
+    ]:
+        pm = PaymentMethod.objects.create(
+            tenant=tenant, name=f'{mtype} ({branch.name})', method_type=mtype,
+        )
+        BranchPaymentMethod.objects.create(
+            tenant=tenant, branch=branch, payment_method=pm,
+            destination_account=accounts[acct_type],
+            is_default=True, is_active=True,
+        )
+    return accounts
 
 
 class WeightEncodedBarcodeTests(APITestCase):
@@ -122,6 +157,8 @@ class SaleCheckoutPaymentTests(APITestCase):
             tax_rate=Decimal('0.00'), stock=Decimal('500'),
             weighted=True, unit=Product.Unit.KG, plu='09524',
         )
+        # Gate A: every completed sale must resolve a payment route.
+        _grant_default_routing(cls.tenant, cls.branch)
 
     def setUp(self):
         self.client.force_authenticate(user=self.cashier)
@@ -174,19 +211,8 @@ class SaleCheckoutPaymentTests(APITestCase):
         self.assertEqual(payment.amount_paid, Decimal('50.00'))
         self.assertEqual(payment.change,      Decimal('29.84'))
 
-    def test_oversell_succeeds_with_warning_and_negative_stock(self):
-        """Selling more than on-hand stock is allowed per FLOW.md.
-
-        Regression guard: a `stock >= 0` CHECK constraint used to make this
-        explode with HTTP 500 (CheckViolation on the fallback update). The
-        constraint was removed; oversell now lands the row at negative
-        stock and surfaces a warning to the cashier.
-        """
-        # Zero out stock so the next sale is guaranteed to oversell.
-        self.product.stock = Decimal('0')
-        self.product.save(update_fields=['stock'])
-
-        body = {
+    def _oversell_body(self):
+        return {
             'items': [{
                 'product':    self.product.id,
                 'qty':        '1',
@@ -195,7 +221,41 @@ class SaleCheckoutPaymentTests(APITestCase):
             'method':      'cash',
             'amount_paid': '200.00',
         }
-        resp = self.client.post(reverse('sale-list'), body, format='json')
+
+    def test_oversell_blocked_by_default_with_structured_error(self):
+        """Gate A: negative stock is BLOCKED unless the branch opts in.
+
+        (Replaces the pre-gate `test_oversell_succeeds_with_warning_and_
+        negative_stock`, which codified the removed unconditional-oversell
+        behavior.)
+        """
+        self.product.stock = Decimal('0')
+        self.product.save(update_fields=['stock'])
+        sales_before = Sale.objects.count()
+
+        resp = self.client.post(reverse('sale-list'), self._oversell_body(), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
+
+        data = resp.json()
+        self.assertIn('insufficient_stock', data['code'])
+        self.assertIn('0', data['available'][0])
+        self.assertIn('1', data['required'][0])
+
+        # Full rollback — no sale, stock untouched.
+        self.assertEqual(Sale.objects.count(), sales_before)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, Decimal('0.000'))
+
+    def test_oversell_allowed_with_warning_when_branch_setting_enabled(self):
+        """`BranchSettings.allow_negative_stock=True` restores the documented
+        pre-gate behavior: sale succeeds, warning returned, stock goes negative."""
+        BranchSettings.objects.create(
+            tenant=self.tenant, branch=self.branch, allow_negative_stock=True,
+        )
+        self.product.stock = Decimal('0')
+        self.product.save(update_fields=['stock'])
+
+        resp = self.client.post(reverse('sale-list'), self._oversell_body(), format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
 
         data = resp.json()
@@ -235,6 +295,8 @@ class ReceiptLayoutTests(APITestCase):
             tax_rate=Decimal('0.00'), stock=Decimal('500'),
             weighted=True, unit=Product.Unit.KG, plu='09524',
         )
+        # Gate A: every completed sale must resolve a payment route.
+        _grant_default_routing(cls.tenant, cls.branch)
 
     def setUp(self):
         self.client.force_authenticate(user=self.cashier)
@@ -1108,7 +1170,21 @@ class SalePostingTests(_SalePostingTestBase):
         resp = self.client.post(reverse('sale-list'), body, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_oversell_still_allowed_with_warning(self):
+    def test_oversell_blocked_by_default(self):
+        """Gate A: replaces `test_oversell_still_allowed_with_warning` — the
+        unconditional-oversell behavior was removed; blocking is the default."""
+        self.product.stock = Decimal('0')
+        self.product.save(update_fields=['stock'])
+        resp = self.client.post(reverse('sale-list'), self._sale_body('cash'), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
+        self.assertIn('insufficient_stock', resp.json()['code'])
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, Decimal('0.000'))
+
+    def test_oversell_allowed_with_warning_when_setting_enabled(self):
+        BranchSettings.objects.create(
+            tenant=self.tenant, branch=self.branch, allow_negative_stock=True,
+        )
         self.product.stock = Decimal('0')
         self.product.save(update_fields=['stock'])
         resp = self.client.post(reverse('sale-list'), self._sale_body('cash'), format='json')
@@ -1208,45 +1284,54 @@ class SalePostingHardeningTests(_SalePostingTestBase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
         self._assert_nothing_persisted(sales_before, moves_before)
 
-    def test_legacy_branch_skips_posting_but_warns(self):
-        # Tenant B branch has no routing at all → legacy skip, with a WARNING so
-        # the skip is never silent.
-        self.client.force_authenticate(user=self.cashier_b)
-        body = {
-            'items': [{'product': self.product_b.id, 'qty': '2', 'price_each': '10.00'}],
-            'method': 'cash', 'amount_paid': '20.00',
-        }
-        with self.assertLogs('pos.services.sale_posting', level='WARNING') as logs:
-            resp = self.client.post(reverse('sale-list'), body, format='json')
-        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
-        self.assertTrue(
-            any('without financial routing' in line.lower() for line in logs.output))
-        self.assertEqual(
-            FinancialAccountMovement.objects.filter(tenant=self.tenant_b).count(), 0)
-
-
-class SaleLegacyAndScopingTests(_SalePostingTestBase):
-
-    def test_unconfigured_tenant_sale_still_posts_without_ledger(self):
-        """Tenant B has no BranchPaymentMethod / sales warehouse → the sale
-        still succeeds (legacy), stock drops, but no GL movement is created."""
+    def test_unrouted_branch_sale_fails_with_structured_error(self):
+        """Gate A: replaces `test_legacy_branch_skips_posting_but_warns` — the
+        legacy silent-skip was removed; a branch with zero BranchPaymentMethod
+        rows now fails the sale atomically with a stable error code."""
         self.client.force_authenticate(user=self.cashier_b)
         body = {
             'items': [{'product': self.product_b.id, 'qty': '2', 'price_each': '10.00'}],
             'method': 'cash', 'amount_paid': '20.00',
         }
         resp = self.client.post(reverse('sale-list'), body, format='json')
-        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
 
+        data = resp.json()
+        self.assertIn('payment_routing_missing', data['code'])
+        self.assertIn('No active payment routing', data['payment'][0])
+
+        # Full rollback — nothing persisted for tenant B.
+        self.assertEqual(Sale.objects.filter(tenant=self.tenant_b).count(), 0)
+        self.assertEqual(
+            StockMovement.objects.filter(tenant=self.tenant_b).count(), 0)
         self.product_b.refresh_from_db()
-        self.assertEqual(self.product_b.stock, Decimal('98.000'))
-        # No financial movement posted for tenant B.
+        self.assertEqual(self.product_b.stock, Decimal('100.000'))
         self.assertEqual(
             FinancialAccountMovement.objects.filter(tenant=self.tenant_b).count(), 0)
-        # Movement has no warehouse (none configured).
-        mv = StockMovement.objects.get(source_document_id=resp.json()['id'],
-                                       source_document_type='sale')
-        self.assertIsNone(mv.warehouse_id)
+
+
+class SaleLegacyAndScopingTests(_SalePostingTestBase):
+
+    def test_unconfigured_tenant_sale_fails_and_rolls_back(self):
+        """Gate A: replaces `test_unconfigured_tenant_sale_still_posts_without_
+        ledger` — tenant B has no BranchPaymentMethod, so the sale now fails
+        atomically instead of posting without a GL row."""
+        self.client.force_authenticate(user=self.cashier_b)
+        body = {
+            'items': [{'product': self.product_b.id, 'qty': '2', 'price_each': '10.00'}],
+            'method': 'cash', 'amount_paid': '20.00',
+        }
+        resp = self.client.post(reverse('sale-list'), body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
+        self.assertIn('payment_routing_missing', resp.json()['code'])
+
+        self.product_b.refresh_from_db()
+        self.assertEqual(self.product_b.stock, Decimal('100.000'))
+        self.assertEqual(Sale.objects.filter(tenant=self.tenant_b).count(), 0)
+        self.assertEqual(
+            StockMovement.objects.filter(tenant=self.tenant_b).count(), 0)
+        self.assertEqual(
+            FinancialAccountMovement.objects.filter(tenant=self.tenant_b).count(), 0)
 
     def test_list_is_tenant_scoped(self):
         self.client.force_authenticate(user=self.cashier)
@@ -1410,14 +1495,16 @@ class WarehouseStockSaleAndApiTests(_SalePostingTestBase):
         self.assertFalse(
             WarehouseStock.objects.filter(product=self.product, warehouse=self.warehouse).exists())
 
-    def test_unconfigured_tenant_sale_creates_no_warehouse_stock(self):
+    def test_unconfigured_tenant_sale_fails_and_creates_no_warehouse_stock(self):
+        # Gate A: the unrouted tenant B sale fails outright (see the strict
+        # routing tests); trivially no WarehouseStock row may appear either.
         self.client.force_authenticate(user=self.cashier_b)
         body = {
             'items': [{'product': self.product_b.id, 'qty': '2', 'price_each': '10.00'}],
             'method': 'cash', 'amount_paid': '20.00',
         }
         resp = self.client.post(reverse('sale-list'), body, format='json')
-        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
         self.assertEqual(WarehouseStock.objects.filter(tenant=self.tenant_b).count(), 0)
 
     def test_void_restores_warehouse_stock(self):
@@ -1462,3 +1549,377 @@ class WarehouseStockSaleAndApiTests(_SalePostingTestBase):
         self.assertEqual(r2.status_code, status.HTTP_200_OK)
         self.assertTrue(any(
             row['product'] == self.product.id for row in r2.json()['results']))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Release Gate A — sales financial integrity
+# ══════════════════════════════════════════════════════════════════════════════
+
+class GateAVoidReversalTests(_SalePostingTestBase):
+    """Void must be financially correct: compensating GL/AR reversal rows,
+    original rows preserved, no double-reverse, optional reason audited."""
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.cashier)
+
+    def _post_sale(self, method='cash', **over):
+        body = self._sale_body(method, **over)
+        if method == 'credit':
+            body.pop('amount_paid', None)
+        resp = self.client.post(reverse('sale-list'), body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        return resp.json()['id']
+
+    def _account_for(self, method):
+        return {
+            'cash': self.cashbox, 'card': self.card_acct, 'wallet': self.wallet_acct,
+        }[method]
+
+    def _assert_finance_void(self, method):
+        account = self._account_for(method)
+        sale_id = self._post_sale(method)
+        self.assertEqual(
+            account_service.get_account_current_balance(account), Decimal('20.00'))
+
+        void = self.client.post(reverse('sale-void-pk', args=[sale_id]),
+                                {'reason': 'customer changed mind'}, format='json')
+        self.assertEqual(void.status_code, status.HTTP_200_OK, void.content)
+
+        # Balance reversed; both rows (original debit + compensating credit) kept.
+        self.assertEqual(
+            account_service.get_account_current_balance(account), Decimal('0.00'))
+        rows = FinancialAccountMovement.objects.filter(account=account).order_by('id')
+        self.assertEqual(rows.count(), 2)
+        self.assertEqual(rows[0].debit,  Decimal('20.00'))
+        self.assertEqual(rows[1].credit, Decimal('20.00'))
+        self.assertEqual(rows[1].movement_type,
+                         FinancialAccountMovement.MovementType.SALES_RETURN_OUT)
+        self.assertEqual(rows[1].source_document_type, 'sale_void')
+        self.assertEqual(rows[1].source_document_id, sale_id)
+
+        # Stock restored.
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, Decimal('100.000'))
+
+        # Response carries the reversal references.
+        body = void.json()['void']
+        self.assertFalse(body['legacy_no_financial_movement'])
+        self.assertEqual(len(body['finance_reversals']), 1)
+        self.assertEqual(body['reason'], 'customer changed mind')
+
+        # AuditLog entry with actor + reason.
+        from pos.models import AuditLog
+        log = AuditLog.objects.get(model_name='sale', object_id=sale_id)
+        self.assertEqual(log.action, AuditLog.Action.VOID)
+        self.assertEqual(log.user_id, self.cashier.id)
+        self.assertEqual(log.reason, 'customer changed mind')
+
+    def test_void_cash_sale_reverses_cashbox_and_stock(self):
+        self._assert_finance_void('cash')
+
+    def test_void_card_sale_reverses_card_settlement_and_stock(self):
+        self._assert_finance_void('card')
+
+    def test_void_wallet_sale_reverses_wallet_and_stock(self):
+        self._assert_finance_void('wallet')
+
+    def test_void_credit_sale_reverses_customer_ar_and_stock(self):
+        sale_id = self._post_sale('credit', customer=self.customer.id)
+        self.assertEqual(
+            customer_ar_service.get_customer_balance(self.customer), Decimal('20.00'))
+
+        void = self.client.post(reverse('sale-void-pk', args=[sale_id]))
+        self.assertEqual(void.status_code, status.HTTP_200_OK, void.content)
+
+        self.assertEqual(
+            customer_ar_service.get_customer_balance(self.customer), Decimal('0.00'))
+        rows = CustomerARMovement.objects.filter(customer=self.customer).order_by('id')
+        self.assertEqual(rows.count(), 2)
+        self.assertEqual(rows[1].credit, Decimal('20.00'))
+        self.assertEqual(rows[1].movement_type,
+                         CustomerARMovement.MovementType.SALES_RETURN)
+        self.assertEqual(rows[1].source_document_type, 'sale_void')
+        self.assertEqual(len(void.json()['void']['ar_reversals']), 1)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, Decimal('100.000'))
+
+    def test_void_legacy_sale_without_financial_movement_does_not_crash(self):
+        """A pre-gate sale that never posted a GL row voids gracefully:
+        stock is restored, no reversal row is invented, response is flagged."""
+        sale = Sale.objects.create(
+            tenant=self.tenant, branch=self.branch, cashier=self.cashier,
+            subtotal=Decimal('20.00'), tax_amount=Decimal('0.00'),
+            total=Decimal('20.00'), method='cash',
+            paid=Decimal('20.00'), change=Decimal('0.00'),
+        )
+        SaleItem.objects.create(
+            sale=sale, product=self.product, product_name=self.product.name,
+            barcode=self.product.barcode or '', qty=Decimal('2'),
+            price_each=Decimal('10.00'), line_total=Decimal('20.00'),
+            unit_cost=Decimal('6.00'),
+        )
+
+        void = self.client.post(reverse('sale-void-pk', args=[sale.id]))
+        self.assertEqual(void.status_code, status.HTTP_200_OK, void.content)
+        body = void.json()['void']
+        self.assertTrue(body['legacy_no_financial_movement'])
+        self.assertEqual(body['finance_reversals'], [])
+        self.assertEqual(FinancialAccountMovement.objects.count(), 0)
+        # Stock restored (+2 over the fixture's 100 — the legacy sale row
+        # never deducted through the API in this synthetic setup).
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, Decimal('102.000'))
+
+    def test_second_void_returns_400_and_does_not_double_reverse(self):
+        sale_id = self._post_sale('cash')
+        first = self.client.post(reverse('sale-void-pk', args=[sale_id]))
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+
+        second = self.client.post(reverse('sale-void-pk', args=[sale_id]))
+        self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # Exactly one reversal row; balance stays reversed once.
+        self.assertEqual(
+            FinancialAccountMovement.objects.filter(
+                source_document_type='sale_void', source_document_id=sale_id,
+            ).count(), 1)
+        self.assertEqual(
+            account_service.get_account_current_balance(self.cashbox), Decimal('0.00'))
+
+    def test_repeated_void_with_same_idempotency_key_replays(self):
+        sale_id = self._post_sale('cash')
+        url = reverse('sale-void-pk', args=[sale_id])
+
+        r1 = self.client.post(url, {}, format='json', HTTP_IDEMPOTENCY_KEY='void-k1')
+        self.assertEqual(r1.status_code, status.HTTP_200_OK, r1.content)
+        r2 = self.client.post(url, {}, format='json', HTTP_IDEMPOTENCY_KEY='void-k1')
+        self.assertEqual(r2.status_code, status.HTTP_200_OK, r2.content)
+        self.assertEqual(r1.json(), r2.json())
+
+        # Replay, not re-processing: still exactly one reversal.
+        self.assertEqual(
+            FinancialAccountMovement.objects.filter(
+                source_document_type='sale_void', source_document_id=sale_id,
+            ).count(), 1)
+
+
+class GateASaleIdempotencyTests(_SalePostingTestBase):
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.cashier)
+
+    def test_same_key_same_payload_replays_without_second_sale(self):
+        body = self._sale_body('cash')
+        r1 = self.client.post(reverse('sale-list'), body, format='json',
+                              HTTP_IDEMPOTENCY_KEY='sale-k1')
+        self.assertEqual(r1.status_code, status.HTTP_201_CREATED, r1.content)
+        r2 = self.client.post(reverse('sale-list'), body, format='json',
+                              HTTP_IDEMPOTENCY_KEY='sale-k1')
+        self.assertEqual(r2.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(r1.json()['id'], r2.json()['id'])
+        self.assertEqual(Sale.objects.filter(tenant=self.tenant).count(), 1)
+        # Stock deducted exactly once.
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, Decimal('98.000'))
+
+    def test_same_key_different_payload_conflicts_409(self):
+        r1 = self.client.post(reverse('sale-list'), self._sale_body('cash'),
+                              format='json', HTTP_IDEMPOTENCY_KEY='sale-k2')
+        self.assertEqual(r1.status_code, status.HTTP_201_CREATED)
+        other = self._sale_body('cash')
+        other['items'][0]['qty'] = '3'
+        other['amount_paid'] = '30.00'
+        r2 = self.client.post(reverse('sale-list'), other, format='json',
+                              HTTP_IDEMPOTENCY_KEY='sale-k2')
+        self.assertEqual(r2.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(r2.json()['error']['code'], 'IDEMPOTENCY_CONFLICT')
+        self.assertEqual(Sale.objects.filter(tenant=self.tenant).count(), 1)
+
+    def test_no_key_processes_normally(self):
+        for _ in range(2):
+            resp = self.client.post(
+                reverse('sale-list'), self._sale_body('cash'), format='json')
+            self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Sale.objects.filter(tenant=self.tenant).count(), 2)
+
+
+class GateACreditLimitTests(_SalePostingTestBase):
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.cashier)
+
+    def _credit_body(self):
+        body = self._sale_body('credit', customer=self.customer.id)
+        body.pop('amount_paid', None)
+        return body
+
+    def test_credit_sale_within_limit_passes(self):
+        Customer.objects.filter(pk=self.customer.pk).update(credit_limit=Decimal('30.00'))
+        resp = self.client.post(reverse('sale-list'), self._credit_body(), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        self.assertEqual(
+            customer_ar_service.get_customer_balance(self.customer), Decimal('20.00'))
+
+    def test_credit_sale_exceeding_limit_fails_with_structured_error(self):
+        Customer.objects.filter(pk=self.customer.pk).update(credit_limit=Decimal('30.00'))
+        # First sale takes the balance to 20; the second (20 more) breaches 30.
+        self.assertEqual(
+            self.client.post(reverse('sale-list'), self._credit_body(),
+                             format='json').status_code,
+            status.HTTP_201_CREATED)
+        self.customer.refresh_from_db()
+
+        resp = self.client.post(reverse('sale-list'), self._credit_body(), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
+        data = resp.json()
+        self.assertIn('credit_limit_exceeded', data['code'])
+        self.assertEqual(data['credit_limit'][0], '30.00')
+        self.assertEqual(data['current_balance'][0], '20.00')
+
+        # Rollback — balance unchanged, only the first sale exists.
+        self.assertEqual(
+            customer_ar_service.get_customer_balance(self.customer), Decimal('20.00'))
+        self.assertEqual(Sale.objects.filter(tenant=self.tenant).count(), 1)
+
+    def test_credit_limit_zero_means_unlimited(self):
+        # Fixture default is 0 → unlimited.
+        for _ in range(3):
+            resp = self.client.post(
+                reverse('sale-list'), self._credit_body(), format='json')
+            self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        self.assertEqual(
+            customer_ar_service.get_customer_balance(self.customer), Decimal('60.00'))
+
+
+class GateADefaultRouteUniquenessTests(_SalePostingTestBase):
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.manager)
+
+    def test_second_active_default_of_same_method_type_is_rejected(self):
+        second_pm = PaymentMethod.objects.create(
+            tenant=self.tenant, name='Cash Drawer 2',
+            method_type=PaymentMethod.MethodType.CASH)
+        resp = self.client.post(
+            reverse('branch-payment-method-list', kwargs={'branch_pk': self.branch.pk}),
+            {
+                'payment_method': second_pm.id,
+                'destination_account': self.cashbox.id,
+                'is_default': True,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
+        self.assertIn('is_default', resp.json())
+
+    def test_second_route_of_same_type_allowed_when_not_default(self):
+        second_pm = PaymentMethod.objects.create(
+            tenant=self.tenant, name='Cash Drawer 2',
+            method_type=PaymentMethod.MethodType.CASH)
+        resp = self.client.post(
+            reverse('branch-payment-method-list', kwargs={'branch_pk': self.branch.pk}),
+            {
+                'payment_method': second_pm.id,
+                'destination_account': self.cashbox.id,
+                'is_default': False,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+
+    def test_resolver_is_deterministic_for_bad_legacy_data(self):
+        """Two active defaults (pre-gate bad data, bypassing the serializer)
+        resolve to the newest row, not arbitrary DB order."""
+        second_pm = PaymentMethod.objects.create(
+            tenant=self.tenant, name='Cash Drawer 2',
+            method_type=PaymentMethod.MethodType.CASH)
+        newest = BranchPaymentMethod.objects.create(
+            tenant=self.tenant, branch=self.branch, payment_method=second_pm,
+            destination_account=self.cashbox, is_default=True, is_active=True)
+
+        resolved = sale_posting.resolve_branch_payment_method(
+            tenant=self.tenant, branch=self.branch, method='cash')
+        self.assertEqual(resolved.pk, newest.pk)
+
+
+class GateABackfillMigrationTests(APITestCase):
+    """The 0017 data migration provisions default routing for legacy branches,
+    is idempotent, skips configured branches, and demotes duplicate defaults."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.mig = import_module(
+            'accounts.migrations.0017_backfill_branch_payment_routing')
+
+    def test_backfill_provisions_default_routing_and_is_idempotent(self):
+        tenant = Tenant.objects.create(name='Legacy Tenant')
+        branch = Branch.objects.create(tenant=tenant, name='Legacy Branch')
+
+        self.mig.backfill_routing(django_apps, None)
+
+        rows = BranchPaymentMethod.objects.filter(branch=branch).select_related(
+            'payment_method', 'destination_account')
+        self.assertEqual(rows.count(), 3)
+        wiring = {
+            r.payment_method.method_type: r.destination_account.account_type
+            for r in rows
+        }
+        self.assertEqual(wiring, {
+            'cash': 'cashbox', 'card': 'card_settlement', 'wallet': 'wallet',
+        })
+        self.assertTrue(all(r.is_default and r.is_active for r in rows))
+
+        # Second run: no duplicates.
+        self.mig.backfill_routing(django_apps, None)
+        self.assertEqual(BranchPaymentMethod.objects.filter(branch=branch).count(), 3)
+
+    def test_backfill_reuses_existing_accounts_and_methods(self):
+        tenant = Tenant.objects.create(name='Partially Setup Tenant')
+        branch = Branch.objects.create(tenant=tenant, name='B')
+        existing_cashbox = FinancialAccount.objects.create(
+            tenant=tenant, name='My Cashbox',
+            account_type=FinancialAccount.AccountType.CASHBOX)
+
+        self.mig.backfill_routing(django_apps, None)
+
+        cash_route = BranchPaymentMethod.objects.get(
+            branch=branch, payment_method__method_type='cash')
+        self.assertEqual(cash_route.destination_account_id, existing_cashbox.id)
+
+    def test_backfill_skips_configured_branch(self):
+        tenant = Tenant.objects.create(name='Configured Tenant')
+        branch = Branch.objects.create(tenant=tenant, name='C')
+        acct = FinancialAccount.objects.create(
+            tenant=tenant, name='CB',
+            account_type=FinancialAccount.AccountType.CASHBOX)
+        pm = PaymentMethod.objects.create(
+            tenant=tenant, name='Cash', method_type='cash')
+        BranchPaymentMethod.objects.create(
+            tenant=tenant, branch=branch, payment_method=pm,
+            destination_account=acct, is_default=True, is_active=True)
+
+        self.mig.backfill_routing(django_apps, None)
+        self.assertEqual(BranchPaymentMethod.objects.filter(branch=branch).count(), 1)
+
+    def test_demote_duplicate_defaults_keeps_newest(self):
+        tenant = Tenant.objects.create(name='Dup Tenant')
+        branch = Branch.objects.create(tenant=tenant, name='D')
+        acct = FinancialAccount.objects.create(
+            tenant=tenant, name='CB',
+            account_type=FinancialAccount.AccountType.CASHBOX)
+        pm1 = PaymentMethod.objects.create(tenant=tenant, name='Cash 1', method_type='cash')
+        pm2 = PaymentMethod.objects.create(tenant=tenant, name='Cash 2', method_type='cash')
+        older = BranchPaymentMethod.objects.create(
+            tenant=tenant, branch=branch, payment_method=pm1,
+            destination_account=acct, is_default=True, is_active=True)
+        newer = BranchPaymentMethod.objects.create(
+            tenant=tenant, branch=branch, payment_method=pm2,
+            destination_account=acct, is_default=True, is_active=True)
+
+        self.mig.demote_duplicate_defaults(django_apps, None)
+
+        older.refresh_from_db()
+        newer.refresh_from_db()
+        self.assertFalse(older.is_default)
+        self.assertTrue(newer.is_default)

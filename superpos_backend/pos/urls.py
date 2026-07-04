@@ -18,7 +18,7 @@ urlpatterns = [
     path('products/<int:pk>/stock-movements/', views.ProductStockMovementListView.as_view(), name='product-stock-movements'),
     path('products/<int:pk>/stock-balance/',   views.ProductStockBalanceView.as_view(),      name='product-stock-balance'),
     # Phase 1.5 Slice J — per-warehouse balances for one product (read-only).
-    path('products/<int:pk>/warehouse-stock/', views.ProductWarehouseStockView.as_view(),    name='product-warehouse-stock'),
+    path('products/<int:pk>/warehouse-stocks/', views.ProductWarehouseStockView.as_view(),    name='product-warehouse-stock'),
 
     # Inventory — batches (CRUD)
     path('inventory/batches/',          views.InventoryBatchListCreateView.as_view(), name='batch-list'),

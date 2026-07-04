@@ -1,13 +1,30 @@
+import os
 from pathlib import Path
 from datetime import timedelta
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = 'django-insecure-04=$d_(0!%!7z34#j4wr@f@kq-1r-@8t7s6(e)9lcavnz%g0%q'
+# ── Environment-driven config ────────────────────────────────────────────────
+# Defaults keep local dev / CI working with zero setup. Production MUST set:
+#   DJANGO_SECRET_KEY, DJANGO_DEBUG=false, DJANGO_ALLOWED_HOSTS,
+#   POSTGRES_PASSWORD (+ the other POSTGRES_* if they differ),
+#   CORS_ALLOWED_ORIGINS. See .env.example at the backend root.
 
-DEBUG = True
+def _env_bool(name: str, default: bool) -> bool:
+    return os.environ.get(name, str(default)).strip().lower() in ('1', 'true', 'yes', 'on')
 
-ALLOWED_HOSTS = ['*']
+def _env_list(name: str, default: str) -> list[str]:
+    return [x.strip() for x in os.environ.get(name, default).split(',') if x.strip()]
+
+SECRET_KEY = os.environ.get(
+    'DJANGO_SECRET_KEY',
+    # Dev-only fallback. Never rely on it outside localhost.
+    'django-insecure-04=$d_(0!%!7z34#j4wr@f@kq-1r-@8t7s6(e)9lcavnz%g0%q',
+)
+
+DEBUG = _env_bool('DJANGO_DEBUG', True)
+
+ALLOWED_HOSTS = _env_list('DJANGO_ALLOWED_HOSTS', '*' if DEBUG else 'localhost,127.0.0.1')
 
 # ── Apps ─────────────────────────────────────────────────────────────────────
 
@@ -72,11 +89,11 @@ WSGI_APPLICATION = 'superpos_backend.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'superpos',
-        'USER': 'postgres',
-        'PASSWORD': 'K2362003k',
-        'HOST': 'localhost',
-        'PORT': '5432',
+        'NAME': os.environ.get('POSTGRES_DB', 'superpos'),
+        'USER': os.environ.get('POSTGRES_USER', 'postgres'),
+        'PASSWORD': os.environ.get('POSTGRES_PASSWORD', 'K2362003k'),
+        'HOST': os.environ.get('POSTGRES_HOST', 'localhost'),
+        'PORT': os.environ.get('POSTGRES_PORT', '5432'),
     }
 }
 
@@ -117,8 +134,15 @@ MEDIA_URL  = 'media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
+# Production: set CORS_ALLOWED_ORIGINS (comma-separated, with scheme) to the
+# frontend origin(s); the allow-all fallback is for local dev only.
 
-CORS_ALLOW_ALL_ORIGINS = True
+_cors_origins = _env_list('CORS_ALLOWED_ORIGINS', '')
+if _cors_origins:
+    CORS_ALLOW_ALL_ORIGINS = False
+    CORS_ALLOWED_ORIGINS = _cors_origins
+else:
+    CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
 
 # ── Django REST Framework ─────────────────────────────────────────────────────
