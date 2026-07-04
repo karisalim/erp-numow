@@ -1,24 +1,41 @@
 import { create } from 'zustand';
 import type { CartItem, Product, CompletedTransaction } from '../types';
 
+export type PosPaymentMode = 'choose' | 'cash' | 'card' | 'wallet' | 'credit' | null;
+export type PosDiscountType = 'percent' | 'fixed';
+
+/** Minimal customer snapshot attached to the running sale. */
+export interface PosCustomer {
+  id: number;
+  name: string;
+  credit_limit: string;
+}
+
 interface PosState {
   cart: CartItem[];
   barcode: string;
-  paymentMode: 'choose' | 'cash' | 'card' | null;
+  paymentMode: PosPaymentMode;
   lineCounter: number;
   flashId: string | null;
   error: string | null;
   receiptTxn: CompletedTransaction | null;
+  /** Selected customer (null = walk-in). Required for credit sales. */
+  customer: PosCustomer | null;
+  /** Invoice-level discount (mirrors backend discount_type/discount_value). */
+  discountType: PosDiscountType | null;
+  discountValue: number;
 
   addItem: (product: Product, qty?: number) => void;
   removeItem: (lineId: string) => void;
   updateQty: (lineId: string, delta: number) => void;
   clearCart: () => void;
   setBarcode: (value: string) => void;
-  setPaymentMode: (mode: 'choose' | 'cash' | 'card' | null) => void;
+  setPaymentMode: (mode: PosPaymentMode) => void;
   setError: (msg: string | null) => void;
   setFlashId: (id: string | null) => void;
   setReceiptTxn: (txn: CompletedTransaction | null) => void;
+  setCustomer: (customer: PosCustomer | null) => void;
+  setDiscount: (type: PosDiscountType | null, value: number) => void;
 }
 
 function playBeep() {
@@ -45,6 +62,9 @@ export const usePosStore = create<PosState>((set, get) => ({
   flashId: null,
   error: null,
   receiptTxn: null,
+  customer: null,
+  discountType: null,
+  discountValue: 0,
 
   addItem: (product: Product, qty = 1) => {
     const { cart, lineCounter } = get();
@@ -90,7 +110,8 @@ export const usePosStore = create<PosState>((set, get) => ({
   },
 
   clearCart: () => {
-    set({ cart: [], barcode: '' });
+    // A new sale starts clean: no carried-over customer or discount.
+    set({ cart: [], barcode: '', customer: null, discountType: null, discountValue: 0 });
   },
 
   setBarcode: (value: string) => set({ barcode: value }),
@@ -105,4 +126,9 @@ export const usePosStore = create<PosState>((set, get) => ({
   setFlashId: (id) => set({ flashId: id }),
 
   setReceiptTxn: (txn) => set({ receiptTxn: txn }),
+
+  setCustomer: (customer) => set({ customer }),
+
+  setDiscount: (type, value) =>
+    set({ discountType: type, discountValue: type ? Math.max(0, value) : 0 }),
 }));

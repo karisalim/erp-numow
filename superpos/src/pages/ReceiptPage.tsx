@@ -94,7 +94,7 @@ export const ReceiptPage: React.FC = () => {
     <div className="flex-1 flex flex-col min-h-0 bg-neutral-100">
       <Header
         title="Receipt preview"
-        subtitle={`Transaction #${shortId} · ${txn.offline ? 'Stored offline' : 'Synced'}`}
+        subtitle={`Transaction #${shortId}`}
         right={
           <Button variant="ghost" size="sm" onClick={handleDone}>
             <Icon name="x" size={14} /> Close
@@ -168,20 +168,40 @@ export const ReceiptPage: React.FC = () => {
                 {showTax && (
                   <div className="flex justify-between"><span>VAT</span><span>{txn.tax.toFixed(2)}</span></div>
                 )}
+                {(txn.discount ?? 0) > 0 && (
+                  <div className="flex justify-between"><span>Discount</span><span>-{(txn.discount ?? 0).toFixed(2)}</span></div>
+                )}
                 <div className="flex justify-between font-bold text-[14px] pt-1">
                   <span>TOTAL</span><span>{money(txn.total, currency)}</span>
                 </div>
               </div>
               <div className="dashed" />
               <div className="text-[12px]">
-                <div className="flex justify-between">
-                  <span>Paid ({txn.method.toUpperCase()})</span>
-                  <span>{txn.paid.toFixed(2)}</span>
-                </div>
-                {txn.method === 'cash' && (
-                  <div className="flex justify-between">
-                    <span>Change</span><span>{txn.change.toFixed(2)}</span>
-                  </div>
+                {txn.method === 'credit' ? (
+                  <>
+                    <div className="flex justify-between font-bold">
+                      <span>ON CREDIT</span>
+                      <span>{txn.total.toFixed(2)}</span>
+                    </div>
+                    {txn.customer_name && (
+                      <div className="flex justify-between">
+                        <span>Customer</span><span>{txn.customer_name}</span>
+                      </div>
+                    )}
+                    <div className="text-[11px] text-[#666]">Added to customer balance — payable later</div>
+                  </>
+                ) : (
+                  <>
+                    <div className="flex justify-between">
+                      <span>Paid ({txn.method.toUpperCase()})</span>
+                      <span>{txn.paid.toFixed(2)}</span>
+                    </div>
+                    {txn.method === 'cash' && (
+                      <div className="flex justify-between">
+                        <span>Change</span><span>{txn.change.toFixed(2)}</span>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
               <div className="dashed" />
@@ -247,6 +267,12 @@ export const ReceiptPage: React.FC = () => {
                   <span className="text-neutral-500">Method</span>
                   <span className="font-semibold capitalize">{txn.method}</span>
                 </div>
+                {txn.customer_name && (
+                  <div className="flex justify-between">
+                    <span className="text-neutral-500">Customer</span>
+                    <span className="font-semibold">{txn.customer_name}</span>
+                  </div>
+                )}
                 <div className="flex justify-between">
                   <span className="text-neutral-500">Total</span>
                   <span className="font-mono tabular-nums font-semibold">{money(txn.total, currency)}</span>
@@ -255,6 +281,12 @@ export const ReceiptPage: React.FC = () => {
                   <div className="flex justify-between">
                     <span className="text-neutral-500">Change</span>
                     <span className="font-mono tabular-nums">{money(txn.change, currency)}</span>
+                  </div>
+                )}
+                {txn.method === 'credit' && (
+                  <div className="flex justify-between">
+                    <span className="text-neutral-500">Payment</span>
+                    <span className="font-semibold text-warn-700">On customer balance</span>
                   </div>
                 )}
               </div>

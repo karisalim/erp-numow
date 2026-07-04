@@ -441,7 +441,7 @@ export const SalesPage: React.FC = () => {
             </button>
           </div>
           <select value={method} onChange={(e) => setMethod(e.target.value)} className="h-10 px-3 rounded-md border border-neutral-300 bg-white text-[14px] focus-ring">
-            <option>All</option><option>Cash</option><option>Card</option><option>Wallet</option>
+            <option>All</option><option>Cash</option><option>Card</option><option>Wallet</option><option>Credit</option>
           </select>
           {!isCashier && (
             <select value={cashier} onChange={(e) => setCashier(e.target.value)} className="h-10 px-3 rounded-md border border-neutral-300 bg-white text-[14px] focus-ring">

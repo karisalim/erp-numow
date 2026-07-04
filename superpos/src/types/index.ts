@@ -1,7 +1,7 @@
 export type BadgeKind = 'gray' | 'success' | 'danger' | 'warn' | 'info' | 'brand' | 'violet';
 export type ButtonVariant = 'primary' | 'secondary' | 'tertiary' | 'ghost' | 'danger' | 'success' | 'dark';
 export type ButtonSize = 'sm' | 'md' | 'lg' | 'xl';
-export type PaymentMethod = 'cash' | 'card' | 'wallet';
+export type PaymentMethod = 'cash' | 'card' | 'wallet' | 'credit';
 export type UserRole = 'Owner' | 'Admin' | 'Manager' | 'Cashier';
 
 /**
@@ -111,6 +111,8 @@ export interface CompletedTransaction {
   subtotal: number;
   tax: number;                            // legacy field used by ReceiptPage; backend = tax_amount
   tax_amount?: number;
+  /** Backend-computed invoice discount (subtotal + tax − total when > 0). */
+  discount?: number;
   total: number;
   method: PaymentMethod;
   paid: number;
@@ -118,6 +120,8 @@ export interface CompletedTransaction {
   ts: Date;
   cashier: string;
   terminal: string;
+  /** Present on credit sales — who owes the balance. */
+  customer_name?: string;
   offline: boolean;
 }
 

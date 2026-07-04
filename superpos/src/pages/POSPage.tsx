@@ -14,6 +14,8 @@ import { BarcodeInput } from '../components/pos/BarcodeInput';
 import { QuickProductCard } from '../components/pos/QuickProductCard';
 import { CartLine } from '../components/pos/CartLine';
 import { PaymentModal } from '../components/pos/PaymentModal';
+import { CustomerSelectModal } from '../components/pos/CustomerSelectModal';
+import { DiscountModal } from '../components/pos/DiscountModal';
 import { Button } from '../components/ui/Button';
 import { Badge } from '../components/ui/Badge';
 import { Card } from '../components/ui/Card';
@@ -37,7 +39,7 @@ interface SaleResponseDto {
   total: string | number;
   paid: string | number;
   change: string | number;
-  method: 'cash' | 'card' | 'wallet';
+  method: 'cash' | 'card' | 'wallet' | 'credit';
   offline?: boolean;
   status: string;
   created_at?: string;
@@ -67,14 +69,18 @@ export const POSPage: React.FC = () => {
 
   const {
     cart, barcode, paymentMode, flashId, error,
+    customer, discountType, discountValue,
     addItem, removeItem, updateQty, clearCart,
     setBarcode, setPaymentMode, setError, setReceiptTxn,
+    setCustomer, setDiscount,
   } = usePosStore();
 
   const online = useAppStore((s) => s.online);
 
   const [editing, setEditing]             = useState<string | null>(null);
   const [activeCategory, setActiveCategory] = useState('All');
+  const [customerModal, setCustomerModal] = useState(false);
+  const [discountModal, setDiscountModal] = useState(false);
 
   // ── Server-driven Quick Grid + Categories ───────────────────────────────
   const [quickGrid, setQuickGrid]   = useState<Product[]>([]);
@@ -137,7 +143,29 @@ export const POSPage: React.FC = () => {
     () => cart.reduce((s, x) => s + x.qty * Number(x.price) * Number(x.tax ?? x.tax_rate ?? 0), 0),
     [cart],
   );
-  const total = subtotal + tax;
+  // Mirror the backend discount rule exactly: percent applies to the
+  // pre-tax subtotal; fixed subtracts from the invoice total.
+  const discountAmount = useMemo(() => {
+    if (discountType === 'percent') return (subtotal * discountValue) / 100;
+    if (discountType === 'fixed') return discountValue;
+    return 0;
+  }, [discountType, discountValue, subtotal]);
+  const total = Math.max(0, subtotal + tax - discountAmount);
+
+  /* ─── Keyboard shortcuts: F2 discount, F8 payment ─────────────────────── */
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'F2') {
+        e.preventDefault();
+        if (cart.length > 0) setDiscountModal(true);
+      } else if (e.key === 'F8') {
+        e.preventDefault();
+        if (cart.length > 0) setPaymentMode('choose');
+      }
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [cart.length, setPaymentMode]);
 
   /* ─── Quick grid filter (client-side over the fetched 8) ──────────────── */
   const filteredGrid = useMemo(() => {
@@ -226,7 +254,7 @@ export const POSPage: React.FC = () => {
 
   /* ─── Sale completion: POST /sales/ with the cart ─────────────────────── */
   // Third arg (client-computed change) is ignored — the backend recomputes it.
-  const completeSale = async (method: 'cash' | 'card' | 'wallet', paid: number, _change: number) => {
+  const completeSale = async (method: 'cash' | 'card' | 'wallet' | 'credit', paid: number, _change: number) => {
     void _change;
     if (saleLoading) return;
     setSaleError(null);
@@ -242,6 +270,11 @@ export const POSPage: React.FC = () => {
       paid: Number(Number(paid).toFixed(2)),
       items,
     };
+    if (customer) body.customer = customer.id;
+    if (discountType && discountValue > 0) {
+      body.discount_type = discountType;
+      body.discount_value = Number(discountValue.toFixed(2));
+    }
 
     if (!idemKeyRef.current) idemKeyRef.current = crypto.randomUUID();
 
@@ -252,6 +285,10 @@ export const POSPage: React.FC = () => {
       });
       idemKeyRef.current = null;
 
+      // Invoice discount from the backend's own numbers, so the receipt
+      // matches the posted document exactly.
+      const backendDiscount = +(Number(data.subtotal) + Number(data.tax_amount) - Number(data.total)).toFixed(2);
+
       const txn: CompletedTransaction = {
         id:         data.sale_uuid ?? `SALE-${data.id}`,
         sale_uuid:  data.sale_uuid,
@@ -259,6 +296,7 @@ export const POSPage: React.FC = () => {
         subtotal:   Number(data.subtotal),
         tax:        Number(data.tax_amount),
         tax_amount: Number(data.tax_amount),
+        discount:   backendDiscount > 0 ? backendDiscount : undefined,
         total:      Number(data.total),
         method:     data.method,
         paid:       Number(data.paid),
@@ -266,6 +304,7 @@ export const POSPage: React.FC = () => {
         ts:         data.created_at ? new Date(data.created_at) : new Date(),
         cashier:    data.cashier_name || user?.name || 'Cashier',
         terminal:   data.terminal_name || user?.terminal_name || 'POS-01',
+        customer_name: customer?.name,
         offline:    false,
       };
 
@@ -302,6 +341,14 @@ export const POSPage: React.FC = () => {
           // Same key, different payload — the original submit very likely
           // succeeded but its response was lost. Don't blind-retry.
           msg = 'This sale may have already been recorded. Check the Sales screen before retrying.';
+        } else if (typeof data?.payment === 'string' || Array.isArray(data?.payment)) {
+          // Ledger routing/config failure — the sale was rolled back.
+          const text = Array.isArray(data.payment) ? String(data.payment[0]) : String(data.payment);
+          msg = `Payment routing error — the sale was NOT recorded: ${text} ` +
+            'A manager can fix this under Finance → Branch routing.';
+        } else if (Array.isArray(data?.code) ? data.code[0] === 'credit_limit_exceeded' : data?.code === 'credit_limit_exceeded') {
+          const detail = Array.isArray(data?.customer) ? String(data.customer[0]) : 'Credit limit exceeded.';
+          msg = `${detail} The sale was not recorded.`;
         } else if (typeof data?.detail === 'string') {
           msg = data.detail;
         } else if (data && typeof data === 'object') {
@@ -335,9 +382,9 @@ export const POSPage: React.FC = () => {
       />
       {!online && <OfflineBanner />}
 
-      <div className="flex-1 grid grid-cols-12 gap-5 p-5 min-h-0 bg-neutral-100">
+      <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-5 p-5 min-h-0 bg-neutral-100 overflow-y-auto lg:overflow-hidden">
         {/* LEFT — Scan + Quick grid */}
-        <section className="col-span-7 flex flex-col gap-5 min-h-0">
+        <section className="lg:col-span-7 flex flex-col gap-5 min-h-0">
           {/* Sale-level banners */}
           {saleError && (
             <div
@@ -461,7 +508,7 @@ export const POSPage: React.FC = () => {
         </section>
 
         {/* RIGHT — Cart */}
-        <aside className="col-span-5 flex flex-col min-h-0">
+        <aside className="lg:col-span-5 flex flex-col min-h-0">
           <Card className="flex-1 flex flex-col min-h-0 overflow-hidden">
             <div className="px-5 h-14 border-b border-neutral-200 flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -476,6 +523,43 @@ export const POSPage: React.FC = () => {
                   <Icon name="trash" size={14} /> Clear cart
                 </button>
               )}
+            </div>
+
+            {/* Customer + discount controls */}
+            <div className="px-5 py-2.5 border-b border-neutral-200 flex items-center gap-2 flex-wrap">
+              <button
+                onClick={() => setCustomerModal(true)}
+                className={`h-8 px-3 rounded-md border text-[12.5px] font-semibold inline-flex items-center gap-1.5 focus-ring
+                  ${customer
+                    ? 'bg-brand-50 border-brand-500/40 text-brand-700'
+                    : 'bg-white border-neutral-300 text-neutral-600 hover:bg-neutral-50'}`}
+              >
+                <Icon name="user" size={14} />
+                {customer ? customer.name : 'Customer: Walk-in'}
+              </button>
+              {customer && (
+                <button
+                  onClick={() => setCustomer(null)}
+                  aria-label="Clear customer"
+                  className="w-7 h-7 grid place-items-center rounded-md text-neutral-400 hover:bg-neutral-100 focus-ring"
+                >
+                  <Icon name="x" size={13} />
+                </button>
+              )}
+              <button
+                onClick={() => cart.length > 0 && setDiscountModal(true)}
+                disabled={cart.length === 0}
+                className={`h-8 px-3 rounded-md border text-[12.5px] font-semibold inline-flex items-center gap-1.5 focus-ring disabled:opacity-40
+                  ${discountType
+                    ? 'bg-warn-50 border-warn-500/40 text-warn-700'
+                    : 'bg-white border-neutral-300 text-neutral-600 hover:bg-neutral-50'}`}
+              >
+                <Icon name="tag" size={14} />
+                {discountType
+                  ? discountType === 'percent' ? `Discount ${discountValue}%` : `Discount ${money(discountValue)}`
+                  : 'Discount'}
+                <kbd className="ms-1 px-1 rounded border border-current/30 text-[10px] font-mono">F2</kbd>
+              </button>
             </div>
 
             <div className="flex-1 overflow-auto min-h-0">
@@ -522,8 +606,14 @@ export const POSPage: React.FC = () => {
                   <span className="font-mono tabular-nums">{money(tax)}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-neutral-600">Discount</span>
-                  <span className="font-mono tabular-nums text-neutral-400">—</span>
+                  <span className="text-neutral-600">
+                    Discount{discountType === 'percent' ? ` (${discountValue}%)` : ''}
+                  </span>
+                  {discountAmount > 0 ? (
+                    <span className="font-mono tabular-nums text-warn-700">−{money(discountAmount)}</span>
+                  ) : (
+                    <span className="font-mono tabular-nums text-neutral-400">—</span>
+                  )}
                 </div>
               </div>
               <div className="px-5 py-3 border-t border-neutral-200 flex items-center justify-between">
@@ -557,8 +647,28 @@ export const POSPage: React.FC = () => {
           mode={paymentMode}
           setMode={setPaymentMode}
           total={total}
+          customer={customer}
           onComplete={completeSale}
+          onSelectCustomer={() => { setPaymentMode(null); setCustomerModal(true); }}
           online={online}
+        />
+      )}
+
+      {customerModal && (
+        <CustomerSelectModal
+          current={customer}
+          onSelect={setCustomer}
+          onClose={() => setCustomerModal(false)}
+        />
+      )}
+
+      {discountModal && (
+        <DiscountModal
+          subtotal={subtotal}
+          currentType={discountType}
+          currentValue={discountValue}
+          onApply={setDiscount}
+          onClose={() => setDiscountModal(false)}
         />
       )}
     </div>

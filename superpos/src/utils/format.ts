@@ -22,7 +22,11 @@ export const stockLabel = (stock: number, reorder: number): { label: string; kin
 export const methodIcon = (method: string): string => {
   if (method === 'cash') return 'cash';
   if (method === 'card') return 'card';
-  return 'wallet';
+  if (method === 'wallet') return 'wallet';
+  if (method === 'credit') return 'user';
+  // Unknown methods get a neutral document icon — never a misleading
+  // wallet fallback (audit P2-15).
+  return 'doc';
 };
 
 /**
