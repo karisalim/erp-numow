@@ -91,7 +91,7 @@
       "wallet": "Digital wallet",
       "walletHint": "Vodafone Cash, Fawry, etc.",
       "terminalType": "Card terminal type",
-      "terminalHint": "Brand & model of the integrated POS terminal"
+      "terminalHint": "Label only — SuperPOS is not connected to the terminal; card payments are recorded manually after approval on the device."
     },
     "localization": {
       "language": "Language",
