@@ -16,6 +16,7 @@ import { Header } from '../components/layout/Header';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 import { Icon } from '../components/ui/Icon';
+import { ErrorState } from '../components/ui/states';
 
 /* ─────────────────────────────────────────────────────────────────────────────
  * Local primitives.
@@ -146,6 +147,8 @@ export const SettingsPage: React.FC = () => {
   const [logoFile, setLogoFile]       = useState<File | null>(null);
   const [logoPreview, setLogoPreview] = useState<string | null>(null);
   const [loading, setLoading]         = useState(true);
+  const [loadError, setLoadError]     = useState(false);
+  const [loadRetry, setLoadRetry]     = useState(0);
   const [saving,  setSaving]          = useState(false);
   const [toast,   setToast]           = useState<{ kind: 'success' | 'error'; msg: string } | null>(null);
   const [dirty,   setDirty]           = useState(false);
@@ -157,6 +160,7 @@ export const SettingsPage: React.FC = () => {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    setLoadError(false);
     apiClient.get<Partial<TenantSettings>>(SETTINGS_ENDPOINT)
       .then((res) => {
         if (cancelled) return;
@@ -165,11 +169,13 @@ export const SettingsPage: React.FC = () => {
       })
       .catch(() => {
         if (cancelled) return;
-        setToast({ kind: 'error', msg: t('settings.loadFailed') });
+        // Blocking state: editing defaults over unknown server settings and
+        // saving them back would silently wipe real configuration.
+        setLoadError(true);
       })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, []);
+  }, [loadRetry]);
 
   /* ─── Build object URL for the locally selected logo preview ──────────── */
   useEffect(() => {
@@ -639,6 +645,14 @@ export const SettingsPage: React.FC = () => {
         </div>
       )}
 
+      {loadError ? (
+        <div className="flex-1 grid place-items-center">
+          <ErrorState
+            message={t('settings.loadFailed')}
+            onRetry={() => setLoadRetry((n) => n + 1)}
+          />
+        </div>
+      ) : (
       <div className="flex-1 flex min-h-0 overflow-hidden">
         {/* ── Left rail: tabs ─────────────────────────────────────────────── */}
         <nav className="w-64 shrink-0 border-e border-neutral-200 bg-white px-3 py-5 overflow-y-auto">
@@ -675,6 +689,7 @@ export const SettingsPage: React.FC = () => {
           {tabBody}
         </div>
       </div>
+      )}
     </div>
   );
 };

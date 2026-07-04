@@ -14,6 +14,8 @@ export const initials = (name: string): string =>
     .join('');
 
 export const stockLabel = (stock: number, reorder: number): { label: string; kind: 'success' | 'warn' | 'danger' } => {
+  // Negative stock is a distinct critical state (oversold), never "Low".
+  if (stock < 0) return { label: 'Negative', kind: 'danger' };
   if (stock === 0) return { label: 'Out', kind: 'danger' };
   if (stock < reorder) return { label: 'Low', kind: 'warn' };
   return { label: 'In stock', kind: 'success' };

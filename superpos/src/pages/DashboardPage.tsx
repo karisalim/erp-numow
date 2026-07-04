@@ -215,7 +215,7 @@ export const DashboardPage: React.FC = () => {
         )}
 
         {/* KPI stats */}
-        <div className="grid grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
           {statCards.map((s) => (
             <Card key={s.label} className="p-5">
               <div className="flex items-start justify-between gap-3">
@@ -238,7 +238,7 @@ export const DashboardPage: React.FC = () => {
         </div>
 
         {/* Top products + low stock */}
-        <div className="grid grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           <Card className="col-span-2 overflow-hidden">
             <div className="px-5 h-14 border-b border-neutral-200 flex items-center justify-between">
               <h3 className="text-[15px] font-semibold">Top 10 products</h3>
@@ -322,7 +322,7 @@ export const DashboardPage: React.FC = () => {
         </div>
 
         {/* Payment methods */}
-        <div className="grid grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           <Card className="p-5 col-span-2">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-[15px] font-semibold">Payment methods</h3>

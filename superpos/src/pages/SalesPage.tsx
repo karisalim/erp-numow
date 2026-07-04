@@ -270,6 +270,8 @@ export const SalesPage: React.FC = () => {
   const [cashier,  setCashier]  = useState('All');
 
   const [sales,    setSales]    = useState<SaleRow[]>([]);
+  const [page,     setPage]     = useState(1);
+  const [count,    setCount]    = useState(0);
   const [loading,  setLoading]  = useState(false);
   const [error,    setError]    = useState<string | null>(null);
   const [open,     setOpen]     = useState<SaleRow | null>(null);
@@ -285,44 +287,54 @@ export const SalesPage: React.FC = () => {
     return () => clearTimeout(t);
   }, [toast]);
 
-  /* ─── Fetch sales whenever the date filters change ────────────────────── */
+  /* ─── Snap back to page 1 whenever a server-side filter changes ───────── */
+  useEffect(() => { setPage(1); }, [startDate, endDate, method]);
+
+  /* ─── Server-side fetch: dates + method are real backend filters, and
+     pagination is the backend's own page numbering (audit P1-09). ────────── */
+  const PAGE_SIZE = 20;
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
 
-    const params: Record<string, string> = {};
+    const params: Record<string, string> = { page: String(page), page_size: String(PAGE_SIZE) };
     if (startDate) params.start_date = startDate;
     if (endDate)   params.end_date   = endDate;
-    // Server caps page size at 20 by default; ask for a larger page for the table.
-    params.page_size = '100';
+    if (method !== 'All') params.method = method.toLowerCase();
 
     apiClient.get<PaginatedResponse<SaleRow> | SaleRow[]>('/sales/', { params })
       .then((res) => {
         if (cancelled) return;
-        const rows = Array.isArray(res.data) ? res.data : (res.data?.results ?? []);
-        setSales(rows);
+        if (Array.isArray(res.data)) {
+          setSales(res.data);
+          setCount(res.data.length);
+        } else {
+          setSales(res.data?.results ?? []);
+          setCount(res.data?.count ?? 0);
+        }
       })
       .catch((err) => {
         if (cancelled) return;
         let msg = 'Failed to load sales.';
-        if (err instanceof AxiosError && typeof err.response?.data?.detail === 'string') {
-          msg = err.response.data.detail;
+        if (err instanceof AxiosError) {
+          if (err.response?.status === 403) msg = 'You do not have permission to view sales.';
+          else if (typeof err.response?.data?.detail === 'string') msg = err.response.data.detail;
         }
         setError(msg);
         setSales([]);
+        setCount(0);
       })
       .finally(() => { if (!cancelled) setLoading(false); });
 
     return () => { cancelled = true; };
-  }, [startDate, endDate]);
+  }, [startDate, endDate, method, page]);
 
-  /* ─── Local refinement: method, cashier, free-text search ─────────────── */
+  /* ─── Local refinement over the current page only: cashier + search ────── */
   const filtered = useMemo(() => sales.filter((t) =>
-    (method === 'All' || t.method === method.toLowerCase()) &&
     (cashier === 'All' || t.cashier_name === cashier) &&
     (!q || shortId(t).toLowerCase().includes(q.toLowerCase()) || t.cashier_name.toLowerCase().includes(q.toLowerCase()))
-  ), [sales, method, cashier, q]);
+  ), [sales, cashier, q]);
 
   /* Unique cashier names from the fetched window — feeds the cashier filter. */
   const cashierOptions = useMemo(() => {
@@ -342,10 +354,10 @@ export const SalesPage: React.FC = () => {
     const fmtMoney = (n: number) => `${currency} ${n.toFixed(2)}`;
 
     return [
-      { l: 'Revenue (range)',  v: fmtMoney(totalRev), s: `${txnCount} transactions` },
-      { l: 'Transactions',     v: String(txnCount),   s: `${itemsSold} items sold` },
-      { l: 'Avg transaction',  v: fmtMoney(avgTxn),   s: `over ${txnCount || 0} sales` },
-      { l: 'Voided / refunded', v: String(sales.length - completed.length), s: 'in current range' },
+      { l: 'Revenue (this page)',  v: fmtMoney(totalRev), s: `${txnCount} completed on page` },
+      { l: 'Transactions (page)',  v: String(txnCount),   s: `${itemsSold} items sold` },
+      { l: 'Avg transaction',      v: fmtMoney(avgTxn),   s: `over ${txnCount || 0} sales on page` },
+      { l: 'Voided / refunded',    v: String(sales.length - completed.length), s: 'on this page' },
     ];
   }, [sales, currency]);
 
@@ -400,12 +412,11 @@ export const SalesPage: React.FC = () => {
                 <>Export CSV</>
               )}
             </Button>
-            <Button size="sm">Daily report</Button>
           </>
         }
       />
       <div className="p-6 flex flex-col gap-4 flex-1 min-h-0">
-        <div className="grid grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
           {stats.map((s) => (
             <Card key={s.l} className="p-5">
               <div className="text-[12px] font-semibold uppercase tracking-wider text-neutral-500">{s.l}</div>
@@ -532,11 +543,26 @@ export const SalesPage: React.FC = () => {
             </table>
           </div>
           <div className="px-4 h-12 border-t border-neutral-200 flex items-center justify-between text-[12.5px] text-neutral-500">
-            <span>Showing <b className="text-neutral-700">{filtered.length}</b> of {sales.length}</span>
+            <span>
+              Showing <b className="text-neutral-700">{filtered.length}</b> of {sales.length} on this page
+              · <b className="text-neutral-700">{count}</b> total in range
+            </span>
             <div className="flex items-center gap-1">
-              <button className="h-8 px-3 rounded border border-neutral-300 bg-white hover:bg-neutral-50 focus-ring" disabled>Previous</button>
-              <span className="px-2">Page 1 of 1</span>
-              <button className="h-8 px-3 rounded border border-neutral-300 bg-white hover:bg-neutral-50 focus-ring" disabled>Next</button>
+              <button
+                onClick={() => setPage((pg) => Math.max(1, pg - 1))}
+                disabled={page <= 1 || loading}
+                className="h-8 px-3 rounded border border-neutral-300 bg-white hover:bg-neutral-50 focus-ring disabled:opacity-40"
+              >
+                Previous
+              </button>
+              <span className="px-2 tabular-nums">Page {page} of {Math.max(1, Math.ceil(count / PAGE_SIZE))}</span>
+              <button
+                onClick={() => setPage((pg) => pg + 1)}
+                disabled={page >= Math.ceil(count / PAGE_SIZE) || loading}
+                className="h-8 px-3 rounded border border-neutral-300 bg-white hover:bg-neutral-50 focus-ring disabled:opacity-40"
+              >
+                Next
+              </button>
             </div>
           </div>
         </Card>

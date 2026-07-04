@@ -276,7 +276,7 @@ export const UsersPage: React.FC = () => {
           </div>
         )}
 
-        <div className="grid grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           {stats.map((s) => (
             <Card key={s.l} className="p-5">
               <div className="text-[12px] font-semibold uppercase tracking-wider text-neutral-500">{s.l}</div>

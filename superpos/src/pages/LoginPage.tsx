@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../store/authStore';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
@@ -15,15 +15,19 @@ export const LoginPage: React.FC = () => {
   const error   = useAuthStore(s => s.error);
   const clearError = useAuthStore(s => s.clearError);
   const navigate = useNavigate();
+  const location = useLocation();
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (loading) return;
     try {
       await login(username, password);
-      // Route by role: cashiers land on POS, managers/admins/owners on the dashboard.
+      // Prefer the route the user originally asked for (stored by
+      // ProtectedRoute); otherwise route by role — cashiers land on POS,
+      // managers/admins/owners on the dashboard.
+      const from = (location.state as { from?: { pathname?: string } } | null)?.from?.pathname;
       const role = useAuthStore.getState().user?.role;
-      const target = role === 'Cashier' ? '/pos' : '/dashboard';
+      const target = from && from !== '/login' ? from : role === 'Cashier' ? '/pos' : '/dashboard';
       navigate(target, { replace: true });
     } catch {
       // error is already in the store; nothing else to do here.
@@ -77,10 +81,7 @@ export const LoginPage: React.FC = () => {
             </label>
 
             <label className="text-[13px] font-semibold text-neutral-700">
-              <div className="flex items-center justify-between">
-                <span>Password</span>
-                <a className="text-[12px] text-brand-600 font-medium hover:underline" href="#">Forgot?</a>
-              </div>
+              <span>Password</span>
               <div className="mt-1.5 relative">
                 <input
                   type={show ? 'text' : 'password'}
@@ -103,16 +104,6 @@ export const LoginPage: React.FC = () => {
               </div>
             </label>
 
-            <label className="flex items-center gap-2 text-[13px] text-neutral-600 select-none">
-              <input
-                type="checkbox"
-                defaultChecked
-                disabled={loading}
-                className="w-4 h-4 rounded border-neutral-300 text-brand-500 focus-ring"
-              />
-              Trust this device for 24 hours
-            </label>
-
             <Button size="lg" type="submit" disabled={loading}>
               {loading ? (
                 <>
@@ -123,18 +114,7 @@ export const LoginPage: React.FC = () => {
             </Button>
           </form>
 
-          <div className="mt-6 pt-5 border-t border-neutral-200 flex items-center justify-between text-[12px] text-neutral-500">
-            <span>v2.0.4 · Terminal POS-01</span>
-            <span className="flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-success-500" />
-              Server reachable
-            </span>
-          </div>
         </Card>
-
-        <p className="text-center text-[12px] text-neutral-500 mt-5">
-          Need help? Call IT at <b className="text-neutral-700">x4001</b> · Branch <b className="text-neutral-700">Cairo Downtown #03</b>
-        </p>
       </div>
     </div>
   );
