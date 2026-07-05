@@ -51,7 +51,7 @@ append-only (no update/delete of posted rows in normal flow).
 | `User` (AbstractUser) | T,B | role (Owner/Admin/Manager/Cashier), `terminal`, hashed `pin_code`; username unique **per tenant** (auth.E003 silenced) | Custom auth user + RBAC. |
 | `BranchSettings` | T,B | `default_*_id` **BigInt placeholders**, `allow_negative_stock`, `require_shift_for_pos`, `allow_shift_close_with_open_orders`, receipt header/footer | Per-branch operational defaults; created lazily on first GET. |
 | `BranchUserAssignment` | T,B | `role_at_branch`, `is_default_branch` | Multi-branch user mapping (legacy `User.branch` = primary). |
-| `FinancialAccount` | T,(B) | `account_type` (cashbox/main_safe/bank/card_settlement/wallet/customer_ar/supplier_ap/expense/opening_balance/other), `opening_balance` | Money destination. `opening_balance` **stored, not posted**. |
+| `FinancialAccount` | T,(B) | `account_type` (cashbox/main_safe/bank/card_settlement/wallet/customer_ar/supplier_ap/expense/opening_balance/other), `opening_balance` | **Operational treasury account** (cash/bank/wallet/card-clearing) — *not* the accounting ledger; the target design links it to the future ChartOfAccount via a `gl_account` FK. `opening_balance` **stored, not posted**. |
 | `PaymentMethod` | T | `method_type` (cash/card/wallet/credit/custom), `requires_customer` (forced True for credit in `save()`) | Tenant payment method. |
 | `BranchPaymentMethod` | T,B | `destination_account`, `settlement_bank_account`, `commission_percent`, `fixed_fee`, `commission_expense_account`, `is_default` | **Routing source of truth.** Commission fields modeled but not posted. |
 | `FinancialAccountMovement` | T,(B),A | `debit`⊕`credit` (CHECK: exactly one > 0), `balance_before/after`, `movement_type` (20 types), `source_document_type/id`, `terminal_id`/`shift_id` (plain int) | **Subsidiary** cash/bank/wallet ledger with running balance. **Not** a journal. |
@@ -66,8 +66,8 @@ append-only (no update/delete of posted rows in normal flow).
 
 | Model | Scope | Key fields | Purpose / notes |
 |---|---|---|---|
-| `Category` | T | `name` only (`unique_together (tenant,name)`) | **Flat** category. No nesting / POS flags / station / account link. |
-| `Product` | T | `barcode`, `sku`, `category`, `price`, `cost`, `tax_rate`, **`stock` (global cached qty)**, `reorder`, `weighted`, **`unit` (fixed enum piece/kg/liter/carton)**, **`pack_qty` (fixed)**, `plu` | Catalog core + `deduct_stock()` row-locked helper. No `product_type`, no ProductUnit, no recipe. |
+| `Category` | T | `name` only (`unique_together (tenant,name)`) | **Flat** category. No nesting / POS flags / station / account link. Proposed target (pending gate G1): split into hierarchical SalesCategory + InventoryCategory — [TARGET_BOUNDARIES.md](TARGET_BOUNDARIES.md) §6.2/§6.3. |
+| `Product` | T | `barcode`, `sku`, `category`, `price`, `cost`, `tax_rate`, **`stock` (global cached qty)**, `reorder`, `weighted`, **`unit` (fixed enum piece/kg/liter/carton)**, **`pack_qty` (fixed)**, `plu` | Catalog core + `deduct_stock()` row-locked helper. No `product_type`, no ProductUnit, no variants, no recipe. Proposed target chain (pending gates G1/G4): typed Product → ProductVariant → RecipeVersion → RecipeLines — [TARGET_BOUNDARIES.md](TARGET_BOUNDARIES.md) §6. |
 | `InventoryBatch` | T | batch_number, remaining_quantity, expiry, cost_price | Modeled; **not driven by any posting path**. |
 | `Sale` | T,B | `sale_uuid` (public id), cashier, `customer`, subtotal/tax/total, `method`, `payment_method_hint`, discount, status (completed/voided/refunded) | Counter sale header. |
 | `SaleItem` | (via Sale) | product, qty, price_each, line_total, **`unit_cost` snapshot**, `warehouse` (traceability) | Cost captured but **COGS never posted**. |
@@ -78,7 +78,7 @@ append-only (no update/delete of posted rows in normal flow).
 | `IdempotencyRecord` | T | key, request_hash, response snapshot; `(tenant,key)` unique | Idempotency store (wired on some POSTs only — see §4). |
 | `Warehouse` | T | `code`, `warehouse_type`, is_active | Tenant stock location (no direct branch FK). |
 | `BranchWarehouse` | T,B | `role` (sales/purchase_receiving/kitchen/bar/returns/damaged), `is_default` | **Canonical** branch↔warehouse default home. |
-| `WarehouseStock` | T | product, warehouse, `quantity` (signed) | **Cached** per-warehouse balance (Slice J). Invariant: Σ + unassigned == `Product.stock`. |
+| `WarehouseStock` | T | product, warehouse, `quantity` (signed) | **Cached** per-warehouse balance (Slice J). **Intended reconciliation invariant** (Σ + unassigned == `Product.stock`) — **not yet guaranteed**; it must be verified by the data audit before any per-warehouse-authority cutover, not assumed. **Recorded directive R-B (2026-07-04):** quantity is denominated in the **product base unit only** — the future `ProductUnit` defines conversions; separate balances per conversion unit are never stored (MASTER_DATA_CONTRACT §5 wording to be aligned). |
 | `PurchaseInvoice` | T,B,A | supplier, totals, `paid_amount`/`credit_amount`, `payment_method`, `source_account`, `posting_status` (default POSTED), `payment_status` | Create-and-post purchase (stock-item only). |
 | `PurchaseInvoiceLine` | T | product, warehouse, `line_type` (stock_item/expense/fixed_asset/service/non_stock — **only stock_item posts**), qty, unit_cost, discount, tax, line_total | Tax stored, not posted. |
 
@@ -131,7 +131,9 @@ Shift model references them yet.
 /api/  (pos.urls):
     categories/
     products/ (+export/import/barcode/scan/{pk}/ {pk}/stock/ ← DIRECT PATCH
-              {pk}/stock-movements/ {pk}/stock-balance/ {pk}/warehouse-stock/)
+              {pk}/stock-movements/ {pk}/stock-balance/
+              {pk}/warehouse-stock/ ← SINGULAR on this branch; FE calls the
+                 plural warehouse-stocks/ → live 404 mismatch (fix = Gate A GA-10))
     inventory/batches/  inventory/purchase/ ← LEGACY  inventory/adjust/ ← LEGACY
     inventory/alerts/
     stock-movements/    ← RAW POST create
@@ -185,9 +187,12 @@ Shift model references them yet.
   redirect); role floors mirror backend permission classes; every backend 403
   renders `PermissionDeniedState`.
 - **API client:** [superpos/src/api/client.ts](superpos/src/api/client.ts) —
-  axios base `http://127.0.0.1:8000/api`, Bearer from localStorage, single-flight
-  401 refresh, subscription/auth global events; `Idempotency-Key` helper in
-  [api/idempotency.ts](superpos/src/api/idempotency.ts).
+  **env-driven base URL**: reads `VITE_API_URL` (shared with `utils/media.ts`),
+  strips a trailing slash, and **falls back to `http://127.0.0.1:8000/api`**
+  when the variable is unset so `npm run dev` works without a `.env`
+  ([client.ts:6-7](superpos/src/api/client.ts#L6-L7)). Bearer from localStorage,
+  single-flight 401 refresh, subscription/auth global events; `Idempotency-Key`
+  helper in [api/idempotency.ts](superpos/src/api/idempotency.ts).
 - **Orphaned / debt:** [superpos/src/data/mock.ts](superpos/src/data/mock.ts)
   imported by nothing (not in production routes); **no test framework** installed;
   Users page 100-row cap; new ERP page bodies English-only pending i18n pass.
@@ -218,7 +223,17 @@ Shift model references them yet.
 - **Running-balance discipline:** movement writers use `select_for_update()` on
   prior rows so concurrent posts can't interleave the running balance.
 - **OpenAPI:** `drf-spectacular` schema at `/api/schema/`, mirror committed as
-  [SuperPOS API.yaml](SuperPOS%20API.yaml).
+  [SuperPOS API.yaml](SuperPOS%20API.yaml). ⚠️ **Accuracy warning:** the committed
+  YAML was generated from **Gate A WIP code**, not this branch — it documents a
+  financially-correct void with compensating ledger entries and an
+  `Idempotency-Key` header on `/sales/{id}/void/` (yaml ~L3671-3790) that do
+  **not** exist on `mvp/counter-cafe-demo-readiness`, plus path drift around
+  `warehouse-stock(s)`: **this branch actually serves the singular**
+  `products/{pk}/warehouse-stock/`; the plural is what the frontend and the
+  Gate A WIP use — a current FE/BE mismatch (GA-10), not an existing plural
+  route on mvp.
+  **For the current branch, the URLconf is the runtime truth.** Regenerating the
+  schema from the active branch is a post-ratification hygiene item.
 
 See [END_TO_END_WORKFLOW_STATUS.md](END_TO_END_WORKFLOW_STATUS.md) for which of
 these actually complete a workflow, and where they stop.
