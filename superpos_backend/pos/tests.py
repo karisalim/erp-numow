@@ -1462,3 +1462,60 @@ class WarehouseStockSaleAndApiTests(_SalePostingTestBase):
         self.assertEqual(r2.status_code, status.HTTP_200_OK)
         self.assertTrue(any(
             row['product'] == self.product.id for row in r2.json()['results']))
+
+
+class ProductWarehouseStocksRouteTests(_SalePostingTestBase):
+    """Gate A component GA-10: the per-product balances endpoint lives at the
+    plural path `/api/products/{pk}/warehouse-stocks/` — the exact path the
+    frontend calls (superpos/src/api/erp.ts). Pure route rename; the view,
+    its permissions, and tenant scoping are unchanged."""
+
+    def _seed(self, warehouse, qty):
+        stock_movement_service.record_stock_in(
+            product=self.product, quantity=qty,
+            movement_type=StockMovement.MovementType.RECEIVE_IN, warehouse=warehouse,
+        )
+
+    def test_plural_path_resolves_to_view_and_matches_reverse(self):
+        from django.urls import resolve
+        from pos.views import ProductWarehouseStockView
+
+        match = resolve(f'/api/products/{self.product.id}/warehouse-stocks/')
+        self.assertIs(match.func.view_class, ProductWarehouseStockView)
+        self.assertEqual(
+            reverse('product-warehouse-stock', args=[self.product.id]),
+            f'/api/products/{self.product.id}/warehouse-stocks/',
+        )
+
+    def test_authorized_manager_gets_expected_balances_on_plural_path(self):
+        self._seed(self.warehouse, Decimal('9'))
+        self.client.force_authenticate(user=self.manager)
+        resp = self.client.get(f'/api/products/{self.product.id}/warehouse-stocks/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+        rows = resp.json()['results']
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['product'], self.product.id)
+        self.assertEqual(rows[0]['warehouse'], self.warehouse.id)
+        self.assertEqual(Decimal(rows[0]['quantity']), Decimal('9.000'))
+
+    def test_cashier_below_manager_is_still_forbidden(self):
+        self.client.force_authenticate(user=self.cashier)
+        resp = self.client.get(f'/api/products/{self.product.id}/warehouse-stocks/')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_other_tenants_data_is_not_exposed(self):
+        self._seed(self.warehouse, Decimal('9'))  # tenant A rows exist
+        manager_b = User.objects.create_user(
+            username='smgr_b_ga10', password='pw', role=User.Role.MANAGER,
+            tenant=self.tenant_b, branch=self.branch_b,
+        )
+        self.client.force_authenticate(user=manager_b)
+        # Tenant B asking for tenant A's product id must see nothing.
+        resp = self.client.get(f'/api/products/{self.product.id}/warehouse-stocks/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()['results'], [])
+
+    def test_old_singular_path_no_longer_routes(self):
+        self.client.force_authenticate(user=self.manager)
+        resp = self.client.get(f'/api/products/{self.product.id}/warehouse-stock/')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)

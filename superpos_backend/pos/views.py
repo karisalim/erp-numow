@@ -1355,7 +1355,7 @@ class WarehouseStockListView(TenantMixin, generics.ListAPIView):
 
 
 class ProductWarehouseStockView(TenantMixin, generics.ListAPIView):
-    """GET /api/products/{pk}/warehouse-stock/ — one product across all warehouses."""
+    """GET /api/products/{pk}/warehouse-stocks/ — one product across all warehouses."""
 
     serializer_class   = WarehouseStockSerializer
     permission_classes = [IsManagerOrAbove]
