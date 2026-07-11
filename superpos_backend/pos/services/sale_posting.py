@@ -49,7 +49,12 @@ class SalePostingError(Exception):
     configuration) but the chosen method has no active/usable route. The Sale
     create-flow catches this and returns a 400 so the whole sale rolls back —
     a configured branch must never silently skip financial posting.
+
+    `code` is a stable machine-readable identifier the API layer surfaces
+    alongside the human-readable message (GA-8).
     """
+
+    code = 'payment_routing_missing'
 
 
 _FINANCE_MOVEMENT_TYPE = {
@@ -81,18 +86,24 @@ def resolve_branch_payment_method(*, tenant, branch, method):
 
     Prefers the default; falls back to any active one. Returns None when the
     tenant hasn't configured routing for this method (→ legacy, no GL post).
+
+    Selection is deterministic (GA-6): `-is_default` puts the default first
+    and `-id` breaks any remaining tie by newest row, so even bad data (two
+    active defaults of the same method_type, which the serializer now
+    rejects) resolves to a stable choice instead of DB row order.
     """
     if tenant is None or branch is None:
         return None
-    qs = (
+    return (
         BranchPaymentMethod.objects
         .filter(
             tenant=tenant, branch=branch, is_active=True,
             payment_method__method_type=method,
         )
         .select_related('destination_account', 'payment_method')
+        .order_by('-is_default', '-id')
+        .first()
     )
-    return qs.filter(is_default=True).first() or qs.first()
 
 
 def branch_has_payment_routing(*, tenant, branch):

@@ -492,6 +492,33 @@ class BranchPaymentMethodSerializer(serializers.ModelSerializer):
                     ),
                 })
 
+        # Gate A (GA-6): at most one ACTIVE default route per (branch,
+        # method_type). `method_type` lives on the related PaymentMethod, so a
+        # DB UniqueConstraint cannot express this — the serializer is the
+        # guard, with `resolve_branch_payment_method`'s deterministic ordering
+        # (`-is_default`, `-id`) as the backstop for pre-existing bad data
+        # (which the provisioning command also demotes).
+        is_default = attrs.get('is_default', getattr(self.instance, 'is_default', False))
+        is_active  = attrs.get('is_active',  getattr(self.instance, 'is_active',  True))
+        if (
+            tenant is not None and branch is not None and method is not None
+            and is_default and is_active
+        ):
+            clash = BranchPaymentMethod.objects.filter(
+                tenant=tenant, branch=branch, is_default=True, is_active=True,
+                payment_method__method_type=method.method_type,
+            )
+            if self.instance is not None:
+                clash = clash.exclude(pk=self.instance.pk)
+            if clash.exists():
+                raise serializers.ValidationError({
+                    'is_default': (
+                        f'Another active default route already exists for '
+                        f'method_type={method.method_type!r} on this branch. '
+                        f'Deactivate or demote it first.'
+                    ),
+                })
+
         if method is None or dest is None:
             return attrs
 

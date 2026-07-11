@@ -764,6 +764,10 @@ class SaleSerializer(serializers.ModelSerializer):
                 # violation — surfaces as a 400 and rolls the sale back. Only a
                 # genuinely legacy branch (no routing at all) is allowed to skip
                 # (with a warning) — see sale_posting.post_sale_ledgers.
+                #
+                # Error shape (GA-8): keeps the legacy `payment` string key
+                # (the frontend displays it) and adds stable machine-readable
+                # `code` / `field` / `detail` keys.
                 try:
                     sale_posting.post_sale_ledgers(
                         sale=sale, method=method, customer=customer, actor_user=actor,
@@ -773,7 +777,14 @@ class SaleSerializer(serializers.ModelSerializer):
                     sale_posting.ar.CustomerARError,
                     sale_posting.fa.AccountMovementError,
                 ) as exc:
-                    raise serializers.ValidationError({'payment': str(exc)})
+                    # Raised during save() — list-wrap the display message to
+                    # match the standard {field: [messages]} error shape.
+                    raise serializers.ValidationError({
+                        'payment': [str(exc)],
+                        'code': getattr(exc, 'code', 'sale_posting_error'),
+                        'field': 'method',
+                        'detail': str(exc),
+                    })
 
         return sale
 

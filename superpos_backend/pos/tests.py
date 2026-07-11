@@ -1224,6 +1224,102 @@ class SalePostingHardeningTests(_SalePostingTestBase):
         self.assertEqual(
             FinancialAccountMovement.objects.filter(tenant=self.tenant_b).count(), 0)
 
+    def test_posting_error_has_structured_shape(self):
+        # GA-8: the 400 body carries the legacy `payment` display key (as a
+        # list) plus stable machine-readable `code` / `field` / `detail` keys.
+        BranchPaymentMethod.objects.filter(
+            tenant=self.tenant, branch=self.branch,
+            payment_method__method_type=PaymentMethod.MethodType.CASH,
+        ).update(is_active=False)
+
+        resp = self.client.post(reverse('sale-list'), self._sale_body('cash'), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
+        body = resp.json()
+        self.assertIsInstance(body.get('payment'), list)
+        self.assertTrue(body['payment'][0])
+        self.assertIn('payment_routing_missing', body['code'])
+        self.assertIn('method', body['field'])
+        self.assertTrue(body.get('detail'))
+
+
+class GateADefaultRouteUniquenessTests(_SalePostingTestBase):
+    """GA-6: at most one active default route per (branch, method_type); the
+    resolver stays deterministic even for pre-gate bad data."""
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.manager)
+
+    def test_second_active_default_of_same_method_type_is_rejected(self):
+        second_pm = PaymentMethod.objects.create(
+            tenant=self.tenant, name='Cash Drawer 2',
+            method_type=PaymentMethod.MethodType.CASH)
+        resp = self.client.post(
+            reverse('branch-payment-method-list', kwargs={'branch_pk': self.branch.pk}),
+            {
+                'payment_method': second_pm.id,
+                'destination_account': self.cashbox.id,
+                'is_default': True,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
+        self.assertIn('is_default', resp.json())
+
+    def test_second_route_of_same_type_allowed_when_not_default(self):
+        second_pm = PaymentMethod.objects.create(
+            tenant=self.tenant, name='Cash Drawer 2',
+            method_type=PaymentMethod.MethodType.CASH)
+        resp = self.client.post(
+            reverse('branch-payment-method-list', kwargs={'branch_pk': self.branch.pk}),
+            {
+                'payment_method': second_pm.id,
+                'destination_account': self.cashbox.id,
+                'is_default': False,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+
+    def test_demoting_the_existing_default_then_promoting_another_is_allowed(self):
+        # The guard must not block the legitimate two-step swap flow.
+        existing = BranchPaymentMethod.objects.get(
+            tenant=self.tenant, branch=self.branch,
+            payment_method__method_type=PaymentMethod.MethodType.CASH)
+        resp = self.client.patch(
+            reverse('branch-payment-method-detail',
+                    kwargs={'branch_pk': self.branch.pk, 'pk': existing.pk}),
+            {'is_default': False}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+
+        second_pm = PaymentMethod.objects.create(
+            tenant=self.tenant, name='Cash Drawer 2',
+            method_type=PaymentMethod.MethodType.CASH)
+        resp = self.client.post(
+            reverse('branch-payment-method-list', kwargs={'branch_pk': self.branch.pk}),
+            {
+                'payment_method': second_pm.id,
+                'destination_account': self.cashbox.id,
+                'is_default': True,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+
+    def test_resolver_is_deterministic_for_bad_legacy_data(self):
+        """Two active defaults (pre-gate bad data, bypassing the serializer)
+        resolve to the newest row, not arbitrary DB order."""
+        second_pm = PaymentMethod.objects.create(
+            tenant=self.tenant, name='Cash Drawer 2',
+            method_type=PaymentMethod.MethodType.CASH)
+        newest = BranchPaymentMethod.objects.create(
+            tenant=self.tenant, branch=self.branch, payment_method=second_pm,
+            destination_account=self.cashbox, is_default=True, is_active=True)
+
+        resolved = sale_posting.resolve_branch_payment_method(
+            tenant=self.tenant, branch=self.branch, method='cash')
+        self.assertEqual(resolved.pk, newest.pk)
+
 
 class SaleLegacyAndScopingTests(_SalePostingTestBase):
 
