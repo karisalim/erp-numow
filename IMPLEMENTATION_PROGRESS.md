@@ -10,10 +10,10 @@
 
 ## Sprint 1 — Foundation (roadmap Slice 1 + Slice 2)
 
-**Status: IN PROGRESS — Batch 1 (GA-1, GA-6, GA-8) executed 2026-07-12 on
-branch `s1/gate-a-foundation`; suite 370 green.** Remaining: steps 4–8
-(provisioning command, sales idempotency, GA-7, GA-9, GA-2) pending the next
-authorized batch; steps 9–10 (GA-3/GA-4) blocked on G0 exit.
+**Status: IN PROGRESS — Batch 1 (GA-1, GA-6, GA-8) executed 2026-07-12;
+Batch 2 (steps 4–8: provisioning command, sales idempotency, GA-7, GA-9,
+GA-2) executed 2026-07-13 on branch `s1/gate-a-foundation`; suite 389
+green.** Remaining: steps 9–10 (GA-3/GA-4) blocked on G0 exit.
 Audit date: 2026-07-12 · Auditor branch: `fix/ga-10-warehouse-stock-route` ·
 Baseline: **365 backend tests green** (`python manage.py test`, 30.5 s).
 
@@ -56,6 +56,92 @@ recipes, costing, production, frontend, GA-2/3/4/5/7, the safety branch.
   load env vars (no dotenv dependency added by design).
 - **Remaining blockers:** unchanged (see §5) — next batch needs
   authorization; GA-3/GA-4 still need D-14 + G0 exit.
+
+### 0b. Batch 2 execution record (2026-07-13, authorized)
+
+**Scope executed:** plan steps 4–8 — provisioning command (R-F replacement
+for GA-5), sales idempotency (Slice 2), GA-7 void reversal, GA-9 test pack,
+GA-2 strict routing. Not touched: GL, recipes, costing, production, frontend,
+GA-3/GA-4 (blocked on G0), the safety branch. No commits made.
+
+- **Changed files:**
+  - `superpos_backend/accounts/management/__init__.py`,
+    `superpos_backend/accounts/management/commands/__init__.py`,
+    `superpos_backend/accounts/management/commands/provision_default_payment_routing.py`
+    — new (step 4). Dry-run by default (full pass inside a transaction,
+    rolled back at the end so the printed plan is exact); `--apply` commits;
+    `--tenant=<id>` scopes both passes. Pass 1 demotes duplicate active
+    defaults keeping the newest (same `(-is_default, -id)` tie-break as the
+    runtime resolver); pass 2 provisions cash/card/wallet routing only for
+    branches with ZERO `BranchPaymentMethod` rows, reusing the tenant's first
+    active account/method of each type. Partially-configured branches are
+    never altered — missing active routes are surfaced as log-only `WARN`
+    lines. Output is console-safe for Arabic names on legacy Windows
+    codepages. No financial rows in any schema migration.
+  - `superpos_backend/pos/views.py` — step 5: `SaleListCreateView.create`
+    wires `idempotency.lookup/save` exactly like purchase invoices (replay →
+    original response, payload mismatch → 409 `IDEMPOTENCY_CONFLICT`, no
+    header → normal). Step 6 (GA-7): `void_sale` reimplemented — sale row
+    locked via `select_for_update(of=('self',))`; compensating
+    `FinancialAccountMovement` credit (`SALES_RETURN_OUT`) per original sale
+    debit and compensating `CustomerARMovement` credit (`SALES_RETURN`) per
+    AR debit, tagged `source_document_type='sale_void'` (originals never
+    touched — compensating-document pattern, R-C); stock reversal unchanged
+    but now stamped with source-document refs + actor; optional `reason`
+    recorded in an `AuditLog` VOID entry with the reversal references;
+    `Idempotency-Key` replay protection prevents double-reversal on retry;
+    legacy pre-gate sales (no financial movement) void gracefully and are
+    flagged `legacy_no_financial_movement`.
+  - `superpos_backend/pos/services/sale_posting.py` — step 8 (GA-2): legacy
+    best-effort skip REMOVED. `post_sale_ledgers` now raises
+    `SalePostingError` (`code='payment_routing_missing'`) for ANY
+    cash/card/wallet sale that cannot resolve an active route — including
+    branches with zero `BranchPaymentMethod` rows. The caller's atomic block
+    rolls the whole sale back → structured 400 (GA-8 shape). Zero-total sales
+    still post nothing; credit still always posts to Customer AR.
+  - `superpos_backend/pos/serializers.py` — comment-only update (strict
+    routing note replaces the legacy-skip note).
+  - `superpos_backend/pos/tests.py` — step 7 (GA-9): +19 net tests (see
+    below); 3 legacy-skip tests converted 1:1 to strict-routing tests; the
+    `SaleCheckoutPaymentTests` / `ReceiptLayoutTests` fixtures now grant
+    default routing via the module-level `_grant_default_routing` helper.
+- **Migrations created:** none (no schema change in this batch).
+- **APIs added/changed:** no new endpoints. Behavior deltas:
+  `POST /api/sales/` honors `Idempotency-Key` (replay / 409); a
+  cash/card/wallet sale on a branch with no active route for that method now
+  400s with `code='payment_routing_missing'` and rolls back atomically (was:
+  silent-skip for zero-row branches); `POST /api/sales/<id|uuid>/void/`
+  response gains a `void` object (`reason`, `finance_reversals`,
+  `ar_reversals`, `legacy_no_financial_movement`) and honors
+  `Idempotency-Key`.
+- **Tests added (19 net):**
+  `GateAVoidReversalTests` (8: cash/card/wallet/credit reversal + balances,
+  legacy no-movement void, double-void guard, idempotent void replay,
+  cross-tenant void → 404 with tenant-A rows untouched) ·
+  `GateASaleIdempotencyTests` (4: replay without second sale, payload
+  mismatch → 409, no-key normal, per-tenant key scoping) ·
+  `ProvisionDefaultPaymentRoutingCommandTests` (7: dry-run default writes
+  nothing, apply + idempotent re-apply, reuse of existing accounts/methods,
+  configured-branch skip + WARN, duplicate-default demotion keeps newest,
+  `--tenant` scoping leaves other tenants untouched, unknown tenant →
+  CommandError). Replaced 1:1 (strict routing):
+  `test_unrouted_branch_sale_fails_with_structured_error`,
+  `test_unconfigured_tenant_sale_fails_and_rolls_back`,
+  `test_unconfigured_tenant_sale_fails_and_creates_no_warehouse_stock`.
+  All new assertions verify tenant scoping on created/reversed rows.
+- **Tests executed:** full backend suite — **389 passed, 0 failed** (54–68 s).
+  `python manage.py check` clean.
+- **Ordering guarantee honored:** the dry-run was executed against the dev DB
+  before strict routing tests landed; it SKIPs both configured branches and
+  flags their missing method routes (`WARN`), and provisions the one unrouted
+  branch — production rollout must run `--apply` per tenant and review the
+  WARN lines before deploying this batch (see §4 risk 1).
+- **Risks:** branches that are *partially* configured (some method types
+  missing an active route) will 400 those methods under GA-2 — the command
+  deliberately never alters them; the WARN lines in the dry-run output are
+  the operator's checklist. FE already renders the structured 400 (GA-8).
+- **Remaining blockers:** steps 9–10 (GA-3/GA-4) still need D-14 + G0
+  sign-off/promotion.
 
 ### 1. Audit findings — current implementation state
 
@@ -109,16 +195,16 @@ Landing order per TRANSITION_AND_MIGRATION_PLAN §3.2, on a new branch
 | 1 | GA-1 env-driven settings + `.env.example` | — | **DONE — Batch 1 (2026-07-12).** |
 | 2 | GA-6 one-default guard + deterministic `(-is_default,-id)` resolution | — | **DONE — Batch 1 (2026-07-12).** Duplicate-default *demotion* moves into the step-4 command. |
 | 3 | GA-8 structured error shape on the sale flow | — | **DONE — Batch 1 (2026-07-12).** FE already renders it. |
-| 4 | `provision_default_payment_routing` management command (`--dry-run` default / `--apply [--tenant]`) | — | **Replaces GA-5.** No financial rows created inside `migrate`; idempotent; logs every created/reused/demoted row. |
-| 5 | Sales idempotency (Slice 2) | — | Wire existing `idempotency.lookup/save` into `SaleListCreateView.create` exactly as purchase invoices; replay → one Sale, conflict → 409. |
-| 6 | GA-7 financially-correct void | — | Compensating `FinancialAccountMovement`/`CustomerARMovement` reversal entries under `select_for_update`, `Idempotency-Key` replay; reversal follows the compensating-document pattern (R-C). |
-| 7 | GA-9 test pack | — | Port + re-point backfill tests at the step-4 command; add void-reversal + sales-idempotency tests; full suite green. |
-| 8 | GA-2 strict routing | Step 4 **applied & verified for every active tenant** | Ordering guarantee: no live branch stops selling. |
+| 4 | `provision_default_payment_routing` management command (`--dry-run` default / `--apply [--tenant]`) | — | **DONE — Batch 2 (2026-07-13).** Replaces GA-5. No financial rows created inside `migrate`; idempotent; logs every created/reused/demoted row. |
+| 5 | Sales idempotency (Slice 2) | — | **DONE — Batch 2 (2026-07-13).** Wired into `SaleListCreateView.create` exactly as purchase invoices; replay → one Sale, conflict → 409. |
+| 6 | GA-7 financially-correct void | — | **DONE — Batch 2 (2026-07-13).** Compensating reversal entries under `select_for_update`, `Idempotency-Key` replay, AuditLog with optional reason (R-C). |
+| 7 | GA-9 test pack | — | **DONE — Batch 2 (2026-07-13).** Backfill tests re-pointed at the step-4 command; void-reversal + sales-idempotency tests added; suite 389 green. |
+| 8 | GA-2 strict routing | Step 4 **applied & verified for every active tenant** | **DONE — Batch 2 (2026-07-13) in code.** Legacy skip removed. **Production rollout still requires running the step-4 command with `--apply` per tenant and clearing its WARN lines before deploy.** |
 | 9 | GA-3 credit-limit guard | **D-14 answered + G0 exit** | If D-14 → "null = unlimited", requires an additive nullable migration on `Customer.credit_limit`. |
 | 10 | GA-4 negative-stock guard | **G0 exit** (D-15 already selected: branch toggle only, no per-sale override) | Blocked oversell → structured 400 + full rollback. |
 
 Steps 9–10 ship in a Sprint-1 follow-up batch the moment G0 exits; everything
-else is implementable now.
+else has now been executed (Batches 1–2).
 
 **Explicitly out of Sprint 1 scope:** GL, recipes, production, costing,
 category split, units, document numbering, returns, delivery, ETA (per sprint
@@ -136,11 +222,14 @@ roadmap and the §5 freeze in TARGET_BOUNDARIES.md).
 
 ### 5. Remaining blockers
 
-1. **User authorization to execute Sprint 1** (execution rule: sprint must be
-   explicitly authorized).
+1. ~~User authorization to execute Sprint 1~~ — **Batches 1–2 authorized and
+   executed** (2026-07-12 / 2026-07-13).
 2. **D-14 answer + G0 sign-off/promotion** — blocks steps 9–10 only.
 3. Access to a production-like tenant list for the step-8 provisioning
-   verification (dev DB only has test data).
+   verification (dev DB only has test data). **Operational note:** strict
+   routing is now live in code — before deploying this branch to any real
+   environment, run `python manage.py provision_default_payment_routing`
+   (dry-run), review, then `--apply` per tenant and resolve every WARN line.
 
 ---
 

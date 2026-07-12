@@ -7,7 +7,10 @@ Covers:
 """
 
 from decimal import Decimal
+from io import StringIO
 
+from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -15,20 +18,53 @@ from rest_framework.test import APITestCase
 from unittest.mock import patch
 
 from accounts.models import (
-    Branch, BranchPaymentMethod, Customer, FinancialAccount,
+    Branch, BranchPaymentMethod, Customer, CustomerARMovement, FinancialAccount,
     FinancialAccountMovement, PaymentMethod, Supplier, Tenant, Terminal, User,
 )
 from accounts.services import account_movements as account_service
 from accounts.services import customer_ar as customer_ar_service
 from accounts.services import supplier_ap as supplier_ap_service
 from pos.models import (
-    BranchWarehouse, Category, Payment, Product, PurchaseInvoice,
+    AuditLog, BranchWarehouse, Category, Payment, Product, PurchaseInvoice,
     PurchaseInvoiceLine, Sale, SaleItem, StockMovement, Warehouse, WarehouseStock,
 )
 from pos.services import purchase_invoices as purchase_invoice_service
 from pos.services import sale_posting
 from pos.services import stock_movements as stock_movement_service
 from pos.views import _parse_weight_encoded_barcode
+
+
+def _grant_default_routing(tenant, branch):
+    """Gate A test helper: give a branch the default cash/card/wallet routing.
+
+    Mirrors what the `provision_default_payment_routing` command provisions
+    for real legacy branches — under strict routing (GA-2) every completed
+    sale must resolve a route, so fixtures must self-serve. Returns the
+    accounts keyed by account_type for balance assertions.
+    """
+    accounts = {}
+    for acct_type, name in [
+        (FinancialAccount.AccountType.CASHBOX,         'Main Cashbox'),
+        (FinancialAccount.AccountType.CARD_SETTLEMENT, 'Card Settlement'),
+        (FinancialAccount.AccountType.WALLET,          'Wallet'),
+    ]:
+        accounts[acct_type] = FinancialAccount.objects.create(
+            tenant=tenant, name=f'{name} ({branch.name})', account_type=acct_type,
+        )
+    for mtype, acct_type in [
+        (PaymentMethod.MethodType.CASH,   FinancialAccount.AccountType.CASHBOX),
+        (PaymentMethod.MethodType.CARD,   FinancialAccount.AccountType.CARD_SETTLEMENT),
+        (PaymentMethod.MethodType.WALLET, FinancialAccount.AccountType.WALLET),
+    ]:
+        pm = PaymentMethod.objects.create(
+            tenant=tenant, name=f'{mtype} ({branch.name})', method_type=mtype,
+        )
+        BranchPaymentMethod.objects.create(
+            tenant=tenant, branch=branch, payment_method=pm,
+            destination_account=accounts[acct_type],
+            is_default=True, is_active=True,
+        )
+    return accounts
 
 
 class WeightEncodedBarcodeTests(APITestCase):
@@ -122,6 +158,8 @@ class SaleCheckoutPaymentTests(APITestCase):
             tax_rate=Decimal('0.00'), stock=Decimal('500'),
             weighted=True, unit=Product.Unit.KG, plu='09524',
         )
+        # GA-2: every completed sale must resolve a payment route.
+        _grant_default_routing(cls.tenant, cls.branch)
 
     def setUp(self):
         self.client.force_authenticate(user=self.cashier)
@@ -235,6 +273,8 @@ class ReceiptLayoutTests(APITestCase):
             tax_rate=Decimal('0.00'), stock=Decimal('500'),
             weighted=True, unit=Product.Unit.KG, plu='09524',
         )
+        # GA-2: every completed sale must resolve a payment route.
+        _grant_default_routing(cls.tenant, cls.branch)
 
     def setUp(self):
         self.client.force_authenticate(user=self.cashier)
@@ -1166,9 +1206,10 @@ class SalePostingTests(_SalePostingTestBase):
 
 
 class SalePostingHardeningTests(_SalePostingTestBase):
-    """A configured branch must never silently skip ledger posting: a missing
-    or inactive route for the chosen method is a 400 + full rollback. Only a
-    genuinely unconfigured (legacy) branch may skip — and even then, loudly."""
+    """GA-2 strict routing: no sale may silently skip ledger posting. A
+    missing or inactive route for the chosen method is a 400 + full rollback —
+    including branches with zero BranchPaymentMethod rows (the legacy
+    best-effort skip was removed)."""
 
     def setUp(self):
         self.client.force_authenticate(user=self.cashier)
@@ -1208,19 +1249,28 @@ class SalePostingHardeningTests(_SalePostingTestBase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
         self._assert_nothing_persisted(sales_before, moves_before)
 
-    def test_legacy_branch_skips_posting_but_warns(self):
-        # Tenant B branch has no routing at all → legacy skip, with a WARNING so
-        # the skip is never silent.
+    def test_unrouted_branch_sale_fails_with_structured_error(self):
+        """GA-2: replaces `test_legacy_branch_skips_posting_but_warns` — the
+        legacy silent-skip was removed; a branch with zero BranchPaymentMethod
+        rows now fails the sale atomically with a stable error code."""
         self.client.force_authenticate(user=self.cashier_b)
         body = {
             'items': [{'product': self.product_b.id, 'qty': '2', 'price_each': '10.00'}],
             'method': 'cash', 'amount_paid': '20.00',
         }
-        with self.assertLogs('pos.services.sale_posting', level='WARNING') as logs:
-            resp = self.client.post(reverse('sale-list'), body, format='json')
-        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
-        self.assertTrue(
-            any('without financial routing' in line.lower() for line in logs.output))
+        resp = self.client.post(reverse('sale-list'), body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
+
+        data = resp.json()
+        self.assertIn('payment_routing_missing', data['code'])
+        self.assertIn('No active payment routing', data['payment'][0])
+
+        # Full rollback — nothing persisted for tenant B.
+        self.assertEqual(Sale.objects.filter(tenant=self.tenant_b).count(), 0)
+        self.assertEqual(
+            StockMovement.objects.filter(tenant=self.tenant_b).count(), 0)
+        self.product_b.refresh_from_db()
+        self.assertEqual(self.product_b.stock, Decimal('100.000'))
         self.assertEqual(
             FinancialAccountMovement.objects.filter(tenant=self.tenant_b).count(), 0)
 
@@ -1323,26 +1373,26 @@ class GateADefaultRouteUniquenessTests(_SalePostingTestBase):
 
 class SaleLegacyAndScopingTests(_SalePostingTestBase):
 
-    def test_unconfigured_tenant_sale_still_posts_without_ledger(self):
-        """Tenant B has no BranchPaymentMethod / sales warehouse → the sale
-        still succeeds (legacy), stock drops, but no GL movement is created."""
+    def test_unconfigured_tenant_sale_fails_and_rolls_back(self):
+        """GA-2: replaces `test_unconfigured_tenant_sale_still_posts_without_
+        ledger` — tenant B has no BranchPaymentMethod, so the sale now fails
+        atomically instead of posting without a GL row."""
         self.client.force_authenticate(user=self.cashier_b)
         body = {
             'items': [{'product': self.product_b.id, 'qty': '2', 'price_each': '10.00'}],
             'method': 'cash', 'amount_paid': '20.00',
         }
         resp = self.client.post(reverse('sale-list'), body, format='json')
-        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
+        self.assertIn('payment_routing_missing', resp.json()['code'])
 
         self.product_b.refresh_from_db()
-        self.assertEqual(self.product_b.stock, Decimal('98.000'))
-        # No financial movement posted for tenant B.
+        self.assertEqual(self.product_b.stock, Decimal('100.000'))
+        self.assertEqual(Sale.objects.filter(tenant=self.tenant_b).count(), 0)
+        self.assertEqual(
+            StockMovement.objects.filter(tenant=self.tenant_b).count(), 0)
         self.assertEqual(
             FinancialAccountMovement.objects.filter(tenant=self.tenant_b).count(), 0)
-        # Movement has no warehouse (none configured).
-        mv = StockMovement.objects.get(source_document_id=resp.json()['id'],
-                                       source_document_type='sale')
-        self.assertIsNone(mv.warehouse_id)
 
     def test_list_is_tenant_scoped(self):
         self.client.force_authenticate(user=self.cashier)
@@ -1506,14 +1556,16 @@ class WarehouseStockSaleAndApiTests(_SalePostingTestBase):
         self.assertFalse(
             WarehouseStock.objects.filter(product=self.product, warehouse=self.warehouse).exists())
 
-    def test_unconfigured_tenant_sale_creates_no_warehouse_stock(self):
+    def test_unconfigured_tenant_sale_fails_and_creates_no_warehouse_stock(self):
+        # GA-2: the unrouted tenant B sale fails outright (see the strict
+        # routing tests); trivially no WarehouseStock row may appear either.
         self.client.force_authenticate(user=self.cashier_b)
         body = {
             'items': [{'product': self.product_b.id, 'qty': '2', 'price_each': '10.00'}],
             'method': 'cash', 'amount_paid': '20.00',
         }
         resp = self.client.post(reverse('sale-list'), body, format='json')
-        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
         self.assertEqual(WarehouseStock.objects.filter(tenant=self.tenant_b).count(), 0)
 
     def test_void_restores_warehouse_stock(self):
@@ -1615,3 +1667,394 @@ class ProductWarehouseStocksRouteTests(_SalePostingTestBase):
         self.client.force_authenticate(user=self.manager)
         resp = self.client.get(f'/api/products/{self.product.id}/warehouse-stock/')
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Release Gate A — sales financial integrity (Sprint 1 Batch 2)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class GateAVoidReversalTests(_SalePostingTestBase):
+    """GA-7: void must be financially correct — compensating GL/AR reversal
+    rows under row lock, original rows preserved, no double-reverse, optional
+    reason audited, tenant-scoped, idempotent on retry."""
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.cashier)
+
+    def _post_sale(self, method='cash', **over):
+        body = self._sale_body(method, **over)
+        if method == 'credit':
+            body.pop('amount_paid', None)
+        resp = self.client.post(reverse('sale-list'), body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        return resp.json()['id']
+
+    def _account_for(self, method):
+        return {
+            'cash': self.cashbox, 'card': self.card_acct, 'wallet': self.wallet_acct,
+        }[method]
+
+    def _assert_finance_void(self, method):
+        account = self._account_for(method)
+        sale_id = self._post_sale(method)
+        self.assertEqual(
+            account_service.get_account_current_balance(account), Decimal('20.00'))
+
+        void = self.client.post(reverse('sale-void-pk', args=[sale_id]),
+                                {'reason': 'customer changed mind'}, format='json')
+        self.assertEqual(void.status_code, status.HTTP_200_OK, void.content)
+
+        # Balance reversed; both rows (original debit + compensating credit) kept.
+        self.assertEqual(
+            account_service.get_account_current_balance(account), Decimal('0.00'))
+        rows = FinancialAccountMovement.objects.filter(account=account).order_by('id')
+        self.assertEqual(rows.count(), 2)
+        self.assertEqual(rows[0].debit,  Decimal('20.00'))
+        self.assertEqual(rows[1].credit, Decimal('20.00'))
+        self.assertEqual(rows[1].movement_type,
+                         FinancialAccountMovement.MovementType.SALES_RETURN_OUT)
+        self.assertEqual(rows[1].source_document_type, 'sale_void')
+        self.assertEqual(rows[1].source_document_id, sale_id)
+        # Reversal rows stay inside the sale's tenant.
+        self.assertEqual(rows[1].tenant_id, self.tenant.id)
+
+        # Stock restored.
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, Decimal('100.000'))
+
+        # Response carries the reversal references.
+        body = void.json()['void']
+        self.assertFalse(body['legacy_no_financial_movement'])
+        self.assertEqual(len(body['finance_reversals']), 1)
+        self.assertEqual(body['reason'], 'customer changed mind')
+
+        # AuditLog entry with actor + reason.
+        log = AuditLog.objects.get(model_name='sale', object_id=sale_id)
+        self.assertEqual(log.action, AuditLog.Action.VOID)
+        self.assertEqual(log.tenant_id, self.tenant.id)
+        self.assertEqual(log.user_id, self.cashier.id)
+        self.assertEqual(log.reason, 'customer changed mind')
+
+    def test_void_cash_sale_reverses_cashbox_and_stock(self):
+        self._assert_finance_void('cash')
+
+    def test_void_card_sale_reverses_card_settlement_and_stock(self):
+        self._assert_finance_void('card')
+
+    def test_void_wallet_sale_reverses_wallet_and_stock(self):
+        self._assert_finance_void('wallet')
+
+    def test_void_credit_sale_reverses_customer_ar_and_stock(self):
+        sale_id = self._post_sale('credit', customer=self.customer.id)
+        self.assertEqual(
+            customer_ar_service.get_customer_balance(self.customer), Decimal('20.00'))
+
+        void = self.client.post(reverse('sale-void-pk', args=[sale_id]))
+        self.assertEqual(void.status_code, status.HTTP_200_OK, void.content)
+
+        self.assertEqual(
+            customer_ar_service.get_customer_balance(self.customer), Decimal('0.00'))
+        rows = CustomerARMovement.objects.filter(customer=self.customer).order_by('id')
+        self.assertEqual(rows.count(), 2)
+        self.assertEqual(rows[1].credit, Decimal('20.00'))
+        self.assertEqual(rows[1].movement_type,
+                         CustomerARMovement.MovementType.SALES_RETURN)
+        self.assertEqual(rows[1].source_document_type, 'sale_void')
+        self.assertEqual(rows[1].tenant_id, self.tenant.id)
+        self.assertEqual(len(void.json()['void']['ar_reversals']), 1)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, Decimal('100.000'))
+
+    def test_void_legacy_sale_without_financial_movement_does_not_crash(self):
+        """A pre-gate sale that never posted a GL row voids gracefully:
+        stock is restored, no reversal row is invented, response is flagged."""
+        sale = Sale.objects.create(
+            tenant=self.tenant, branch=self.branch, cashier=self.cashier,
+            subtotal=Decimal('20.00'), tax_amount=Decimal('0.00'),
+            total=Decimal('20.00'), method='cash',
+            paid=Decimal('20.00'), change=Decimal('0.00'),
+        )
+        SaleItem.objects.create(
+            sale=sale, product=self.product, product_name=self.product.name,
+            barcode=self.product.barcode or '', qty=Decimal('2'),
+            price_each=Decimal('10.00'), line_total=Decimal('20.00'),
+            unit_cost=Decimal('6.00'),
+        )
+
+        void = self.client.post(reverse('sale-void-pk', args=[sale.id]))
+        self.assertEqual(void.status_code, status.HTTP_200_OK, void.content)
+        body = void.json()['void']
+        self.assertTrue(body['legacy_no_financial_movement'])
+        self.assertEqual(body['finance_reversals'], [])
+        self.assertEqual(FinancialAccountMovement.objects.count(), 0)
+        # Stock restored (+2 over the fixture's 100 — the legacy sale row
+        # never deducted through the API in this synthetic setup).
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, Decimal('102.000'))
+
+    def test_second_void_returns_400_and_does_not_double_reverse(self):
+        sale_id = self._post_sale('cash')
+        first = self.client.post(reverse('sale-void-pk', args=[sale_id]))
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+
+        second = self.client.post(reverse('sale-void-pk', args=[sale_id]))
+        self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # Exactly one reversal row; balance stays reversed once.
+        self.assertEqual(
+            FinancialAccountMovement.objects.filter(
+                source_document_type='sale_void', source_document_id=sale_id,
+            ).count(), 1)
+        self.assertEqual(
+            account_service.get_account_current_balance(self.cashbox), Decimal('0.00'))
+
+    def test_repeated_void_with_same_idempotency_key_replays(self):
+        sale_id = self._post_sale('cash')
+        url = reverse('sale-void-pk', args=[sale_id])
+
+        r1 = self.client.post(url, {}, format='json', HTTP_IDEMPOTENCY_KEY='void-k1')
+        self.assertEqual(r1.status_code, status.HTTP_200_OK, r1.content)
+        r2 = self.client.post(url, {}, format='json', HTTP_IDEMPOTENCY_KEY='void-k1')
+        self.assertEqual(r2.status_code, status.HTTP_200_OK, r2.content)
+        self.assertEqual(r1.json(), r2.json())
+
+        # Replay, not re-processing: still exactly one reversal.
+        self.assertEqual(
+            FinancialAccountMovement.objects.filter(
+                source_document_type='sale_void', source_document_id=sale_id,
+            ).count(), 1)
+
+    def test_void_is_tenant_scoped(self):
+        """A user from another tenant cannot see — let alone void — the sale."""
+        sale_id = self._post_sale('cash')
+
+        self.client.force_authenticate(user=self.cashier_b)
+        resp = self.client.post(reverse('sale-void-pk', args=[sale_id]))
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+        # Tenant A's sale is untouched — still completed, no reversal rows.
+        sale = Sale.objects.get(pk=sale_id)
+        self.assertEqual(sale.status, Sale.Status.COMPLETED)
+        self.assertEqual(
+            FinancialAccountMovement.objects.filter(
+                source_document_type='sale_void', source_document_id=sale_id,
+            ).count(), 0)
+        self.assertEqual(
+            account_service.get_account_current_balance(self.cashbox), Decimal('20.00'))
+
+
+class GateASaleIdempotencyTests(_SalePostingTestBase):
+    """Slice 2: POST /sales/ honors the Idempotency-Key header exactly like
+    purchase invoices — replay on same payload, 409 on mismatch, tenant-scoped."""
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.cashier)
+
+    def test_same_key_same_payload_replays_without_second_sale(self):
+        body = self._sale_body('cash')
+        r1 = self.client.post(reverse('sale-list'), body, format='json',
+                              HTTP_IDEMPOTENCY_KEY='sale-k1')
+        self.assertEqual(r1.status_code, status.HTTP_201_CREATED, r1.content)
+        r2 = self.client.post(reverse('sale-list'), body, format='json',
+                              HTTP_IDEMPOTENCY_KEY='sale-k1')
+        self.assertEqual(r2.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(r1.json()['id'], r2.json()['id'])
+        self.assertEqual(Sale.objects.filter(tenant=self.tenant).count(), 1)
+        # Stock deducted exactly once; ledger posted exactly once.
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, Decimal('98.000'))
+        self.assertEqual(
+            account_service.get_account_current_balance(self.cashbox), Decimal('20.00'))
+
+    def test_same_key_different_payload_conflicts_409(self):
+        r1 = self.client.post(reverse('sale-list'), self._sale_body('cash'),
+                              format='json', HTTP_IDEMPOTENCY_KEY='sale-k2')
+        self.assertEqual(r1.status_code, status.HTTP_201_CREATED)
+        other = self._sale_body('cash')
+        other['items'][0]['qty'] = '3'
+        other['amount_paid'] = '30.00'
+        r2 = self.client.post(reverse('sale-list'), other, format='json',
+                              HTTP_IDEMPOTENCY_KEY='sale-k2')
+        self.assertEqual(r2.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(r2.json()['error']['code'], 'IDEMPOTENCY_CONFLICT')
+        self.assertEqual(Sale.objects.filter(tenant=self.tenant).count(), 1)
+
+    def test_no_key_processes_normally(self):
+        for _ in range(2):
+            resp = self.client.post(
+                reverse('sale-list'), self._sale_body('cash'), format='json')
+            self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Sale.objects.filter(tenant=self.tenant).count(), 2)
+
+    def test_idempotency_keys_are_tenant_scoped(self):
+        """The same opaque key used by two tenants must not collide: tenant B
+        gets its own processing, never a replay of tenant A's response."""
+        r1 = self.client.post(reverse('sale-list'), self._sale_body('cash'),
+                              format='json', HTTP_IDEMPOTENCY_KEY='shared-key')
+        self.assertEqual(r1.status_code, status.HTTP_201_CREATED, r1.content)
+
+        # Tenant B needs routing under GA-2 before it can sell at all.
+        _grant_default_routing(self.tenant_b, self.branch_b)
+        self.client.force_authenticate(user=self.cashier_b)
+        body_b = {
+            'items': [{'product': self.product_b.id, 'qty': '2', 'price_each': '10.00'}],
+            'method': 'cash', 'amount_paid': '20.00',
+        }
+        r2 = self.client.post(reverse('sale-list'), body_b, format='json',
+                              HTTP_IDEMPOTENCY_KEY='shared-key')
+        self.assertEqual(r2.status_code, status.HTTP_201_CREATED, r2.content)
+        self.assertNotEqual(r1.json()['id'], r2.json()['id'])
+        self.assertEqual(Sale.objects.filter(tenant=self.tenant).count(), 1)
+        self.assertEqual(Sale.objects.filter(tenant=self.tenant_b).count(), 1)
+
+
+class ProvisionDefaultPaymentRoutingCommandTests(APITestCase):
+    """Step-4 provisioning command (the R-F replacement for the rejected 0017
+    backfill migration): dry-run by default, --apply commits, reuse / skip /
+    demote semantics, and strict --tenant scoping."""
+
+    def _run(self, *args):
+        out = StringIO()
+        call_command('provision_default_payment_routing', *args, stdout=out)
+        return out.getvalue()
+
+    def test_dry_run_is_default_and_writes_nothing(self):
+        tenant = Tenant.objects.create(name='Legacy Tenant')
+        branch = Branch.objects.create(tenant=tenant, name='Legacy Branch')
+
+        output = self._run()
+
+        self.assertIn('DRY-RUN', output)
+        self.assertIn('CREATE route', output)   # the plan is printed…
+        self.assertIn('Rolled back', output)
+        # …but nothing is persisted.
+        self.assertEqual(BranchPaymentMethod.objects.filter(branch=branch).count(), 0)
+        self.assertEqual(FinancialAccount.objects.filter(tenant=tenant).count(), 0)
+        self.assertEqual(PaymentMethod.objects.filter(tenant=tenant).count(), 0)
+
+    def test_apply_provisions_default_routing_and_is_idempotent(self):
+        tenant = Tenant.objects.create(name='Legacy Tenant')
+        branch = Branch.objects.create(tenant=tenant, name='Legacy Branch')
+
+        self._run('--apply')
+
+        rows = BranchPaymentMethod.objects.filter(branch=branch).select_related(
+            'payment_method', 'destination_account')
+        self.assertEqual(rows.count(), 3)
+        wiring = {
+            r.payment_method.method_type: r.destination_account.account_type
+            for r in rows
+        }
+        self.assertEqual(wiring, {
+            'cash': 'cashbox', 'card': 'card_settlement', 'wallet': 'wallet',
+        })
+        self.assertTrue(all(r.is_default and r.is_active for r in rows))
+        # Every created row stays inside the branch's own tenant.
+        self.assertTrue(all(r.tenant_id == tenant.id for r in rows))
+        self.assertTrue(all(
+            r.destination_account.tenant_id == tenant.id for r in rows))
+
+        # Second apply: idempotent — no duplicates, branch reported as skipped.
+        output = self._run('--apply')
+        self.assertEqual(BranchPaymentMethod.objects.filter(branch=branch).count(), 3)
+        self.assertIn('SKIP', output)
+
+    def test_apply_reuses_existing_accounts_and_methods(self):
+        tenant = Tenant.objects.create(name='Partially Setup Tenant')
+        branch = Branch.objects.create(tenant=tenant, name='B')
+        existing_cashbox = FinancialAccount.objects.create(
+            tenant=tenant, name='My Cashbox',
+            account_type=FinancialAccount.AccountType.CASHBOX)
+        existing_cash_pm = PaymentMethod.objects.create(
+            tenant=tenant, name='My Cash', method_type='cash')
+
+        output = self._run('--apply')
+
+        cash_route = BranchPaymentMethod.objects.get(
+            branch=branch, payment_method__method_type='cash')
+        self.assertEqual(cash_route.destination_account_id, existing_cashbox.id)
+        self.assertEqual(cash_route.payment_method_id, existing_cash_pm.id)
+        self.assertIn('REUSE account', output)
+        self.assertIn('REUSE payment method', output)
+
+    def test_apply_skips_configured_branch(self):
+        tenant = Tenant.objects.create(name='Configured Tenant')
+        branch = Branch.objects.create(tenant=tenant, name='C')
+        acct = FinancialAccount.objects.create(
+            tenant=tenant, name='CB',
+            account_type=FinancialAccount.AccountType.CASHBOX)
+        pm = PaymentMethod.objects.create(
+            tenant=tenant, name='Cash', method_type='cash')
+        BranchPaymentMethod.objects.create(
+            tenant=tenant, branch=branch, payment_method=pm,
+            destination_account=acct, is_default=True, is_active=True)
+
+        output = self._run('--apply')
+
+        # Untouched: still exactly the one pre-existing route.
+        self.assertEqual(BranchPaymentMethod.objects.filter(branch=branch).count(), 1)
+        self.assertIn('SKIP', output)
+        # The partially-configured branch is flagged for the operator (card +
+        # wallet have no active route → those sales will 400 under GA-2).
+        self.assertIn('WARN', output)
+
+    def test_apply_demotes_duplicate_defaults_keeping_newest(self):
+        tenant = Tenant.objects.create(name='Dup Tenant')
+        branch = Branch.objects.create(tenant=tenant, name='D')
+        acct = FinancialAccount.objects.create(
+            tenant=tenant, name='CB',
+            account_type=FinancialAccount.AccountType.CASHBOX)
+        pm1 = PaymentMethod.objects.create(tenant=tenant, name='Cash 1', method_type='cash')
+        pm2 = PaymentMethod.objects.create(tenant=tenant, name='Cash 2', method_type='cash')
+        older = BranchPaymentMethod.objects.create(
+            tenant=tenant, branch=branch, payment_method=pm1,
+            destination_account=acct, is_default=True, is_active=True)
+        newer = BranchPaymentMethod.objects.create(
+            tenant=tenant, branch=branch, payment_method=pm2,
+            destination_account=acct, is_default=True, is_active=True)
+
+        output = self._run('--apply')
+
+        older.refresh_from_db()
+        newer.refresh_from_db()
+        self.assertFalse(older.is_default)
+        self.assertTrue(newer.is_default)
+        self.assertIn('DEMOTE', output)
+
+    def test_tenant_flag_scopes_both_passes_to_that_tenant_only(self):
+        tenant_a = Tenant.objects.create(name='Scoped A')
+        branch_a = Branch.objects.create(tenant=tenant_a, name='A')
+        tenant_b = Tenant.objects.create(name='Scoped B')
+        branch_b = Branch.objects.create(tenant=tenant_b, name='B')
+        # Duplicate defaults in tenant B must survive a tenant-A-scoped run.
+        acct_b = FinancialAccount.objects.create(
+            tenant=tenant_b, name='CB-B',
+            account_type=FinancialAccount.AccountType.CASHBOX)
+        pm_b1 = PaymentMethod.objects.create(tenant=tenant_b, name='C1', method_type='cash')
+        pm_b2 = PaymentMethod.objects.create(tenant=tenant_b, name='C2', method_type='cash')
+        dup_1 = BranchPaymentMethod.objects.create(
+            tenant=tenant_b, branch=branch_b, payment_method=pm_b1,
+            destination_account=acct_b, is_default=True, is_active=True)
+        dup_2 = BranchPaymentMethod.objects.create(
+            tenant=tenant_b, branch=branch_b, payment_method=pm_b2,
+            destination_account=acct_b, is_default=True, is_active=True)
+
+        self._run('--apply', f'--tenant={tenant_a.id}')
+
+        # Tenant A provisioned; tenant B completely untouched.
+        self.assertEqual(BranchPaymentMethod.objects.filter(branch=branch_a).count(), 3)
+        dup_1.refresh_from_db()
+        dup_2.refresh_from_db()
+        self.assertTrue(dup_1.is_default)
+        self.assertTrue(dup_2.is_default)
+        self.assertEqual(
+            FinancialAccount.objects.filter(tenant=tenant_b).count(), 1)
+        self.assertEqual(
+            PaymentMethod.objects.filter(tenant=tenant_b).count(), 2)
+        # Nothing created for tenant A leaked into tenant B's scope.
+        self.assertEqual(
+            BranchPaymentMethod.objects.filter(tenant=tenant_a).count(), 3)
+
+    def test_unknown_tenant_raises_command_error(self):
+        with self.assertRaises(CommandError):
+            self._run('--apply', '--tenant=999999')

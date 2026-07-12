@@ -13,14 +13,18 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from accounts.models import Branch
+from accounts.models import (
+    Branch, CustomerARMovement, FinancialAccountMovement,
+)
 from accounts.permissions import IsCashierOrAbove, IsManagerOrAbove
+from accounts.services import account_movements as fa
+from accounts.services import customer_ar as ar
 from .filters import (
     BranchWarehouseFilter, ProductFilter, SaleFilter,
     StockMovementFilter, WarehouseFilter, WarehouseStockFilter,
 )
 from .models import (
-    BranchWarehouse, Category, InventoryBatch, Product,
+    AuditLog, BranchWarehouse, Category, InventoryBatch, Product,
     PurchaseInvoice, Sale, SaleItem, StockMovement, Warehouse, WarehouseStock,
 )
 from .serializers import (
@@ -756,6 +760,38 @@ class SaleListCreateView(TenantMixin, generics.ListCreateAPIView):
             terminal = user.terminal,
         )
 
+    def create(self, request, *args, **kwargs):
+        # Sprint 1 Slice 2: optional-but-honored Idempotency-Key, wired exactly
+        # like PurchaseInvoiceListCreateView. No header → process normally (the
+        # current frontend doesn't send one; making it mandatory is a later gate).
+        tenant = self._tenant()
+        key = (request.headers.get('Idempotency-Key') or '').strip()
+
+        look = idempotency.lookup(
+            tenant=tenant, key=key, payload=request.data,
+            method=request.method, path=request.path, user=request.user,
+        )
+        if look.replay:
+            return Response(look.body, status=look.status)
+        if look.conflict:
+            return Response(
+                {'error': {
+                    'code': 'IDEMPOTENCY_CONFLICT',
+                    'detail': 'Idempotency-Key reused with a different payload.',
+                }},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        response = super().create(request, *args, **kwargs)
+
+        idempotency.save(
+            tenant=tenant, key=key, payload=request.data,
+            method=request.method, path=request.path,
+            response_status=response.status_code, response_body=response.data,
+            user=request.user,
+        )
+        return response
+
 
 @api_view(['GET'])
 @permission_classes([IsCashierOrAbove])
@@ -892,75 +928,203 @@ def void_sale(request, pk=None, sale_uuid=None):
       - Manager/Admin/Owner can void any sale within their tenant.
       - Cashier can void only their own sales.
 
-    Already-voided sales return 400.
+    Already-voided sales return 400. The sale row is locked
+    (`select_for_update`) so a concurrent double-void cannot double-reverse.
 
-    Inventory is restored: each line's product stock is incremented and a
-    `RETURN_IN` StockMovement is logged so the audit trail remains intact.
+    Gate A (GA-7) — the void is financially correct, not just inventory-correct:
+      * Inventory is restored: each line's product stock is incremented and a
+        `RETURN_IN` StockMovement is logged so the audit trail remains intact.
+      * Every FinancialAccountMovement the sale posted (cash/card/wallet) is
+        reversed with a compensating SALES_RETURN_OUT credit on the same
+        account. Original rows are never deleted (compensating-document
+        pattern, R-C).
+      * Every CustomerARMovement the sale posted (credit sales) is reversed
+        with a compensating SALES_RETURN credit on the customer.
+      * A pre-gate legacy sale with no financial movement reverses stock only
+        and flags `legacy_no_financial_movement` in the response.
+      * Body may carry an OPTIONAL `reason` string; actor/timestamp/reason and
+        the reversal references are recorded in an AuditLog entry.
+
+    Supports the optional Idempotency-Key header: a replayed void returns the
+    original response without re-processing.
     """
     user   = request.user
     tenant = getattr(user, 'tenant', None)
 
-    qs = Sale.objects.select_related('cashier').prefetch_related('items__product')
-    if tenant:
-        qs = qs.filter(tenant=tenant)
-
-    if sale_uuid is not None:
-        sale = get_object_or_404(qs, sale_uuid=sale_uuid)
-    else:
-        sale = get_object_or_404(qs, pk=pk)
-
-    if getattr(user, 'role', None) == 'Cashier' and sale.cashier_id != user.id:
+    # Optional-but-honored idempotency (same pattern as sale/purchase create).
+    key = (request.headers.get('Idempotency-Key') or '').strip()
+    look = idempotency.lookup(
+        tenant=tenant, key=key, payload=request.data,
+        method=request.method, path=request.path, user=user,
+    )
+    if look.replay:
+        return Response(look.body, status=look.status)
+    if look.conflict:
         return Response(
-            {'detail': 'Cashiers can only void their own sales.'},
-            status=status.HTTP_403_FORBIDDEN,
+            {'error': {
+                'code': 'IDEMPOTENCY_CONFLICT',
+                'detail': 'Idempotency-Key reused with a different payload.',
+            }},
+            status=status.HTTP_409_CONFLICT,
         )
 
-    if sale.status == Sale.Status.VOIDED:
-        return Response(
-            {'detail': 'Sale is already voided.'},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-    if sale.status != Sale.Status.COMPLETED:
-        return Response(
-            {'detail': 'Only completed sales can be voided.'},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+    reason = str(request.data.get('reason') or '').strip()
 
     from pos.services import stock_movements as stock_svc
 
-    with transaction.atomic():
-        sale.status = Sale.Status.VOIDED
-        sale.save(update_fields=['status', 'updated_at'])
+    try:
+        with transaction.atomic():
+            # Row-lock the sale so two concurrent voids serialize; the loser
+            # re-reads status=VOIDED and returns 400 instead of re-reversing.
+            # `of=('self',)` locks only the Sale row (cashier is a nullable
+            # join, which FOR UPDATE cannot lock on PostgreSQL).
+            qs = Sale.objects.select_for_update(of=('self',)).select_related('cashier')
+            if tenant:
+                qs = qs.filter(tenant=tenant)
 
-        # Restore product stock + record the reversing movement. Keep qty as
-        # Decimal so weighted items (e.g., 0.5 kg) round-trip without
-        # truncating to zero.
-        for item in sale.items.select_related('product', 'warehouse').all():
-            if not item.product_id:
-                continue
-            qty = item.qty
-            if qty > 0:
-                Product.objects.filter(pk=item.product_id).update(
-                    stock=F('stock') + qty,
+            if sale_uuid is not None:
+                sale = get_object_or_404(qs, sale_uuid=sale_uuid)
+            else:
+                sale = get_object_or_404(qs, pk=pk)
+
+            if getattr(user, 'role', None) == 'Cashier' and sale.cashier_id != user.id:
+                return Response(
+                    {'detail': 'Cashiers can only void their own sales.'},
+                    status=status.HTTP_403_FORBIDDEN,
                 )
-                # Restore the cached per-warehouse balance to the same
-                # warehouse the goods originally left from (no-op when the
-                # line has no warehouse — legacy / unconfigured sale).
-                stock_svc.apply_warehouse_delta(
-                    product=item.product, warehouse=item.warehouse, delta=qty,
+
+            if sale.status == Sale.Status.VOIDED:
+                return Response(
+                    {'detail': 'Sale is already voided.'},
+                    status=status.HTTP_400_BAD_REQUEST,
                 )
-            StockMovement.objects.create(
-                tenant        = tenant,
-                product_id    = item.product_id,
-                warehouse     = item.warehouse,
-                qty           = qty,
-                movement_type = StockMovement.MovementType.RETURN_IN,
-                sale          = sale,
-                note          = f'Void of sale {sale.sale_uuid}',
+            if sale.status != Sale.Status.COMPLETED:
+                return Response(
+                    {'detail': 'Only completed sales can be voided.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            sale.status = Sale.Status.VOIDED
+            sale.save(update_fields=['status', 'updated_at'])
+
+            # ── Stock reversal ────────────────────────────────────────────
+            # Restore product stock + record the reversing movement. Keep qty
+            # as Decimal so weighted items (e.g., 0.5 kg) round-trip without
+            # truncating to zero.
+            for item in sale.items.select_related('product', 'warehouse').all():
+                if not item.product_id:
+                    continue
+                qty = item.qty
+                if qty > 0:
+                    Product.objects.filter(pk=item.product_id).update(
+                        stock=F('stock') + qty,
+                    )
+                    # Restore the cached per-warehouse balance to the same
+                    # warehouse the goods originally left from (no-op when the
+                    # line has no warehouse — legacy / unconfigured sale).
+                    stock_svc.apply_warehouse_delta(
+                        product=item.product, warehouse=item.warehouse, delta=qty,
+                    )
+                StockMovement.objects.create(
+                    tenant        = tenant,
+                    product_id    = item.product_id,
+                    warehouse     = item.warehouse,
+                    qty           = qty,
+                    movement_type = StockMovement.MovementType.RETURN_IN,
+                    sale          = sale,
+                    source_document_type = 'sale_void',
+                    source_document_id   = sale.id,
+                    actor_user    = user,
+                    note          = f'Void of sale {sale.sale_uuid}',
+                )
+
+            # ── Financial reversal (GA-7) ─────────────────────────────────
+            # Compensating rows only — the original movements stay untouched.
+            notes = f'Void of sale {sale.sale_uuid}'
+            finance_reversals = []
+            for mv in FinancialAccountMovement.objects.filter(
+                tenant=tenant, source_document_type='sale',
+                source_document_id=sale.id, debit__gt=0,
+            ).select_related('account'):
+                rev = fa.record_account_credit(
+                    account=mv.account,
+                    amount=mv.debit,
+                    movement_type=fa.MovementType.SALES_RETURN_OUT,
+                    branch=sale.branch,
+                    source_document_type='sale_void',
+                    source_document_id=sale.id,
+                    actor_user=user,
+                    notes=notes,
+                )
+                finance_reversals.append({
+                    'reversal_movement_id': rev.id,
+                    'original_movement_id': mv.id,
+                    'account_id': mv.account_id,
+                    'amount': str(mv.debit),
+                })
+
+            ar_reversals = []
+            for mv in CustomerARMovement.objects.filter(
+                tenant=tenant, source_document_type='sale',
+                source_document_id=sale.id, debit__gt=0,
+            ).select_related('customer'):
+                rev = ar.record_customer_ar_credit(
+                    customer=mv.customer,
+                    amount=mv.debit,
+                    movement_type=ar.MovementType.SALES_RETURN,
+                    branch=sale.branch,
+                    source_document_type='sale_void',
+                    source_document_id=sale.id,
+                    actor_user=user,
+                    notes=notes,
+                )
+                ar_reversals.append({
+                    'reversal_movement_id': rev.id,
+                    'original_movement_id': mv.id,
+                    'customer_id': mv.customer_id,
+                    'amount': str(mv.debit),
+                })
+
+            legacy_no_financial_movement = (
+                not finance_reversals and not ar_reversals
             )
 
+            AuditLog.log_change(
+                tenant=tenant, user=user, action=AuditLog.Action.VOID,
+                model_name='sale', object_id=sale.id,
+                old_values={'status': Sale.Status.COMPLETED},
+                new_values={
+                    'status': Sale.Status.VOIDED,
+                    'finance_reversals': finance_reversals,
+                    'ar_reversals': ar_reversals,
+                    'legacy_no_financial_movement': legacy_no_financial_movement,
+                },
+                request=request, reason=reason,
+            )
+    except (fa.AccountMovementError, ar.CustomerARError) as exc:
+        # Reversal rule violation → the atomic block rolled everything back
+        # (status flip, stock restore, partial reversals). Surface as 400.
+        return Response(
+            {'detail': str(exc), 'code': 'void_reversal_failed'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
     sale.refresh_from_db()
-    return Response(SaleSerializer(sale).data)
+    body = SaleSerializer(sale).data
+    body['void'] = {
+        'reason': reason,
+        'finance_reversals': finance_reversals,
+        'ar_reversals': ar_reversals,
+        'legacy_no_financial_movement': legacy_no_financial_movement,
+    }
+
+    idempotency.save(
+        tenant=tenant, key=key, payload=request.data,
+        method=request.method, path=request.path,
+        response_status=status.HTTP_200_OK, response_body=body,
+        user=user,
+    )
+    return Response(body)
 
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────

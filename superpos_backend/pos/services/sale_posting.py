@@ -11,15 +11,16 @@ and customer ledgers, reusing the existing services:
       increases what the customer owes). Reuses
       `accounts.services.customer_ar`. Requires a customer.
 
-Routing policy (hardened in the Slice I follow-up):
-    * Configured branch — one that has ANY `BranchPaymentMethod` rows — must
-      never silently skip posting. If the chosen method has no active route
-      (missing / inactive / misconfigured), `post_sale_ledgers` raises
-      `SalePostingError`; the caller turns that into a 400 and rolls the sale
-      back. Routing is always resolved from config, never hardcoded.
-    * Legacy branch — no `BranchPaymentMethod` rows at all — keeps the original
-      best-effort behavior: the sale + stock movement are created, but no GL
-      row is posted. This is logged as a WARNING so the skip is never silent.
+Routing policy (Release Gate A GA-2 — strict):
+    * EVERY completed cash/card/wallet sale must resolve to an active
+      `BranchPaymentMethod` route. A missing / inactive / misconfigured route
+      raises `SalePostingError`; the caller turns that into a 400 and rolls
+      the whole sale back. There is no legacy best-effort skip anymore — the
+      `provision_default_payment_routing` management command (the R-F
+      replacement for the rejected 0017 backfill migration) provisions default
+      routing for every pre-existing branch, so an unrouted branch is always a
+      configuration error, never an expected state. Routing is always resolved
+      from config, never hardcoded.
     * Credit always posts to Customer AR and always requires a customer,
       regardless of branch payment configuration.
 
@@ -43,12 +44,12 @@ logger = logging.getLogger(__name__)
 
 
 class SalePostingError(Exception):
-    """A configured branch could not have its sale posted to the ledger.
+    """A sale could not be posted to the financial ledger.
 
-    Raised when payment routing is expected (the branch has BranchPaymentMethod
-    configuration) but the chosen method has no active/usable route. The Sale
-    create-flow catches this and returns a 400 so the whole sale rolls back —
-    a configured branch must never silently skip financial posting.
+    Raised when the chosen method has no active/usable BranchPaymentMethod
+    route. The Sale create-flow catches this and returns a 400 so the whole
+    sale rolls back — a completed sale must never skip financial posting
+    (GA-2 strict routing).
 
     `code` is a stable machine-readable identifier the API layer surfaces
     alongside the human-readable message (GA-8).
@@ -85,7 +86,7 @@ def resolve_branch_payment_method(*, tenant, branch, method):
     """Active BranchPaymentMethod matching this method_type for the branch.
 
     Prefers the default; falls back to any active one. Returns None when the
-    tenant hasn't configured routing for this method (→ legacy, no GL post).
+    tenant hasn't configured routing for this method (→ posting error).
 
     Selection is deterministic (GA-6): `-is_default` puts the default first
     and `-id` breaks any remaining tie by newest row, so even bad data (two
@@ -109,10 +110,8 @@ def resolve_branch_payment_method(*, tenant, branch, method):
 def branch_has_payment_routing(*, tenant, branch):
     """True when the branch has ANY BranchPaymentMethod rows (active or not).
 
-    This is the signal that a branch is "ledger-aware": it opted into payment
-    routing, so a sale whose method can't resolve to an active route is a
-    configuration error (→ raise), not a legacy best-effort skip. A branch with
-    no rows at all is treated as legacy.
+    Gate A note: this no longer gates posting (every sale requires routing
+    now); it is kept as a cheap configuration probe for admin/setup UIs.
     """
     if tenant is None or branch is None:
         return False
@@ -124,7 +123,7 @@ def post_sale_ledgers(*, sale, method, customer=None, actor_user=None):
 
     Runs inside the caller's `transaction.atomic` block so a failure here
     rolls back the whole sale. Returns the movement created, or None when
-    nothing was posted (zero total, or no routing configured).
+    nothing was posted (zero total only — routing is otherwise mandatory).
     """
     amount = sale.total
     if amount is None or amount <= 0:
@@ -152,24 +151,14 @@ def post_sale_ledgers(*, sale, method, customer=None, actor_user=None):
         tenant=sale.tenant, branch=sale.branch, method=method,
     )
     if bpm is None:
-        # Distinguish a genuinely legacy branch (no routing at all) from a
-        # configured branch that is missing/has-inactive routing for THIS
-        # method. The former keeps legacy behavior (skip, but loudly); the
-        # latter is a configuration error the caller must fix — never a silent
-        # skip — so it raises and the caller rolls the whole sale back.
-        if branch_has_payment_routing(tenant=sale.tenant, branch=sale.branch):
-            raise SalePostingError(
-                f'No active payment routing is configured for method "{method}" '
-                f'on branch {getattr(sale, "branch_id", None)}. Configure an '
-                f'active BranchPaymentMethod for this method, or correct the sale.'
-            )
-        logger.warning(
-            'Sale #%s on branch %s posted WITHOUT financial routing - no '
-            'BranchPaymentMethod configured for this branch (legacy behavior). '
-            'No GL movement was created.',
-            sale.id, getattr(sale, 'branch_id', None),
+        # GA-2: no legacy skip. Every completed cash/card/wallet sale must
+        # post to the ledger, so a missing/inactive route is always a
+        # configuration error — raise and let the caller roll the sale back.
+        raise SalePostingError(
+            f'No active payment routing is configured for method "{method}" '
+            f'on branch {getattr(sale, "branch_id", None)}. Configure an '
+            f'active BranchPaymentMethod for this method, or correct the sale.'
         )
-        return None
 
     return fa.record_account_debit(
         account=bpm.destination_account,

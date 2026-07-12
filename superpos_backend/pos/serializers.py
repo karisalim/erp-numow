@@ -758,12 +758,12 @@ class SaleSerializer(serializers.ModelSerializer):
                 # Post the financial / AR effect. Runs in this atomic block so
                 # any posting failure rolls back the whole sale.
                 #
-                # A *configured* branch (one that has BranchPaymentMethod
-                # routing) must never silently skip posting: a missing /
+                # GA-2 strict routing: every completed cash/card/wallet sale
+                # must resolve an active BranchPaymentMethod route. A missing /
                 # inactive / misconfigured route — or an AR / account rule
-                # violation — surfaces as a 400 and rolls the sale back. Only a
-                # genuinely legacy branch (no routing at all) is allowed to skip
-                # (with a warning) — see sale_posting.post_sale_ledgers.
+                # violation — surfaces as a 400 and rolls the sale back. There
+                # is no legacy best-effort skip anymore — see
+                # sale_posting.post_sale_ledgers.
                 #
                 # Error shape (GA-8): keeps the legacy `payment` string key
                 # (the frontend displays it) and adds stable machine-readable
