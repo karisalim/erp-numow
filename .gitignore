@@ -11,3 +11,5 @@ backups/
 __pycache__/
 *.py[cod]
 superpos/dist/
+__pycache__/
+*.pyc
