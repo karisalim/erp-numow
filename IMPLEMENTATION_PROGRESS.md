@@ -233,4 +233,96 @@ roadmap and the §5 freeze in TARGET_BOUNDARIES.md).
 
 ---
 
+## Sprint 2 — Master Data Foundation (units / categories / product / warehouse authority)
+
+**Status: IN PROGRESS — Batch 1 (Units Core Foundation) executed 2026-07-14 on
+branch `s2/master-data-foundation`; suite 431 green.** Design authority: the
+approved Sprint 2 design (plan approved 2026-07-13) + MASTER_DATA_CONTRACT §2.
+Remaining: Batch 0 governance (owner action — see flag below), Batches 2–5.
+
+**Governance flag (unresolved, carried from the design's Batch 0):**
+ARCHITECTURE_DECISIONS_REQUIRED §4 still shows **G1 (D-01) and G2 (D-13) with
+blank sign-off cells**. Batch 1 was executed on explicit user authorization;
+the register still needs the G2 selection (conversion precision: implemented
+as `Decimal(16,6)` factors + 3dp base-quantity quantize) recorded + ADR
+promotion per R-M.
+
+### 1. Batch 1 execution record (2026-07-14, authorized) — Units Core
+
+**Scope executed:** dynamic unit foundation only — UnitGroup, Unit,
+ProductUnit, ProductBarcodeUnit + conversion service + CRUD APIs + tests.
+Not touched: recipes, costing, GL, categories, product-type changes, scan
+precedence, purchase/sale flows, stock logic, frontend. No commits made.
+
+- **Files changed:**
+  - `superpos_backend/pos/models.py` — 4 new models (below); all additive,
+    legacy `Product.unit` enum / `pack_qty` / `weighted` untouched and still
+    behavior-authoritative.
+  - `superpos_backend/pos/migrations/0021_units_foundation.py` — **new
+    (migration 0021)**, schema-only, zero data rows (R-F), reversible.
+  - `superpos_backend/pos/services/units.py` — new pure conversion service:
+    `convert_to_base` (validates mapping ownership/activity, quantizes to
+    3dp HALF_UP via `quantize_qty`), `get_base_product_unit`,
+    `product_has_stock_history`, `assert_base_mapping_mutable` (base mapping
+    immutable once StockMovements exist; creating the FIRST base mapping for
+    a legacy product stays allowed — that is the Batch-4 seed path).
+  - `superpos_backend/pos/serializers.py` — UnitGroupSerializer,
+    UnitSerializer, ProductUnitSerializer, ProductBarcodeUnitSerializer
+    (tenant-scoped FK validation + friendly 400 twins of every DB constraint;
+    barcode collision check vs legacy `Product.barcode` namespace).
+  - `superpos_backend/pos/views.py` — list/detail/deactivate views for
+    unit-groups + units (Manager+ writes, Cashier+ reads — warehouse-route
+    conventions); `_ProductScopedMixin` + nested product-units and
+    product-barcodes views (cross-tenant product → 404).
+  - `superpos_backend/pos/filters.py` — UnitGroupFilter, UnitFilter.
+  - `superpos_backend/pos/urls.py` — routes per contract §2.4:
+    `catalog/unit-groups/` (+detail/deactivate), `catalog/units/`
+    (+detail/deactivate), `products/{pk}/units/` (+detail),
+    `products/{pk}/barcodes/`.
+  - `superpos_backend/pos/test_units.py` — new (+42 tests).
+- **Models added:** `UnitGroup` (tenant family; group base = the factor-1
+  unit — deliberately NO circular `base_unit` FK, deviating from the
+  contract's *suggested* shape per the approved design); `Unit`
+  (`factor_to_base Decimal(16,6) > 0`, `allow_decimal` as the data-driven
+  successor of PIECE/weighted rules — plain data this batch); `ProductUnit`
+  (`conversion_to_base Decimal(16,6) > 0` authoritative per product; DB
+  partial-unique one `is_base` per product; DB CHECK base ⇒ conversion = 1);
+  `ProductBarcodeUnit` (`(tenant, barcode)` unique; scan precedence deferred
+  to Batch 3).
+- **Migration numbers:** `pos/0021_units_foundation` (applied to dev DB).
+- **Rules honored:** stock remains stored ONLY in the base unit (R-B) — this
+  batch touches no stock-writing path; no hardcoded units (all rows; seeds
+  arrive as the Batch-4 dry-run command, R-F); decimal quantities +
+  product-specific conversion overrides supported; existing products fully
+  compatible (zero Product schema/behavior change — verified by the
+  unchanged 389 baseline plus an explicit legacy-sale compatibility test).
+- **Tests executed:** full backend suite — **431 passed, 0 failed** (58.5 s;
+  389 baseline + 42 new). `python manage.py check` clean;
+  `makemigrations --check` clean. New coverage: catalog CRUD + tenant
+  isolation + deactivate; ProductUnit rules (one base, base-conversion=1,
+  uniqueness, cross-tenant 400/404, base immutability with history,
+  first-base-on-legacy allowed); conversion math incl. the literal brief
+  examples (milk 3 cartons → 36,000 ml; chocolate 2 bags → 10,000 g;
+  fractional 0.5 carton → 6,000 ml; 3dp quantize); barcode uniqueness,
+  cross-tenant reuse, legacy-namespace collision, belongs-to-product;
+  legacy sale flow unchanged with mappings present.
+- **Risks:**
+  - G1/G2 sign-off cells still blank (flag above) — precision choice
+    Decimal(16,6) needs formal D-13 ratification; revisiting it later would
+    be an additive migration.
+  - `allow_decimal` / ProductUnit roles are stored but consumed by nothing
+    yet — behavior switch-over (POS qty rules, scan precedence) is Batch 3+
+    with parity tests, so no regression surface exists today.
+  - Legacy `Product.barcode` vs `ProductBarcodeUnit` namespaces are guarded
+    serializer-side only (no cross-table DB constraint possible); direct ORM
+    writes could still collide — the Batch-4 seed command re-checks.
+  - Parallel sessions edit this repo — batch left uncommitted per
+    instructions; commit before the next session starts Batch 2.
+- **Next batch:** Batch 2 — Category trees (migration 0022: SalesCategory +
+  InventoryCategory, cycle guard, resolution service + `resolved-defaults`
+  preview, CRUD APIs, tests). Batch 0 (G1/G2 sign-off + ADR promotion)
+  remains an owner action that should land before/with it.
+
+---
+
 *(Later sprints get their own sections here after their pre-sprint audits.)*

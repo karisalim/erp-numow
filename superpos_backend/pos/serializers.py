@@ -11,8 +11,9 @@ from accounts.models import (
 )
 from .models import (
     BranchWarehouse, Category, InsufficientStockError, InventoryBatch,
-    Payment, Product, PurchaseInvoice, PurchaseInvoiceLine,
-    Sale, SaleItem, StockMovement, Warehouse, WarehouseStock,
+    Payment, Product, ProductBarcodeUnit, ProductUnit, PurchaseInvoice,
+    PurchaseInvoiceLine, Sale, SaleItem, StockMovement, Unit, UnitGroup,
+    Warehouse, WarehouseStock,
 )
 
 logger = logging.getLogger(__name__)
@@ -324,6 +325,256 @@ class WarehouseSerializer(serializers.ModelSerializer):
                 'A warehouse with this code already exists for this tenant.',
             )
         return value
+
+
+# ── Dynamic Units (Sprint 2 Batch 1 — MASTER_DATA_CONTRACT §2) ────────────────
+# Tenant scoping convention mirrors BranchPaymentMethodSerializer: `tenant` is
+# injected by the view from the auth context, every FK is validated to live in
+# the caller's tenant, and DB constraints get friendly 400 twins here.
+
+
+class UnitGroupSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = UnitGroup
+        fields = ['id', 'name', 'is_active', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate_name(self, value):
+        request = self.context.get('request')
+        tenant = getattr(getattr(request, 'user', None), 'tenant', None)
+        if tenant is None:
+            return value
+        qs = UnitGroup.objects.filter(tenant=tenant, name=value)
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError(
+                'A unit group with this name already exists for this tenant.',
+            )
+        return value
+
+
+class UnitSerializer(serializers.ModelSerializer):
+    unit_group_name = serializers.CharField(source='unit_group.name', read_only=True)
+
+    class Meta:
+        model  = Unit
+        fields = [
+            'id', 'unit_group', 'unit_group_name', 'name', 'symbol',
+            'factor_to_base', 'allow_decimal', 'is_active',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'unit_group_name', 'created_at', 'updated_at']
+
+    def _tenant(self):
+        request = self.context.get('request')
+        return getattr(getattr(request, 'user', None), 'tenant', None)
+
+    def validate_unit_group(self, group):
+        tenant = self._tenant()
+        if tenant is not None and group is not None and group.tenant_id != tenant.id:
+            raise serializers.ValidationError(
+                "unit_group must belong to the caller's tenant.",
+            )
+        return group
+
+    def validate_factor_to_base(self, value):
+        if value <= 0:
+            raise serializers.ValidationError('factor_to_base must be > 0.')
+        return value
+
+    def validate(self, attrs):
+        tenant = self._tenant()
+        group = attrs.get('unit_group') or getattr(self.instance, 'unit_group', None)
+        name  = attrs.get('name') or getattr(self.instance, 'name', None)
+        if tenant is not None and group is not None and name:
+            qs = Unit.objects.filter(tenant=tenant, unit_group=group, name=name)
+            if self.instance is not None:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise serializers.ValidationError({
+                    'name': 'A unit with this name already exists in this group.',
+                })
+        return attrs
+
+
+class ProductUnitSerializer(serializers.ModelSerializer):
+    """Per-product conversion mapping (nested under /products/{pk}/units/).
+
+    `product` comes from the URL (view passes it via `save(product=..)`),
+    never from the body. Rules enforced here (friendly 400s backing the DB
+    constraints):
+      * unit must be tenant-scoped and active
+      * one mapping per (product, unit)
+      * at most one base mapping per product; base conversion is exactly 1
+      * the base mapping is immutable once the product has stock history
+        (pos.services.units.assert_base_mapping_mutable)
+    """
+
+    unit_name   = serializers.CharField(source='unit.name',   read_only=True)
+    unit_symbol = serializers.CharField(source='unit.symbol', read_only=True)
+    allow_decimal = serializers.BooleanField(source='unit.allow_decimal', read_only=True)
+
+    class Meta:
+        model  = ProductUnit
+        fields = [
+            'id', 'unit', 'unit_name', 'unit_symbol', 'allow_decimal',
+            'conversion_to_base', 'is_base',
+            'is_sale_unit', 'is_purchase_unit', 'is_recipe_unit',
+            'is_active', 'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'unit_name', 'unit_symbol', 'allow_decimal',
+            'created_at', 'updated_at',
+        ]
+
+    def _tenant(self):
+        request = self.context.get('request')
+        return getattr(getattr(request, 'user', None), 'tenant', None)
+
+    def validate_unit(self, unit):
+        tenant = self._tenant()
+        if tenant is not None and unit is not None and unit.tenant_id != tenant.id:
+            raise serializers.ValidationError(
+                "unit must belong to the caller's tenant.",
+            )
+        if unit is not None and not unit.is_active:
+            raise serializers.ValidationError('unit is inactive.')
+        return unit
+
+    def validate_conversion_to_base(self, value):
+        if value <= 0:
+            raise serializers.ValidationError('conversion_to_base must be > 0.')
+        return value
+
+    def validate(self, attrs):
+        from pos.services import units as units_svc
+
+        product = self.context.get('product') or getattr(self.instance, 'product', None)
+        unit    = attrs.get('unit') or getattr(self.instance, 'unit', None)
+        is_base = attrs.get('is_base', getattr(self.instance, 'is_base', False))
+        conversion = attrs.get(
+            'conversion_to_base',
+            getattr(self.instance, 'conversion_to_base', Decimal('1')),
+        )
+
+        # One mapping per (product, unit).
+        if product is not None and unit is not None:
+            qs = ProductUnit.objects.filter(product=product, unit=unit)
+            if self.instance is not None:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise serializers.ValidationError({
+                    'unit': 'This unit is already mapped for this product.',
+                })
+
+        if is_base:
+            # Base mapping is the identity by definition.
+            if conversion != Decimal('1'):
+                raise serializers.ValidationError({
+                    'conversion_to_base': 'The base mapping must have conversion_to_base = 1.',
+                })
+            # One base per product.
+            if product is not None:
+                clash = ProductUnit.objects.filter(product=product, is_base=True)
+                if self.instance is not None:
+                    clash = clash.exclude(pk=self.instance.pk)
+                if clash.exists():
+                    raise serializers.ValidationError({
+                        'is_base': 'This product already has a base unit mapping.',
+                    })
+
+        # Base immutability: once movements exist, the established base mapping
+        # cannot be edited, demoted, or displaced (re-denomination = future
+        # explicit document). Creating the FIRST base mapping stays allowed.
+        touches_base = (
+            (self.instance is not None and self.instance.is_base)  # editing the base row
+            or is_base                                             # or promoting one
+        )
+        if product is not None and touches_base:
+            changing = True
+            if self.instance is not None and self.instance.is_base:
+                # Editing the existing base row is harmless if nothing
+                # denomination-relevant changes.
+                changing = (
+                    unit != self.instance.unit
+                    or conversion != self.instance.conversion_to_base
+                    or not is_base
+                )
+            elif self.instance is None and is_base:
+                changing = True  # creating a base row
+            try:
+                if changing:
+                    units_svc.assert_base_mapping_mutable(product)
+            except units_svc.UnitConversionError as exc:
+                # When creating the first base row there is no existing base,
+                # so the guard passes; it only raises when a base already
+                # exists AND history exists.
+                raise serializers.ValidationError({
+                    'is_base': str(exc),
+                    'code': units_svc.UnitConversionError.code,
+                })
+        return attrs
+
+
+class ProductBarcodeUnitSerializer(serializers.ModelSerializer):
+    """Per-pack barcode (nested under /products/{pk}/barcodes/).
+
+    `(tenant, barcode)` is DB-unique within this table; collisions against the
+    legacy `Product.barcode` namespace are rejected here (no cross-table DB
+    constraint is possible) so scan resolution stays unambiguous when Batch 3
+    wires the precedence.
+    """
+
+    unit_name = serializers.CharField(source='product_unit.unit.name', read_only=True)
+    conversion_to_base = serializers.DecimalField(
+        source='product_unit.conversion_to_base',
+        max_digits=16, decimal_places=6, read_only=True,
+    )
+
+    class Meta:
+        model  = ProductBarcodeUnit
+        fields = [
+            'id', 'product_unit', 'unit_name', 'conversion_to_base',
+            'barcode', 'is_default', 'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'unit_name', 'conversion_to_base', 'created_at', 'updated_at',
+        ]
+
+    def _tenant(self):
+        request = self.context.get('request')
+        return getattr(getattr(request, 'user', None), 'tenant', None)
+
+    def validate(self, attrs):
+        tenant  = self._tenant()
+        product = self.context.get('product') or getattr(self.instance, 'product', None)
+        product_unit = attrs.get('product_unit') or getattr(self.instance, 'product_unit', None)
+        barcode = attrs.get('barcode') or getattr(self.instance, 'barcode', None)
+
+        if product is not None and product_unit is not None \
+                and product_unit.product_id != product.pk:
+            raise serializers.ValidationError({
+                'product_unit': 'product_unit must belong to this product.',
+            })
+
+        if tenant is not None and barcode:
+            qs = ProductBarcodeUnit.objects.filter(tenant=tenant, barcode=barcode)
+            if self.instance is not None:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise serializers.ValidationError({
+                    'barcode': 'This barcode is already assigned to a product unit.',
+                })
+            # Collision against the legacy per-product barcode namespace.
+            if Product.objects.filter(tenant=tenant, barcode=barcode).exists():
+                raise serializers.ValidationError({
+                    'barcode': (
+                        'This barcode already identifies a product '
+                        '(legacy Product.barcode); pick a distinct pack barcode.'
+                    ),
+                })
+        return attrs
 
 
 class WarehouseStockSerializer(serializers.ModelSerializer):

@@ -20,19 +20,22 @@ from accounts.permissions import IsCashierOrAbove, IsManagerOrAbove
 from accounts.services import account_movements as fa
 from accounts.services import customer_ar as ar
 from .filters import (
-    BranchWarehouseFilter, ProductFilter, SaleFilter,
-    StockMovementFilter, WarehouseFilter, WarehouseStockFilter,
+    BranchWarehouseFilter, ProductFilter, SaleFilter, StockMovementFilter,
+    UnitFilter, UnitGroupFilter, WarehouseFilter, WarehouseStockFilter,
 )
 from .models import (
     AuditLog, BranchWarehouse, Category, InventoryBatch, Product,
-    PurchaseInvoice, Sale, SaleItem, StockMovement, Warehouse, WarehouseStock,
+    ProductBarcodeUnit, ProductUnit, PurchaseInvoice, Sale, SaleItem,
+    StockMovement, Unit, UnitGroup, Warehouse, WarehouseStock,
 )
 from .serializers import (
     BranchWarehouseSerializer,
     CategorySerializer,
     InventoryBatchSerializer,
+    ProductBarcodeUnitSerializer,
     ProductSerializer,
     ProductStockUpdateSerializer,
+    ProductUnitSerializer,
     PurchaseInvoiceSerializer,
     PurchaseReceiptSerializer,
     ReceiptSerializer,
@@ -40,6 +43,8 @@ from .serializers import (
     SaleSerializer,
     StockAdjustmentSerializer,
     StockMovementSerializer,
+    UnitGroupSerializer,
+    UnitSerializer,
     WarehouseSerializer,
     WarehouseStockSerializer,
 )
@@ -1547,6 +1552,174 @@ class WarehouseInventoryView(TenantMixin, generics.ListAPIView):
             .filter(tenant=self._tenant(), warehouse_id=self.kwargs['pk'])
             .order_by('product_id')
         )
+
+
+# ── Dynamic Units (Sprint 2 Batch 1 — MASTER_DATA_CONTRACT §2.4) ─────────────
+# Same conventions as the warehouse routes: tenant-scoped, Manager+ writes,
+# Cashier+ reads, deactivate instead of delete.
+
+
+class UnitGroupListCreateView(TenantMixin, generics.ListCreateAPIView):
+    queryset         = UnitGroup.objects.all()
+    serializer_class = UnitGroupSerializer
+    filterset_class  = UnitGroupFilter
+    search_fields    = ['name']
+    ordering_fields  = ['name', 'created_at']
+    ordering         = ['name']
+
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+
+class UnitGroupDetailView(TenantMixin, generics.RetrieveUpdateAPIView):
+    """GET / PATCH a unit group. No DELETE — deactivate instead."""
+
+    queryset          = UnitGroup.objects.all()
+    serializer_class  = UnitGroupSerializer
+    http_method_names = ['get', 'patch', 'head', 'options']
+
+    def get_permissions(self):
+        if self.request.method in ('PUT', 'PATCH'):
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+
+class UnitGroupDeactivateView(TenantMixin, generics.GenericAPIView):
+    """POST — soft-delete by flipping `is_active=False`."""
+
+    queryset           = UnitGroup.objects.all()
+    serializer_class   = UnitGroupSerializer
+    permission_classes = [IsManagerOrAbove]
+
+    def post(self, request, *args, **kwargs):
+        group = self.get_object()
+        if group.is_active:
+            group.is_active = False
+            group.save(update_fields=['is_active', 'updated_at'])
+        return Response(self.get_serializer(group).data)
+
+
+class UnitListCreateView(TenantMixin, generics.ListCreateAPIView):
+    queryset         = Unit.objects.select_related('unit_group').all()
+    serializer_class = UnitSerializer
+    filterset_class  = UnitFilter
+    search_fields    = ['name', 'symbol']
+    ordering_fields  = ['name', 'created_at']
+    ordering         = ['unit_group_id', 'name']
+
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+
+class UnitDetailView(TenantMixin, generics.RetrieveUpdateAPIView):
+    """GET / PATCH a unit. No DELETE — deactivate instead."""
+
+    queryset          = Unit.objects.select_related('unit_group').all()
+    serializer_class  = UnitSerializer
+    http_method_names = ['get', 'patch', 'head', 'options']
+
+    def get_permissions(self):
+        if self.request.method in ('PUT', 'PATCH'):
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+
+class UnitDeactivateView(TenantMixin, generics.GenericAPIView):
+    """POST — soft-delete by flipping `is_active=False`."""
+
+    queryset           = Unit.objects.all()
+    serializer_class   = UnitSerializer
+    permission_classes = [IsManagerOrAbove]
+
+    def post(self, request, *args, **kwargs):
+        unit = self.get_object()
+        if unit.is_active:
+            unit.is_active = False
+            unit.save(update_fields=['is_active', 'updated_at'])
+        return Response(self.get_serializer(unit).data)
+
+
+class _ProductScopedMixin(TenantMixin):
+    """Resolves the parent product from `product_pk`, tenant-scoped.
+
+    404s for a product outside the caller's tenant (same isolation contract
+    as every other product route) and passes the product into the serializer
+    context so belongs-to-product rules can run.
+    """
+
+    def get_product(self):
+        qs = Product.objects.all()
+        tenant = self._tenant()
+        if tenant:
+            qs = qs.filter(tenant=tenant)
+        return get_object_or_404(qs, pk=self.kwargs['product_pk'])
+
+    def get_serializer_context(self):
+        ctx = super().get_serializer_context()
+        ctx['product'] = self.get_product()
+        return ctx
+
+    def perform_create(self, serializer):
+        tenant = self._tenant()
+        if tenant:
+            serializer.save(tenant=tenant, product=self.get_product())
+        else:
+            serializer.save(product=self.get_product())
+
+
+class ProductUnitListCreateView(_ProductScopedMixin, generics.ListCreateAPIView):
+    queryset         = ProductUnit.objects.select_related('unit', 'unit__unit_group').all()
+    serializer_class = ProductUnitSerializer
+    ordering         = ['-is_base', 'id']
+
+    def get_queryset(self):
+        return super().get_queryset().filter(product_id=self.kwargs['product_pk'])
+
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+
+class ProductUnitDetailView(_ProductScopedMixin, generics.RetrieveUpdateAPIView):
+    """GET / PATCH one product-unit mapping. No DELETE — deactivate via PATCH."""
+
+    queryset          = ProductUnit.objects.select_related('unit').all()
+    serializer_class  = ProductUnitSerializer
+    http_method_names = ['get', 'patch', 'head', 'options']
+
+    def get_queryset(self):
+        return super().get_queryset().filter(product_id=self.kwargs['product_pk'])
+
+    def get_permissions(self):
+        if self.request.method in ('PUT', 'PATCH'):
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+
+class ProductBarcodeUnitListCreateView(_ProductScopedMixin, generics.ListCreateAPIView):
+    """GET/POST per-pack barcodes for one product (contract §2.4).
+
+    Scan-precedence wiring (resolve these before `Product.barcode`) is
+    Sprint 2 Batch 3 — this endpoint only manages the mappings.
+    """
+
+    queryset         = ProductBarcodeUnit.objects.select_related(
+        'product_unit', 'product_unit__unit').all()
+    serializer_class = ProductBarcodeUnitSerializer
+    ordering         = ['id']
+
+    def get_queryset(self):
+        return super().get_queryset().filter(product_id=self.kwargs['product_pk'])
+
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
 
 
 # ── Purchase Invoices (Phase 1.5 Slice H — posting) ───────────────────────────

@@ -847,3 +847,203 @@ class PurchaseInvoiceLine(models.Model):
 
     def __str__(self):
         return f'PINVLine[{self.id}] {self.product_id} qty={self.qty}'
+
+
+# ── Dynamic Units (Sprint 2 Batch 1 — MASTER_DATA_CONTRACT §2) ────────────────
+# Tenant-defined measurement substrate. Units are DATA rows, never enums/choices
+# (contract §2.5: "unit conversion is data-driven, not hard-coded"). Inventory
+# quantities remain stored ONLY in the product's base unit (directive R-B) —
+# nothing in this batch changes how Product.stock / StockMovement / WarehouseStock
+# are denominated; the conversion layer is a pure service
+# (pos/services/units.py). The legacy Product.unit enum + pack_qty stay intact
+# and authoritative for behavior until the seed/cutover batches.
+
+
+class UnitGroup(models.Model):
+    """A measurement family per tenant (Mass, Volume, Count, Packaging, …).
+
+    The group's base is the unit whose `factor_to_base` is exactly 1 (there is
+    deliberately no `base_unit` FK — it would be circular with Unit; the
+    factor-1 convention is service-validated instead).
+    """
+
+    tenant     = models.ForeignKey(
+        'accounts.Tenant', on_delete=models.CASCADE,
+        related_name='unit_groups', db_index=True,
+    )
+    name       = models.CharField(max_length=60)
+    is_active  = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['tenant', 'name'],
+                name='pos_unitgroup_tenant_name_uniq',
+            ),
+        ]
+
+    def __str__(self):
+        return self.name
+
+
+class Unit(models.Model):
+    """A unit inside a group (g, kg, ml, L, piece, bottle, carton, bag, …).
+
+    `factor_to_base` converts a quantity in this unit to the group's base unit
+    (kg in a g-based Mass group → 1000). Packaging-style units (bottle, carton,
+    bag) carry factor 1 and no cross-product meaning — their real conversion is
+    per-product in `ProductUnit`.
+
+    `allow_decimal` is the data-driven replacement for both the PIECE
+    whole-number rule and the `weighted` flag (piece → False, g/ml/kg → True).
+    It is plain data in this batch — sale-flow enforcement switches over only
+    after a product's base ProductUnit is confirmed (Sprint 2 Batch 3+).
+    """
+
+    tenant        = models.ForeignKey(
+        'accounts.Tenant', on_delete=models.CASCADE,
+        related_name='units', db_index=True,
+    )
+    unit_group    = models.ForeignKey(
+        UnitGroup, on_delete=models.PROTECT, related_name='units',
+    )
+    name          = models.CharField(max_length=60)
+    symbol        = models.CharField(max_length=10, blank=True, default='')
+    # Precision Decimal(16,6) per the approved Sprint 2 design (D-13 working
+    # proposal). Convention: pick the smallest practical unit as each group's
+    # base (g not kg, ml not L) so factors are >= 1 and almost always integral.
+    factor_to_base = models.DecimalField(max_digits=16, decimal_places=6, default=1)
+    allow_decimal  = models.BooleanField(default=True)
+    is_active      = models.BooleanField(default=True)
+    created_at     = models.DateTimeField(auto_now_add=True)
+    updated_at     = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['unit_group_id', 'name']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['tenant', 'unit_group', 'name'],
+                name='pos_unit_tenant_group_name_uniq',
+            ),
+            models.CheckConstraint(
+                check=models.Q(factor_to_base__gt=0),
+                name='pos_unit_factor_positive',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.name} ({self.symbol})' if self.symbol else self.name
+
+
+class ProductUnit(models.Model):
+    """Product-specific conversion layer: how one such unit of THIS product
+    converts to the product's base unit.
+
+    `conversion_to_base` is authoritative per product (contract §2.2): for milk
+    with base ml, carton → 12000; for chocolate with base g, bag → 5000. It is
+    seeded from `Unit.factor_to_base` when the unit shares the base's group,
+    and free for packaging units (whose group factor is meaningless
+    cross-product).
+
+    Exactly one row per product may be the base (`is_base=True`, DB
+    partial-unique) and its conversion must be exactly 1 (DB CHECK). Once
+    StockMovements exist for a product, its base mapping is immutable — a
+    re-denomination would silently reinterpret history (service guard in
+    pos/services/units.py; an explicit re-denomination document is future
+    scope).
+    """
+
+    tenant  = models.ForeignKey(
+        'accounts.Tenant', on_delete=models.CASCADE,
+        related_name='product_units', db_index=True,
+    )
+    product = models.ForeignKey(
+        Product, on_delete=models.CASCADE, related_name='product_units',
+    )
+    # PROTECT: a unit referenced by any product mapping is deactivated, never
+    # deleted — deleting it would strand the conversion meaning.
+    unit    = models.ForeignKey(
+        Unit, on_delete=models.PROTECT, related_name='product_units',
+    )
+    conversion_to_base = models.DecimalField(max_digits=16, decimal_places=6, default=1)
+    is_base            = models.BooleanField(default=False)
+    is_sale_unit       = models.BooleanField(default=False)
+    is_purchase_unit   = models.BooleanField(default=False)
+    # Recipe flag is plain data in this batch; consumed by the Recipe slice
+    # (Sprint 3).
+    is_recipe_unit     = models.BooleanField(default=False)
+    is_active          = models.BooleanField(default=True)
+    created_at         = models.DateTimeField(auto_now_add=True)
+    updated_at         = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['product_id', '-is_base', 'id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['tenant', 'product', 'unit'],
+                name='pos_productunit_tenant_product_unit_uniq',
+            ),
+            # One base mapping per product — partial unique.
+            models.UniqueConstraint(
+                fields=['product'],
+                condition=models.Q(is_base=True),
+                name='pos_productunit_one_base_per_product',
+            ),
+            models.CheckConstraint(
+                check=models.Q(conversion_to_base__gt=0),
+                name='pos_productunit_conversion_positive',
+            ),
+            # The base mapping is the identity by definition.
+            models.CheckConstraint(
+                check=~models.Q(is_base=True) | models.Q(conversion_to_base=1),
+                name='pos_productunit_base_conversion_is_1',
+            ),
+        ]
+
+    def __str__(self):
+        flag = ' [base]' if self.is_base else ''
+        return f'product={self.product_id} unit={self.unit_id} x{self.conversion_to_base}{flag}'
+
+
+class ProductBarcodeUnit(models.Model):
+    """A scannable barcode bound to one pack size of a product (R-K).
+
+    Lets the carton and the single bottle each carry their own code. Barcodes
+    are unique per tenant across THIS table; collisions against the legacy
+    `Product.barcode` namespace are rejected at the serializer layer (the two
+    columns cannot share a DB constraint). Scan-precedence wiring
+    (ProductBarcodeUnit first, `Product.barcode` fallback) is Sprint 2 Batch 3
+    — this batch only stores the mapping.
+    """
+
+    tenant       = models.ForeignKey(
+        'accounts.Tenant', on_delete=models.CASCADE,
+        related_name='product_barcode_units', db_index=True,
+    )
+    product      = models.ForeignKey(
+        Product, on_delete=models.CASCADE, related_name='barcode_units',
+    )
+    # CASCADE: a barcode names a pack definition; without the pack mapping the
+    # code is meaningless.
+    product_unit = models.ForeignKey(
+        ProductUnit, on_delete=models.CASCADE, related_name='barcodes',
+    )
+    barcode      = models.CharField(max_length=64, db_index=True)
+    is_default   = models.BooleanField(default=False)
+    created_at   = models.DateTimeField(auto_now_add=True)
+    updated_at   = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['product_id', 'id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['tenant', 'barcode'],
+                name='pos_pbu_tenant_barcode_uniq',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.barcode} -> product_unit={self.product_unit_id}'

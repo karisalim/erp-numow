@@ -6,6 +6,14 @@ urlpatterns = [
     # Categories
     path('categories/', views.CategoryListCreateView.as_view(), name='category-list'),
 
+    # Catalog — dynamic units (Sprint 2 Batch 1, MASTER_DATA_CONTRACT §2.4)
+    path('catalog/unit-groups/',                     views.UnitGroupListCreateView.as_view(), name='unit-group-list'),
+    path('catalog/unit-groups/<int:pk>/',            views.UnitGroupDetailView.as_view(),     name='unit-group-detail'),
+    path('catalog/unit-groups/<int:pk>/deactivate/', views.UnitGroupDeactivateView.as_view(), name='unit-group-deactivate'),
+    path('catalog/units/',                           views.UnitListCreateView.as_view(),      name='unit-list'),
+    path('catalog/units/<int:pk>/',                  views.UnitDetailView.as_view(),          name='unit-detail'),
+    path('catalog/units/<int:pk>/deactivate/',       views.UnitDeactivateView.as_view(),      name='unit-deactivate'),
+
     # Products
     path('products/',                       views.ProductListCreateView.as_view(), name='product-list'),
     path('products/export/',                views.products_export,                 name='product-export'),
@@ -19,6 +27,10 @@ urlpatterns = [
     path('products/<int:pk>/stock-balance/',   views.ProductStockBalanceView.as_view(),      name='product-stock-balance'),
     # Phase 1.5 Slice J — per-warehouse balances for one product (read-only).
     path('products/<int:pk>/warehouse-stocks/', views.ProductWarehouseStockView.as_view(),    name='product-warehouse-stock'),
+    # Sprint 2 Batch 1 — per-product unit mappings + per-pack barcodes.
+    path('products/<int:product_pk>/units/',          views.ProductUnitListCreateView.as_view(),        name='product-unit-list'),
+    path('products/<int:product_pk>/units/<int:pk>/', views.ProductUnitDetailView.as_view(),            name='product-unit-detail'),
+    path('products/<int:product_pk>/barcodes/',       views.ProductBarcodeUnitListCreateView.as_view(), name='product-barcode-list'),
 
     # Inventory — batches (CRUD)
     path('inventory/batches/',          views.InventoryBatchListCreateView.as_view(), name='batch-list'),

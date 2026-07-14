@@ -1,7 +1,29 @@
 import django_filters
 from .models import (
-    BranchWarehouse, Product, Sale, StockMovement, Warehouse, WarehouseStock,
+    BranchWarehouse, Product, Sale, StockMovement, Unit, UnitGroup,
+    Warehouse, WarehouseStock,
 )
+
+
+class UnitGroupFilter(django_filters.FilterSet):
+    """Filters for the tenant unit-group catalog (Sprint 2 Batch 1)."""
+
+    # `active` is the contract-facing alias for the `is_active` column.
+    active = django_filters.BooleanFilter(field_name='is_active')
+
+    class Meta:
+        model  = UnitGroup
+        fields = ['is_active']
+
+
+class UnitFilter(django_filters.FilterSet):
+    """Filters for the tenant unit catalog (Sprint 2 Batch 1)."""
+
+    active = django_filters.BooleanFilter(field_name='is_active')
+
+    class Meta:
+        model  = Unit
+        fields = ['unit_group', 'allow_decimal', 'is_active']
 
 
 class ProductFilter(django_filters.FilterSet):
