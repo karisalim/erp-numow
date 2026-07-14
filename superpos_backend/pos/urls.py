@@ -6,6 +6,14 @@ urlpatterns = [
     # Categories
     path('categories/', views.CategoryListCreateView.as_view(), name='category-list'),
 
+    # Catalog — hierarchical category trees (Sprint 2 Batch 2, MASTER_DATA_CONTRACT §3)
+    path('catalog/sales-categories/',                     views.SalesCategoryListCreateView.as_view(),     name='sales-category-list'),
+    path('catalog/sales-categories/<int:pk>/',            views.SalesCategoryDetailView.as_view(),         name='sales-category-detail'),
+    path('catalog/sales-categories/<int:pk>/deactivate/', views.SalesCategoryDeactivateView.as_view(),     name='sales-category-deactivate'),
+    path('catalog/inventory-categories/',                     views.InventoryCategoryListCreateView.as_view(), name='inventory-category-list'),
+    path('catalog/inventory-categories/<int:pk>/',            views.InventoryCategoryDetailView.as_view(),     name='inventory-category-detail'),
+    path('catalog/inventory-categories/<int:pk>/deactivate/', views.InventoryCategoryDeactivateView.as_view(), name='inventory-category-deactivate'),
+
     # Catalog — dynamic units (Sprint 2 Batch 1, MASTER_DATA_CONTRACT §2.4)
     path('catalog/unit-groups/',                     views.UnitGroupListCreateView.as_view(), name='unit-group-list'),
     path('catalog/unit-groups/<int:pk>/',            views.UnitGroupDetailView.as_view(),     name='unit-group-detail'),

@@ -1,8 +1,31 @@
 import django_filters
 from .models import (
-    BranchWarehouse, Product, Sale, StockMovement, Unit, UnitGroup,
-    Warehouse, WarehouseStock,
+    BranchWarehouse, InventoryCategory, Product, Sale, SalesCategory,
+    StockMovement, Unit, UnitGroup, Warehouse, WarehouseStock,
 )
+
+
+class SalesCategoryFilter(django_filters.FilterSet):
+    """Filters for the hierarchical sales-category tree (Sprint 2 Batch 2)."""
+
+    active = django_filters.BooleanFilter(field_name='is_active')
+    # `root=true` → only top-level nodes (parent IS NULL).
+    root   = django_filters.BooleanFilter(field_name='parent', lookup_expr='isnull')
+
+    class Meta:
+        model  = SalesCategory
+        fields = ['parent', 'is_active']
+
+
+class InventoryCategoryFilter(django_filters.FilterSet):
+    """Filters for the hierarchical inventory-category tree (Sprint 2 Batch 2)."""
+
+    active = django_filters.BooleanFilter(field_name='is_active')
+    root   = django_filters.BooleanFilter(field_name='parent', lookup_expr='isnull')
+
+    class Meta:
+        model  = InventoryCategory
+        fields = ['parent', 'is_active']
 
 
 class UnitGroupFilter(django_filters.FilterSet):

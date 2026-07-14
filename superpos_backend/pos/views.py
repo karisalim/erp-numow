@@ -20,18 +20,20 @@ from accounts.permissions import IsCashierOrAbove, IsManagerOrAbove
 from accounts.services import account_movements as fa
 from accounts.services import customer_ar as ar
 from .filters import (
-    BranchWarehouseFilter, ProductFilter, SaleFilter, StockMovementFilter,
-    UnitFilter, UnitGroupFilter, WarehouseFilter, WarehouseStockFilter,
+    BranchWarehouseFilter, InventoryCategoryFilter, ProductFilter, SaleFilter,
+    SalesCategoryFilter, StockMovementFilter, UnitFilter, UnitGroupFilter,
+    WarehouseFilter, WarehouseStockFilter,
 )
 from .models import (
-    AuditLog, BranchWarehouse, Category, InventoryBatch, Product,
-    ProductBarcodeUnit, ProductUnit, PurchaseInvoice, Sale, SaleItem,
-    StockMovement, Unit, UnitGroup, Warehouse, WarehouseStock,
+    AuditLog, BranchWarehouse, Category, InventoryBatch, InventoryCategory,
+    Product, ProductBarcodeUnit, ProductUnit, PurchaseInvoice, Sale, SaleItem,
+    SalesCategory, StockMovement, Unit, UnitGroup, Warehouse, WarehouseStock,
 )
 from .serializers import (
     BranchWarehouseSerializer,
     CategorySerializer,
     InventoryBatchSerializer,
+    InventoryCategorySerializer,
     ProductBarcodeUnitSerializer,
     ProductSerializer,
     ProductStockUpdateSerializer,
@@ -41,6 +43,7 @@ from .serializers import (
     ReceiptSerializer,
     SaleListSerializer,
     SaleSerializer,
+    SalesCategorySerializer,
     StockAdjustmentSerializer,
     StockMovementSerializer,
     UnitGroupSerializer,
@@ -1552,6 +1555,97 @@ class WarehouseInventoryView(TenantMixin, generics.ListAPIView):
             .filter(tenant=self._tenant(), warehouse_id=self.kwargs['pk'])
             .order_by('product_id')
         )
+
+
+# ── Category Trees (Sprint 2 Batch 2 — MASTER_DATA_CONTRACT §3) ──────────────
+# Two independent hierarchical trees. Same conventions as the unit/warehouse
+# routes: tenant-scoped, Manager+ writes, Cashier+ reads, deactivate instead
+# of delete (children PROTECT their parent, and history must stay valid).
+# The legacy flat `categories/` route stays frozen as-is.
+
+
+class SalesCategoryListCreateView(TenantMixin, generics.ListCreateAPIView):
+    queryset         = SalesCategory.objects.select_related('parent').all()
+    serializer_class = SalesCategorySerializer
+    filterset_class  = SalesCategoryFilter
+    search_fields    = ['name']
+    ordering_fields  = ['name', 'created_at']
+    ordering         = ['name']
+
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+
+class SalesCategoryDetailView(TenantMixin, generics.RetrieveUpdateAPIView):
+    """GET / PATCH a sales category. No DELETE — deactivate instead."""
+
+    queryset          = SalesCategory.objects.select_related('parent').all()
+    serializer_class  = SalesCategorySerializer
+    http_method_names = ['get', 'patch', 'head', 'options']
+
+    def get_permissions(self):
+        if self.request.method in ('PUT', 'PATCH'):
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+
+class SalesCategoryDeactivateView(TenantMixin, generics.GenericAPIView):
+    """POST — soft-delete by flipping `is_active=False`."""
+
+    queryset           = SalesCategory.objects.all()
+    serializer_class   = SalesCategorySerializer
+    permission_classes = [IsManagerOrAbove]
+
+    def post(self, request, *args, **kwargs):
+        category = self.get_object()
+        if category.is_active:
+            category.is_active = False
+            category.save(update_fields=['is_active', 'updated_at'])
+        return Response(self.get_serializer(category).data)
+
+
+class InventoryCategoryListCreateView(TenantMixin, generics.ListCreateAPIView):
+    queryset         = InventoryCategory.objects.select_related('parent').all()
+    serializer_class = InventoryCategorySerializer
+    filterset_class  = InventoryCategoryFilter
+    search_fields    = ['name']
+    ordering_fields  = ['name', 'created_at']
+    ordering         = ['name']
+
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+
+class InventoryCategoryDetailView(TenantMixin, generics.RetrieveUpdateAPIView):
+    """GET / PATCH an inventory category. No DELETE — deactivate instead."""
+
+    queryset          = InventoryCategory.objects.select_related('parent').all()
+    serializer_class  = InventoryCategorySerializer
+    http_method_names = ['get', 'patch', 'head', 'options']
+
+    def get_permissions(self):
+        if self.request.method in ('PUT', 'PATCH'):
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+
+class InventoryCategoryDeactivateView(TenantMixin, generics.GenericAPIView):
+    """POST — soft-delete by flipping `is_active=False`."""
+
+    queryset           = InventoryCategory.objects.all()
+    serializer_class   = InventoryCategorySerializer
+    permission_classes = [IsManagerOrAbove]
+
+    def post(self, request, *args, **kwargs):
+        category = self.get_object()
+        if category.is_active:
+            category.is_active = False
+            category.save(update_fields=['is_active', 'updated_at'])
+        return Response(self.get_serializer(category).data)
 
 
 # ── Dynamic Units (Sprint 2 Batch 1 — MASTER_DATA_CONTRACT §2.4) ─────────────

@@ -235,10 +235,12 @@ roadmap and the §5 freeze in TARGET_BOUNDARIES.md).
 
 ## Sprint 2 — Master Data Foundation (units / categories / product / warehouse authority)
 
-**Status: IN PROGRESS — Batch 1 (Units Core Foundation) executed 2026-07-14 on
-branch `s2/master-data-foundation`; suite 431 green.** Design authority: the
-approved Sprint 2 design (plan approved 2026-07-13) + MASTER_DATA_CONTRACT §2.
-Remaining: Batch 0 governance (owner action — see flag below), Batches 2–5.
+**Status: IN PROGRESS — Batch 1 (Units Core Foundation) executed 2026-07-14
+(committed `00fddae`); Batch 2 (Category Trees Foundation) executed 2026-07-14
+on branch `s2/batch-2-category-trees`; suite 472 green.** Design authority:
+the approved Sprint 2 design (plan approved 2026-07-13) + MASTER_DATA_CONTRACT
+§2/§3. Remaining: Batch 0 governance (owner action — see flag below),
+Batches 3–5.
 
 **Governance flag (unresolved, carried from the design's Batch 0):**
 ARCHITECTURE_DECISIONS_REQUIRED §4 still shows **G1 (D-01) and G2 (D-13) with
@@ -322,6 +324,84 @@ precedence, purchase/sale flows, stock logic, frontend. No commits made.
   InventoryCategory, cycle guard, resolution service + `resolved-defaults`
   preview, CRUD APIs, tests). Batch 0 (G1/G2 sign-off + ADR promotion)
   remains an owner action that should land before/with it.
+
+### 2. Batch 2 execution record (2026-07-14, authorized) — Category Trees
+
+**Scope executed:** hierarchical category foundation only — SalesCategory +
+InventoryCategory (two independent self-parent trees) + CRUD APIs + tests.
+Not touched: recipes/BOM, costing, COGS, GL, product types,
+Product.sales_category/inventory_category (future batch), legacy `Category`
+model + route (frozen as-is), `Product.category`, POS filtering, sale/purchase
+flows, Unit models, WarehouseStock, frontend. No commits made.
+
+- **Changed files:**
+  - `superpos_backend/pos/models.py` — 2 new models (below); additive only.
+  - `superpos_backend/pos/migrations/0022_category_trees.py` — **new
+    (migration 0022)**, additive schema only (2 tables + 4 constraints),
+    zero data rows (R-F), no changes to any existing table.
+  - `superpos_backend/pos/serializers.py` — `_CategoryTreeSerializerMixin`
+    (shared validation: same-tenant parent, active parent required for new
+    assignments, self-parent rejected, walk-up ancestor cycle guard with
+    corrupt-data protection, friendly sibling/root name-uniqueness 400s) +
+    SalesCategorySerializer / InventoryCategorySerializer (parent queryset
+    tenant-pinned in `__init__`).
+  - `superpos_backend/pos/views.py` — list-create / detail (GET/PATCH, no
+    DELETE) / deactivate views per tree — Manager+ writes, Cashier+ reads
+    (unit/warehouse route conventions).
+  - `superpos_backend/pos/filters.py` — SalesCategoryFilter,
+    InventoryCategoryFilter (`parent`, `is_active`, `active` alias,
+    `root=true` for top-level nodes).
+  - `superpos_backend/pos/urls.py` — 6 routes (below).
+  - `superpos_backend/pos/test_categories.py` — new (+41 tests).
+- **Models added:** `SalesCategory` (menu/POS/sales-report tree) and
+  `InventoryCategory` (stock/purchasing tree) — deliberately separate tables
+  with separate self-FKs (D-01 option b; never merged, never sharing
+  parents). Both: tenant FK, nullable self-parent (PROTECT — a parent with
+  children cannot be deleted; deactivate instead), name, is_active,
+  timestamps. Name uniqueness per (tenant, parent) plus a partial root-level
+  constraint (NULL parents don't collide in Postgres). Unlimited depth.
+  **Deviation note:** the goal's field list is exhaustive, so the approved
+  design's extra SalesCategory fields (show_on_pos, sort_order,
+  default_station, GL/tax placeholder ids) are deferred to a later additive
+  batch — they ride the same tables.
+- **Migration numbers:** `pos/0022_category_trees` (applied to dev DB;
+  `makemigrations --check` clean).
+- **API endpoints added:** `catalog/sales-categories/` (GET list + POST),
+  `catalog/sales-categories/{id}/` (GET/PATCH),
+  `catalog/sales-categories/{id}/deactivate/` (POST) — and the same trio
+  under `catalog/inventory-categories/`. Tenant-scoped via TenantMixin;
+  cross-tenant detail/patch → 404.
+- **Tests executed:** full backend suite — **472 passed, 0 failed** (69.6 s;
+  431 baseline + 41 new). `python manage.py check` clean. New coverage (run
+  against BOTH trees via a shared mixin): root/child/multi-level creation
+  (Beverages→Coffee→Hot Coffee→Espresso), rename, valid reparent,
+  deactivate; self-parent rejected, descendant-as-parent rejected (A→B→C, C
+  cannot parent A), direct-child-as-parent rejected, cross-tenant parent
+  rejected, inactive parent rejected, sibling-duplicate rejected while same
+  name under another parent allowed, root-duplicate rejected; list scoping,
+  cross-tenant 404s, cashier read-only, `root` filter. Independence tests
+  (same "Milk" in both trees per the brief's example; sales node can't
+  parent an inventory node). Legacy compatibility tests (flat `categories/`
+  route lists+creates; `Product.category` FK + `category_name` unchanged;
+  POS `?category=` product filter still keyed to legacy Category).
+- **Risks / blockers:**
+  - G1 (D-01 category split) sign-off cell in ARCHITECTURE_DECISIONS_REQUIRED
+    §4 is still blank — same governance flag as Batch 1; this batch
+    implements the D-01 recommendation (option b) on explicit user
+    authorization; register + ADR promotion remain an owner action.
+  - Cycle detection is serializer-layer (per the goal: not DB-only); direct
+    ORM writes could still create a cycle — the walk-up guard carries a
+    visited-set so even corrupt data cannot loop it; the Batch-4 classify
+    command should re-verify tree integrity.
+  - Nothing consumes the trees yet (by design) — product linkage +
+    inheritance resolution arrive with Batch 3's product foundation.
+- **Legacy compatibility:** CONFIRMED — flat `Category`/`Product.category`
+  untouched (no schema change to either), POS filter behavior proven by
+  test, full 431-test baseline stayed green.
+- **Next batch:** Batch 3 — Product foundation (migration 0023:
+  product_type + PRODUCT_TYPE_FLAGS, sales/inventory category FKs,
+  base_inventory_unit, scan precedence, serializer/import-export columns).
+  Batch 0 (G1/G2 sign-off + ADR promotion) still pending owner action.
 
 ---
 

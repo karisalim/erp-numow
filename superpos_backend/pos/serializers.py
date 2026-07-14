@@ -11,9 +11,9 @@ from accounts.models import (
 )
 from .models import (
     BranchWarehouse, Category, InsufficientStockError, InventoryBatch,
-    Payment, Product, ProductBarcodeUnit, ProductUnit, PurchaseInvoice,
-    PurchaseInvoiceLine, Sale, SaleItem, StockMovement, Unit, UnitGroup,
-    Warehouse, WarehouseStock,
+    InventoryCategory, Payment, Product, ProductBarcodeUnit, ProductUnit,
+    PurchaseInvoice, PurchaseInvoiceLine, Sale, SaleItem, SalesCategory,
+    StockMovement, Unit, UnitGroup, Warehouse, WarehouseStock,
 )
 
 logger = logging.getLogger(__name__)
@@ -325,6 +325,119 @@ class WarehouseSerializer(serializers.ModelSerializer):
                 'A warehouse with this code already exists for this tenant.',
             )
         return value
+
+
+# ── Category Trees (Sprint 2 Batch 2 — MASTER_DATA_CONTRACT §3) ───────────────
+
+
+class _CategoryTreeSerializerMixin:
+    """Shared parent-validation rules for both hierarchical category trees.
+
+    Enforced here — NOT only via DB constraints (a cycle is inexpressible
+    declaratively):
+      * parent must belong to the caller's tenant
+      * parent must be active (inactive nodes accept no NEW assignments)
+      * a category cannot be its own parent
+      * a category cannot become a child of one of its own descendants
+        (walk-up ancestor check, unlimited depth)
+      * sibling / root name uniqueness gets a friendly 400 backing the DB
+        constraints
+    """
+
+    def _tenant(self):
+        request = self.context.get('request')
+        return getattr(getattr(request, 'user', None), 'tenant', None)
+
+    def validate_parent(self, parent):
+        if parent is None:
+            return parent
+        tenant = self._tenant()
+        if tenant is not None and parent.tenant_id != tenant.id:
+            raise serializers.ValidationError(
+                "parent must belong to the caller's tenant.",
+            )
+        if not parent.is_active:
+            raise serializers.ValidationError(
+                'parent is inactive; inactive categories cannot take new children.',
+            )
+        if self.instance is not None:
+            if parent.pk == self.instance.pk:
+                raise serializers.ValidationError(
+                    'A category cannot be its own parent.',
+                )
+            # Cycle guard: if `instance` appears among the proposed parent's
+            # ancestors, attaching it would close a loop (C cannot become the
+            # parent of A when A → B → C). `seen` stops a walk over already-
+            # corrupt data from spinning forever.
+            node, seen = parent.parent, {parent.pk}
+            while node is not None:
+                if node.pk == self.instance.pk:
+                    raise serializers.ValidationError(
+                        'Circular hierarchy: the chosen parent is a '
+                        'descendant of this category.',
+                    )
+                if node.pk in seen:
+                    break
+                seen.add(node.pk)
+                node = node.parent
+        return parent
+
+    def validate(self, attrs):
+        tenant = self._tenant()
+        model = self.Meta.model
+        name = attrs.get('name', getattr(self.instance, 'name', None))
+        # PATCH may omit `parent`; distinguish "not sent" from "set to null".
+        if 'parent' in attrs:
+            parent = attrs['parent']
+        else:
+            parent = getattr(self.instance, 'parent', None)
+
+        if tenant is not None and name:
+            qs = model.objects.filter(tenant=tenant, parent=parent, name=name)
+            if self.instance is not None:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                where = 'at the root level' if parent is None else 'under this parent'
+                raise serializers.ValidationError({
+                    'name': f'A category named {name!r} already exists {where}.',
+                })
+        return attrs
+
+
+class SalesCategorySerializer(_CategoryTreeSerializerMixin, serializers.ModelSerializer):
+    parent_name = serializers.CharField(source='parent.name', read_only=True)
+
+    class Meta:
+        model  = SalesCategory
+        fields = [
+            'id', 'name', 'parent', 'parent_name', 'is_active',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'parent_name', 'created_at', 'updated_at']
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        tenant = self._tenant()
+        if tenant is not None:
+            self.fields['parent'].queryset = SalesCategory.objects.filter(tenant=tenant)
+
+
+class InventoryCategorySerializer(_CategoryTreeSerializerMixin, serializers.ModelSerializer):
+    parent_name = serializers.CharField(source='parent.name', read_only=True)
+
+    class Meta:
+        model  = InventoryCategory
+        fields = [
+            'id', 'name', 'parent', 'parent_name', 'is_active',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'parent_name', 'created_at', 'updated_at']
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        tenant = self._tenant()
+        if tenant is not None:
+            self.fields['parent'].queryset = InventoryCategory.objects.filter(tenant=tenant)
 
 
 # ── Dynamic Units (Sprint 2 Batch 1 — MASTER_DATA_CONTRACT §2) ────────────────

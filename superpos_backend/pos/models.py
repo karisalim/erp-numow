@@ -1047,3 +1047,91 @@ class ProductBarcodeUnit(models.Model):
 
     def __str__(self):
         return f'{self.barcode} -> product_unit={self.product_unit_id}'
+
+
+# ── Category Trees (Sprint 2 Batch 2 — MASTER_DATA_CONTRACT §3, D-01) ─────────
+# Two INDEPENDENT hierarchical trees: SalesCategory organizes the menu / POS /
+# sales reporting; InventoryCategory classifies stock for inventory reporting
+# and purchasing analytics. They never share parents and are never merged
+# (conflict register CR/D-01, option b). Purely additive: the legacy flat
+# `Category` (and `Product.category`) stays untouched and authoritative for
+# existing behavior — products link into these trees in a later batch.
+#
+# Cycle prevention is enforced at the serializer layer (walk-up ancestor
+# check); the DB can't express "no cycles" declaratively, so the application
+# check is the guard and PROTECT-on-parent keeps deletes from orphaning
+# subtrees silently.
+
+
+class SalesCategory(models.Model):
+    """Hierarchical menu/sales classification («تندرج من» self-parent tree)."""
+
+    tenant     = models.ForeignKey(
+        'accounts.Tenant', on_delete=models.CASCADE,
+        related_name='sales_categories', db_index=True,
+    )
+    parent     = models.ForeignKey(
+        'self', on_delete=models.PROTECT,
+        null=True, blank=True, related_name='children',
+    )
+    name       = models.CharField(max_length=120)
+    is_active  = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name']
+        verbose_name_plural = 'sales categories'
+        constraints = [
+            # Sibling names are unique under one parent…
+            models.UniqueConstraint(
+                fields=['tenant', 'parent', 'name'],
+                name='pos_salescat_tenant_parent_name_uniq',
+            ),
+            # …and root names are unique too (NULL parents don't collide in
+            # Postgres, so the root level needs its own partial constraint).
+            models.UniqueConstraint(
+                fields=['tenant', 'name'],
+                condition=models.Q(parent__isnull=True),
+                name='pos_salescat_tenant_root_name_uniq',
+            ),
+        ]
+
+    def __str__(self):
+        return self.name
+
+
+class InventoryCategory(models.Model):
+    """Hierarchical stock classification — separate tree, never merged with
+    SalesCategory (sales and inventory reports serve different purposes)."""
+
+    tenant     = models.ForeignKey(
+        'accounts.Tenant', on_delete=models.CASCADE,
+        related_name='inventory_categories', db_index=True,
+    )
+    parent     = models.ForeignKey(
+        'self', on_delete=models.PROTECT,
+        null=True, blank=True, related_name='children',
+    )
+    name       = models.CharField(max_length=120)
+    is_active  = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name']
+        verbose_name_plural = 'inventory categories'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['tenant', 'parent', 'name'],
+                name='pos_invcat_tenant_parent_name_uniq',
+            ),
+            models.UniqueConstraint(
+                fields=['tenant', 'name'],
+                condition=models.Q(parent__isnull=True),
+                name='pos_invcat_tenant_root_name_uniq',
+            ),
+        ]
+
+    def __str__(self):
+        return self.name
