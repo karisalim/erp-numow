@@ -403,6 +403,110 @@ flows, Unit models, WarehouseStock, frontend. No commits made.
   base_inventory_unit, scan precedence, serializer/import-export columns).
   Batch 0 (G1/G2 sign-off + ADR promotion) still pending owner action.
 
+### 3. Batches 3+4 execution record (2026-07-15, authorized) — Product Type Foundation + Product Unit Integration
+
+**Scope executed (per the owner's 2026-07-15 goal, which narrowed the
+revised-plan scope):** Batch 3 = product classification foundation
+(`product_type` + centralized behavior matrix + tree-category FKs +
+`show_on_pos`/`is_discountable` + reverse barcode-collision guard);
+Batch 4 = product↔unit integration via the existing Batch 1 models + the
+`seed_product_units` command. **Deliberately NOT executed (deferred by the
+goal):** scan precedence wiring, PriceTier/ProductUnitTierPrice (revised-plan
+3b), `ProductUnit.default_sale_price`, barcode detail route, import/export
+columns, Recipe/BOM, costing/COGS/GL, POS/sale/purchase/frontend changes.
+No commits made.
+
+- **Changed files:**
+  - `superpos_backend/pos/services/product_types.py` — **new**: `ProductType`
+    TextChoices + `PRODUCT_TYPE_BEHAVIOR` matrix (`can_sell`, `can_purchase`,
+    `track_inventory`, `affects_stock`, `requires_cost`, `can_have_recipe`)
+    + `get_behavior` (raises loudly on unknown types) — the single authority;
+    no inline `product_type` branching anywhere else.
+  - `superpos_backend/pos/models.py` — 5 additive Product fields (below) +
+    `(tenant, product_type)` index + `type_behavior` property.
+  - `superpos_backend/pos/migrations/0023_product_foundation.py` — **new**,
+    additive only (5 AddField + 1 AddIndex), zero data rows (R-F).
+  - `superpos_backend/pos/serializers.py` — ProductSerializer: new fields +
+    read-only `behavior` flags + `product_type_display` + category names;
+    tenant+active validation on both tree FKs (querysets tenant-pinned in
+    `__init__`); reverse barcode-collision guard (only when the barcode
+    CHANGES — pre-existing collisions never block legacy edits); type-change
+    guard: track_inventory cannot be switched off once StockMovement history
+    exists (same philosophy as base-unit immutability).
+  - `superpos_backend/pos/views.py` — product list/detail `select_related`
+    extended to the two new FKs (no N+1 from the name fields).
+  - `superpos_backend/pos/management/__init__.py`,
+    `.../commands/__init__.py`,
+    `.../commands/seed_product_units.py` — **new command** (below).
+  - `superpos_backend/pos/test_product_foundation.py` — new (+52 tests).
+- **Fields added (Product, all additive):** `product_type` (choices:
+  stock_item default / ingredient / prep_item / recipe_product / resale /
+  packaging / service / bundle / fixed_asset), `sales_category` FK →
+  SalesCategory (SET_NULL), `inventory_category` FK → InventoryCategory
+  (SET_NULL), `show_on_pos` (default True), `is_discountable` (default
+  True). Legacy `category`, `unit`, `pack_qty`, `barcode`, `weighted` all
+  untouched and still governing behavior. **No `Product.base_unit` was
+  added** — `ProductUnit.is_base` remains the only base-unit authority.
+- **Migration numbers:** `pos/0023_product_foundation` (applied to dev DB;
+  `makemigrations --check` clean).
+- **API changes (additive only):** `products/` + `products/{id}/` expose the
+  five new fields plus read-only `product_type_display`,
+  `sales_category_name`, `inventory_category_name`, and calculated
+  `behavior` flags. No route added/removed; every legacy key byte-identical.
+- **Command added:** `seed_product_units` — dry-run default / `--apply` /
+  `--tenant <id>`; idempotent (get_or_create on the DB uniqueness keys);
+  Pass 1 unit substrate (Count/Piece, Mass/Gram+Kilogram,
+  Volume/Milliliter+Liter, Packaging/Carton — existing rows reused, factors
+  never edited), Pass 2 base mirror 1:1 of the legacy enum (kg stays kg;
+  conversion=1, sale+purchase flags), Pass 3 pack mapping from `pack_qty>1`
+  (Carton×pack_qty; skipped when the base already is carton), Pass 4
+  log-only legacy↔pack barcode-collision audit. Never touches stock
+  quantities. Dev DB dry-run verified (2 tenants, 50 base mappings planned,
+  0 conflicts, rolled back); **`--apply` on dev/prod remains an operator
+  action after reviewing the report** (TRANSITION §2.4 pattern).
+- **Tests executed:** full backend suite — **524 passed, 0 failed** (45.1 s;
+  472 baseline + 52 new). `python manage.py check` clean;
+  `makemigrations --check` clean. New coverage: matrix completeness (keys ==
+  enum) + per-type flag assertions + unknown-type raises; API round-trip of
+  every type with matching read-only flags; spoofed `behavior` payload
+  ignored; type-change guard (blocked with history → non-inventory type,
+  allowed without history, allowed between inventory types); tree-FK tenant
+  isolation both directions + inactive rejected + PATCH-to-null + SET_NULL
+  on delete; visibility flag defaults/round-trip; reverse barcode collision
+  on create+change, tenant-scoped, unchanged-barcode edits unaffected;
+  multi-unit conversions (milk ml/bottle/carton 2→2000/3→36000, chocolate
+  0.5 bag→2500 g), wrong-product unit rejected, pack-barcode validations
+  both directions; seed command (dry-run writes nothing, 1:1 mirror per
+  enum value, pack mapping, carton-base skip, idempotent double-apply,
+  tenant scoping, manual base respected, stock+ledger untouched, unknown
+  tenant errors); legacy compatibility (pre-Batch-3 payload creates fine,
+  all legacy response keys present, sale flow identical even when
+  classified `service`/hidden, seeded product sells unchanged).
+- **Risks / blockers:**
+  - **Enum wording conflict (flagged per SOURCE_OF_TRUTH):** the executed
+    type list follows the owner's 2026-07-15 goal (`resale`, `bundle`,
+    `fixed_asset`); MASTER_DATA_CONTRACT §11 spells `non_stock`,
+    `bundle_combo`, `fixed_asset_purchase_only` (no `resale`/`prep_item`/
+    `packaging`), and the revised plan used `non_stock`+`bundle_combo`.
+    `service` covers the non_stock intent. Needs reconciling in the Batch 0
+    ADR promotion before the values freeze into stored data.
+  - **Naming conflict (flagged, owner's spelling kept):** v3.6 PRD §26.1
+    names the visibility flag `visible_in_pos`; the goal + contract §11 say
+    `show_on_pos` — implemented as `show_on_pos`; record in the ADR.
+  - Behavior flags are advisory-only until Batch 5+/Sprint 3 consumers land
+    (by design: classification only, nothing enforces `can_sell` etc. yet).
+  - G1/G2 sign-off cells still blank (Batch 0 owner action, third batch
+    executed on explicit authorization).
+  - Deferred from the revised plan and still unscheduled here: scan
+    precedence + barcode detail route, PriceTier/tier prices (3b),
+    warehouse authority rescheduling.
+- **Legacy compatibility:** CONFIRMED — zero legacy fields/routes changed,
+  serializer additions are append-only, sale/stock/purchase flows untouched
+  (proven by the 472-test baseline staying green + explicit parity tests).
+- **Next batch:** revised-plan 3b (PriceTier + ProductUnitTierPrice +
+  `catalog/price-tiers/` + `products/{id}/tier-prices/`) or Batch 5 POS
+  integration — owner to sequence; Batch 0 still pending.
+
 ---
 
 *(Later sprints get their own sections here after their pre-sprint audits.)*

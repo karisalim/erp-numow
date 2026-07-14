@@ -4,6 +4,10 @@ from decimal import Decimal
 from django.conf import settings
 from django.db import models, transaction
 
+# Import-cycle note: services/product_types.py imports Django only (never
+# pos.models), so pulling the type enum + matrix from it here is safe.
+from pos.services.product_types import ProductType, get_behavior
+
 
 class InsufficientStockError(Exception):
     """Raised by Product.deduct_stock when stock < qty.
@@ -72,6 +76,31 @@ class Product(models.Model):
     pack_qty = models.DecimalField(max_digits=10, decimal_places=3, default=1)
     plu      = models.CharField(max_length=10, blank=True, default='')
     active   = models.BooleanField(default=True)
+
+    # ── Sprint 2 Batch 3: master-data classification (additive only) ─────────
+    # Classification ONLY in this batch — no flow reads these yet. Behavior
+    # flags derive from the centralized matrix in services/product_types.py
+    # (never stored, never branched on inline elsewhere).
+    product_type = models.CharField(
+        max_length=20, choices=ProductType.choices,
+        default=ProductType.STOCK_ITEM,
+    )
+    # Links into the Batch 2 trees. The legacy flat `category` FK above stays
+    # untouched and authoritative for existing behavior; these are additive
+    # (no backfill — products link in over time / via the Batch 4 commands).
+    sales_category = models.ForeignKey(
+        'SalesCategory', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='products',
+    )
+    inventory_category = models.ForeignKey(
+        'InventoryCategory', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='products',
+    )
+    # Both default True so shipping this migration hides/locks nothing that
+    # exists today. POS catalog filtering consumes `show_on_pos` in Batch 5.
+    show_on_pos     = models.BooleanField(default=True)
+    is_discountable = models.BooleanField(default=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -85,6 +114,12 @@ class Product(models.Model):
                 fields=['tenant', 'stock'],
                 name='pos_product_lowstock_idx',
                 condition=models.Q(stock__lte=models.F('reorder')) & models.Q(active=True),
+            ),
+            # Tenant-scoped type filtering (catalog screens, future recipe /
+            # purchasing pickers that narrow by classification).
+            models.Index(
+                fields=['tenant', 'product_type'],
+                name='pos_product_tenant_type_idx',
             ),
         ]
         # Database-level invariants — these are the last line of defense in
@@ -110,6 +145,12 @@ class Product(models.Model):
         if self.price:
             return round((self.price - self.cost) / self.price * 100, 1)
         return 0
+
+    @property
+    def type_behavior(self):
+        """Centralized behavior flags for this product's type — the ONLY
+        sanctioned way to ask what a product may do (services/product_types)."""
+        return get_behavior(self.product_type)
 
     # ── Thread-safe stock helpers ─────────────────────────────────────────────
 

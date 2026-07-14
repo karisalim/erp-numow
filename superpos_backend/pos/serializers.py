@@ -27,9 +27,32 @@ class CategorySerializer(serializers.ModelSerializer):
 
 
 class ProductSerializer(serializers.ModelSerializer):
+    """Catalog product.
+
+    Sprint 2 Batch 3 additions are strictly additive — every legacy field
+    keeps its exact name, shape, and behavior (FE compatibility):
+      * `product_type` + read-only `behavior` flags calculated from the
+        centralized matrix (services/product_types.py) — never stored
+      * `sales_category` / `inventory_category` links into the Batch 2 trees
+        (tenant-validated; the legacy flat `category` stays untouched)
+      * `show_on_pos` / `is_discountable` classification booleans
+      * reverse barcode-collision guard: `Product.barcode` may not collide
+        with any pack barcode in `ProductBarcodeUnit` (the forward direction
+        already lives in ProductBarcodeUnitSerializer) so scan resolution
+        stays unambiguous when Batch 5 wires the precedence
+    """
+
     category_name = serializers.CharField(source='category.name', read_only=True)
     margin        = serializers.FloatField(read_only=True)
     unit_display  = serializers.CharField(source='get_unit_display', read_only=True)
+
+    product_type_display    = serializers.CharField(
+        source='get_product_type_display', read_only=True)
+    sales_category_name     = serializers.CharField(
+        source='sales_category.name', read_only=True)
+    inventory_category_name = serializers.CharField(
+        source='inventory_category.name', read_only=True)
+    behavior                = serializers.SerializerMethodField()
 
     class Meta:
         model  = Product
@@ -37,9 +60,106 @@ class ProductSerializer(serializers.ModelSerializer):
             'id', 'barcode', 'sku', 'name', 'category', 'category_name',
             'price', 'cost', 'tax_rate', 'stock', 'reorder', 'color',
             'weighted', 'unit', 'unit_display', 'pack_qty', 'plu', 'active',
-            'margin', 'created_at', 'updated_at',
+            'margin',
+            'product_type', 'product_type_display', 'behavior',
+            'sales_category', 'sales_category_name',
+            'inventory_category', 'inventory_category_name',
+            'show_on_pos', 'is_discountable',
+            'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = [
+            'id', 'product_type_display', 'behavior',
+            'sales_category_name', 'inventory_category_name',
+            'created_at', 'updated_at',
+        ]
+
+    def _tenant(self):
+        request = self.context.get('request')
+        return getattr(getattr(request, 'user', None), 'tenant', None)
+
+    def get_behavior(self, obj):
+        from pos.services.product_types import behavior_flags
+        return behavior_flags(obj.product_type)
+
+    def _validate_tree_category(self, value, tree_label):
+        """Shared rule for both tree FKs: caller's tenant + active."""
+        if value is None:
+            return value
+        tenant = self._tenant()
+        if tenant is not None and value.tenant_id != tenant.id:
+            raise serializers.ValidationError(
+                f"{tree_label} must belong to the caller's tenant.",
+            )
+        if not value.is_active:
+            raise serializers.ValidationError(
+                f'{tree_label} is inactive; pick an active category.',
+            )
+        return value
+
+    def validate_sales_category(self, value):
+        return self._validate_tree_category(value, 'sales_category')
+
+    def validate_inventory_category(self, value):
+        return self._validate_tree_category(value, 'inventory_category')
+
+    def validate(self, attrs):
+        from pos.services import units as units_svc
+        from pos.services.product_types import get_behavior
+
+        tenant = self._tenant() or getattr(self.instance, 'tenant', None)
+
+        # Reverse barcode collision (closes the one-directional gap from
+        # Batch 1): a legacy product barcode that also lives in the pack
+        # namespace would make future scan precedence ambiguous. Only checked
+        # when the barcode actually CHANGES — a full PUT resending an
+        # unchanged (already-colliding) barcode must not break legacy edits;
+        # the seed command's audit pass reports those for the operator.
+        barcode = attrs.get('barcode')
+        barcode_changes = (
+            'barcode' in attrs
+            and (self.instance is None or barcode != self.instance.barcode)
+        )
+        if tenant is not None and barcode and barcode_changes:
+            if ProductBarcodeUnit.objects.filter(
+                    tenant=tenant, barcode=barcode).exists():
+                raise serializers.ValidationError({
+                    'barcode': (
+                        'This barcode is already assigned to a product unit '
+                        '(pack barcode); pick a distinct product barcode.'
+                    ),
+                })
+
+        # Type-change guard (same philosophy as the base-unit immutability
+        # rule): once stock history exists in the ledger, the product cannot
+        # be reclassified to a type that stops tracking inventory — the
+        # movements would be orphaned from any interpretable balance.
+        new_type = attrs.get('product_type')
+        if (
+            self.instance is not None
+            and new_type
+            and new_type != self.instance.product_type
+            and get_behavior(self.instance.product_type).track_inventory
+            and not get_behavior(new_type).track_inventory
+            and units_svc.product_has_stock_history(self.instance)
+        ):
+            raise serializers.ValidationError({
+                'product_type': (
+                    'This product has stock movement history; it cannot be '
+                    'reclassified to a non-inventory type '
+                    f'({new_type!r}). Deactivate it and create a new product '
+                    'instead.'
+                ),
+            })
+        return attrs
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        tenant = self._tenant()
+        if tenant is not None:
+            self.fields['sales_category'].queryset = \
+                SalesCategory.objects.filter(tenant=tenant)
+            self.fields['inventory_category'].queryset = \
+                InventoryCategory.objects.filter(tenant=tenant)
 
 
 class ProductStockUpdateSerializer(serializers.ModelSerializer):

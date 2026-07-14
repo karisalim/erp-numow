@@ -91,7 +91,8 @@ class CategoryListCreateView(TenantMixin, generics.ListCreateAPIView):
 # ── Products ──────────────────────────────────────────────────────────────────
 
 class ProductListCreateView(TenantMixin, generics.ListCreateAPIView):
-    queryset         = Product.objects.select_related('category').all()
+    queryset         = Product.objects.select_related(
+        'category', 'sales_category', 'inventory_category').all()
     serializer_class = ProductSerializer
     filterset_class  = ProductFilter
     search_fields    = ['name', 'barcode', 'sku']
@@ -105,7 +106,8 @@ class ProductListCreateView(TenantMixin, generics.ListCreateAPIView):
 
 
 class ProductDetailView(TenantMixin, generics.RetrieveUpdateDestroyAPIView):
-    queryset         = Product.objects.select_related('category').all()
+    queryset         = Product.objects.select_related(
+        'category', 'sales_category', 'inventory_category').all()
     serializer_class = ProductSerializer
 
     def get_permissions(self):
