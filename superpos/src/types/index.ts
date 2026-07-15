@@ -1,3 +1,5 @@
+import type { ProductTypeValue, ProductTypeBehavior } from './erp';
+
 export type BadgeKind = 'gray' | 'success' | 'danger' | 'warn' | 'info' | 'brand' | 'violet';
 export type ButtonVariant = 'primary' | 'secondary' | 'tertiary' | 'ghost' | 'danger' | 'success' | 'dark';
 export type ButtonSize = 'sm' | 'md' | 'lg' | 'xl';
@@ -45,6 +47,18 @@ export interface Product {
   margin?: number;
   created_at?: string;
   updated_at?: string;
+
+  // ── Sprint 2 Batch 3 classification (additive, all optional) ──
+  product_type?: ProductTypeValue;
+  product_type_display?: string;
+  /** Read-only, server-computed from product_type — never edit directly. */
+  behavior?: ProductTypeBehavior;
+  sales_category?: number | null;
+  sales_category_name?: string;
+  inventory_category?: number | null;
+  inventory_category_name?: string;
+  show_on_pos?: boolean;
+  is_discountable?: boolean;
 
   // ── Legacy aliases — TODO: remove once POS/Products pages are migrated ──
   /** @deprecated use `tax_rate` */

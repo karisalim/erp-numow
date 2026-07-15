@@ -4,7 +4,11 @@ import apiClient from '../../api/client';
 import { Modal } from '../ui/Modal';
 import { Button } from '../ui/Button';
 import { Icon } from '../ui/Icon';
+import { Badge } from '../ui/Badge';
+import { categoriesApi, asResults } from '../../api/erp';
+import { flattenTree } from '../../utils/tree';
 import type { Product, ProductUnit } from '../../types';
+import type { CategoryTreeNode, ProductTypeValue } from '../../types/erp';
 
 export type FormMode = 'create' | 'edit' | 'view';
 type Tab = 'quick' | 'full';
@@ -43,9 +47,29 @@ interface FormState {
   weighted: boolean;
   color:    string;
   active:   boolean;
+  product_type: ProductTypeValue;
+  sales_category: string;      // empty = none; otherwise stringified id
+  inventory_category: string;  // empty = none; otherwise stringified id
+  show_on_pos: boolean;
+  is_discountable: boolean;
 }
 
 const UNIT_OPTIONS: ProductUnit[] = ['piece', 'kg', 'liter', 'carton'];
+
+/** Mirrors pos/services/product_types.py ProductType — labels only; the
+ * behavior matrix itself stays server-side (read-only `behavior` on the
+ * product), never duplicated here. */
+const PRODUCT_TYPE_OPTIONS: { value: ProductTypeValue; label: string }[] = [
+  { value: 'stock_item',     label: 'Stock item' },
+  { value: 'ingredient',     label: 'Ingredient' },
+  { value: 'prep_item',      label: 'Prep item' },
+  { value: 'recipe_product', label: 'Recipe product' },
+  { value: 'resale',         label: 'Resale' },
+  { value: 'packaging',      label: 'Packaging' },
+  { value: 'service',        label: 'Service' },
+  { value: 'bundle',         label: 'Bundle' },
+  { value: 'fixed_asset',    label: 'Fixed asset' },
+];
 
 const HIDDEN_DEFAULTS = {
   reorder:  '10',
@@ -53,6 +77,9 @@ const HIDDEN_DEFAULTS = {
   color:    '#6B7280',
   weighted: false,
   active:   true,
+  product_type: 'stock_item' as ProductTypeValue,
+  show_on_pos: true,
+  is_discountable: true,
 };
 
 function blankForm(): FormState {
@@ -67,6 +94,11 @@ function blankForm(): FormState {
     weighted: HIDDEN_DEFAULTS.weighted,
     color: HIDDEN_DEFAULTS.color,
     active: HIDDEN_DEFAULTS.active,
+    product_type: HIDDEN_DEFAULTS.product_type,
+    sales_category: '',
+    inventory_category: '',
+    show_on_pos: HIDDEN_DEFAULTS.show_on_pos,
+    is_discountable: HIDDEN_DEFAULTS.is_discountable,
   };
 }
 
@@ -87,6 +119,11 @@ function formFromProduct(p: Product): FormState {
     weighted: !!p.weighted,
     color:    p.color || HIDDEN_DEFAULTS.color,
     active:   p.active ?? true,
+    product_type: p.product_type ?? HIDDEN_DEFAULTS.product_type,
+    sales_category: p.sales_category != null ? String(p.sales_category) : '',
+    inventory_category: p.inventory_category != null ? String(p.inventory_category) : '',
+    show_on_pos: p.show_on_pos ?? HIDDEN_DEFAULTS.show_on_pos,
+    is_discountable: p.is_discountable ?? HIDDEN_DEFAULTS.is_discountable,
   };
 }
 
@@ -116,12 +153,20 @@ function buildPayload(form: FormState, tab: Tab) {
     payload.color    = HIDDEN_DEFAULTS.color;
     payload.weighted = HIDDEN_DEFAULTS.weighted;
     payload.active   = HIDDEN_DEFAULTS.active;
+    payload.product_type = HIDDEN_DEFAULTS.product_type;
+    payload.show_on_pos = HIDDEN_DEFAULTS.show_on_pos;
+    payload.is_discountable = HIDDEN_DEFAULTS.is_discountable;
   } else {
     payload.reorder  = Number(form.reorder || 0);
     payload.tax_rate = form.tax_rate;
     payload.color    = form.color || HIDDEN_DEFAULTS.color;
     payload.weighted = form.weighted;
     payload.active   = form.active;
+    payload.product_type = form.product_type;
+    payload.show_on_pos = form.show_on_pos;
+    payload.is_discountable = form.is_discountable;
+    if (form.sales_category) payload.sales_category = Number(form.sales_category);
+    if (form.inventory_category) payload.inventory_category = Number(form.inventory_category);
   }
   return payload;
 }
@@ -175,10 +220,30 @@ export const ProductFormModal: React.FC<Props> = ({
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [formError, setFormError]   = useState<string | null>(null);
 
+  const [salesCategories, setSalesCategories] = useState<CategoryTreeNode[]>([]);
+  const [inventoryCategories, setInventoryCategories] = useState<CategoryTreeNode[]>([]);
+
   // Keep state in sync if the parent swaps the product mid-flight (e.g. View → Edit).
   useEffect(() => {
     if (initialProduct) setForm(formFromProduct(initialProduct));
   }, [initialProduct]);
+
+  // Sprint 2 Batch 2 category trees — fetched here rather than hoisted into
+  // ProductsPage since they're only needed while this modal is open.
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([
+      categoriesApi.listSales({ is_active: 'true' }).then(asResults),
+      categoriesApi.listInventory({ is_active: 'true' }).then(asResults),
+    ])
+      .then(([sales, inventory]) => {
+        if (cancelled) return;
+        setSalesCategories(sales);
+        setInventoryCategories(inventory);
+      })
+      .catch(() => { /* non-critical — the selects just stay empty */ });
+    return () => { cancelled = true; };
+  }, []);
 
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => {
     setForm((f) => ({ ...f, [k]: v }));
@@ -380,6 +445,56 @@ export const ProductFormModal: React.FC<Props> = ({
                 </div>
               </Field>
 
+              <Field label="Product type" error={fieldErrors.product_type} className="col-span-2">
+                <select
+                  value={form.product_type} disabled={isView || saving}
+                  onChange={(e) => set('product_type', e.target.value as ProductTypeValue)}
+                  className={inputCls(!!fieldErrors.product_type, isView)}
+                >
+                  {PRODUCT_TYPE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
+              </Field>
+
+              {initialProduct?.behavior && (
+                <div className="col-span-2 -mt-1 flex flex-wrap gap-1.5">
+                  {Object.entries(initialProduct.behavior)
+                    .filter(([, v]) => v)
+                    .map(([flag]) => (
+                      <Badge key={flag} kind="gray">{flag.replace(/_/g, ' ')}</Badge>
+                    ))}
+                </div>
+              )}
+
+              <Field label="Sales category" error={fieldErrors.sales_category} hint="Menu/POS classification (Batch 2 tree) — independent of the legacy Category above.">
+                <select
+                  value={form.sales_category} disabled={isView || saving}
+                  onChange={(e) => set('sales_category', e.target.value)}
+                  className={inputCls(!!fieldErrors.sales_category, isView)}
+                >
+                  <option value="">— None —</option>
+                  {flattenTree(salesCategories).map(({ node, depth }) => (
+                    <option key={node.id} value={String(node.id)}>
+                      {'  '.repeat(depth)}{depth > 0 ? '↳ ' : ''}{node.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+
+              <Field label="Inventory category" error={fieldErrors.inventory_category} hint="Stock/purchasing classification (Batch 2 tree).">
+                <select
+                  value={form.inventory_category} disabled={isView || saving}
+                  onChange={(e) => set('inventory_category', e.target.value)}
+                  className={inputCls(!!fieldErrors.inventory_category, isView)}
+                >
+                  <option value="">— None —</option>
+                  {flattenTree(inventoryCategories).map(({ node, depth }) => (
+                    <option key={node.id} value={String(node.id)}>
+                      {'  '.repeat(depth)}{depth > 0 ? '↳ ' : ''}{node.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+
               <label className="flex items-center gap-2 text-[13px] text-neutral-700 mt-1">
                 <input
                   type="checkbox" checked={form.weighted} disabled={isView || saving}
@@ -396,6 +511,24 @@ export const ProductFormModal: React.FC<Props> = ({
                   className="w-4 h-4 rounded border-neutral-300 text-brand-500 focus-ring"
                 />
                 Active (sellable)
+              </label>
+
+              <label className="flex items-center gap-2 text-[13px] text-neutral-700 mt-1">
+                <input
+                  type="checkbox" checked={form.show_on_pos} disabled={isView || saving}
+                  onChange={(e) => set('show_on_pos', e.target.checked)}
+                  className="w-4 h-4 rounded border-neutral-300 text-brand-500 focus-ring"
+                />
+                Show on POS
+              </label>
+
+              <label className="flex items-center gap-2 text-[13px] text-neutral-700 mt-1">
+                <input
+                  type="checkbox" checked={form.is_discountable} disabled={isView || saving}
+                  onChange={(e) => set('is_discountable', e.target.checked)}
+                  className="w-4 h-4 rounded border-neutral-300 text-brand-500 focus-ring"
+                />
+                Discountable
               </label>
 
               {/* PLU input — only relevant for weighted SKUs. The Digi scale
