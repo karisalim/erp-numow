@@ -2,6 +2,8 @@ import os
 from pathlib import Path
 from datetime import timedelta
 
+from corsheaders.defaults import default_headers as CORS_DEFAULT_HEADERS
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # ── Environment-driven config ────────────────────────────────────────────────
@@ -144,6 +146,12 @@ if _cors_origins:
 else:
     CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
+
+# django-cors-headers' default allow-list doesn't include our custom
+# Idempotency-Key header (sent on /sales/, /purchase-invoices/,
+# /customer-receipts/, /supplier-payments/ POSTs) — the browser preflight
+# rejects it otherwise. Extend, don't replace, the library defaults.
+CORS_ALLOW_HEADERS = list(CORS_DEFAULT_HEADERS) + ['idempotency-key']
 
 # ── Django REST Framework ─────────────────────────────────────────────────────
 
