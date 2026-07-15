@@ -237,17 +237,20 @@ roadmap and the §5 freeze in TARGET_BOUNDARIES.md).
 
 **Status: IN PROGRESS — Batch 1 (Units Core Foundation) executed 2026-07-14
 (committed `00fddae`); Batch 2 (Category Trees Foundation) executed 2026-07-14
-on branch `s2/batch-2-category-trees`; suite 472 green.** Design authority:
+on branch `s2/batch-2-category-trees`; Batches 3+4 (Product Type Foundation +
+Unit Integration) executed 2026-07-15; Batch 4 remainder (Tier Pricing
+Foundation) executed 2026-07-15 on branch
+`s2/batch-4-tier-pricing-remainder`; suite 549 green.** Design authority:
 the approved Sprint 2 design (plan approved 2026-07-13) + MASTER_DATA_CONTRACT
-§2/§3. Remaining: Batch 0 governance (owner action — see flag below),
-Batches 3–5.
+§2/§3. Remaining: Batch 5a/5b (POS integration, backend then frontend).
 
-**Governance flag (unresolved, carried from the design's Batch 0):**
-ARCHITECTURE_DECISIONS_REQUIRED §4 still shows **G1 (D-01) and G2 (D-13) with
-blank sign-off cells**. Batch 1 was executed on explicit user authorization;
-the register still needs the G2 selection (conversion precision: implemented
-as `Decimal(16,6)` factors + 3dp base-quantity quantize) recorded + ADR
-promotion per R-M.
+**Governance flag — RESOLVED 2026-07-15 (see §4 below):**
+ARCHITECTURE_DECISIONS_REQUIRED §4 now records **G1 (D-01) and G2 (D-13,
+units/inventory scope) sign-off**, plus two new traceability-only decisions
+(D-36 product_type enum wording, D-37 show_on_pos naming). **ADR promotion
+into the next source-of-truth docs version (R-M) is still a separate,
+outstanding follow-up** — sign-off-complete is not the same as fully
+gate-closed in the strict R-M sense.
 
 ### 1. Batch 1 execution record (2026-07-14, authorized) — Units Core
 
@@ -506,6 +509,117 @@ No commits made.
 - **Next batch:** revised-plan 3b (PriceTier + ProductUnitTierPrice +
   `catalog/price-tiers/` + `products/{id}/tier-prices/`) or Batch 5 POS
   integration — owner to sequence; Batch 0 still pending.
+
+### 4. Batch 4 remainder execution record (2026-07-15, authorized) — Tier Pricing Foundation
+
+**Scope executed (per the owner's 2026-07-15 planning session):** Batch 0
+governance closure (G1/G2 sign-off + D-36/D-37 naming decisions recorded in
+`ARCHITECTURE_DECISIONS_REQUIRED.md`) + the revised-plan 3b pricing item,
+narrowed to a real ERP price-tier foundation on the owner's explicit
+principles (dedicated `PriceTier` model, `ProductUnitTierPrice` keyed on
+`(product_unit, price_tier)` not `product_unit` alone, `Product.price` as
+fallback only, **never** a price computed from `conversion_to_base`) +
+`ProductUnit.minimum_order_qty`. **Deliberately NOT executed (deferred by the
+owner):** `Product.default_station` (revisit once the Preparation
+Station/Kitchen-Bar domain is designed), barcode scan-precedence wiring,
+`ProductVariant`, POS/sale/purchase flow consumption (Batch 5a), frontend
+(Batch 5b).
+
+- **Governance (§0, no schema):** `ARCHITECTURE_DECISIONS_REQUIRED.md` —
+  G1 (D-01) and G2 (D-13, units/inventory scope) sign-off recorded in §4 and
+  §3.5 consultation log; D-13's avg-cost-precision half stays Open under G3
+  (unrelated to units). Two new traceability-only decisions appended
+  (§3.4a, never renumbered): D-36 (keep the implemented `product_type` enum
+  wording over `MASTER_DATA_CONTRACT §11`'s spelling) and D-37 (keep
+  `show_on_pos` over PRD v3.6's `visible_in_pos`). **ADR promotion (folding
+  into the next PRD/FLOW/DOMAIN/DESIGN version, R-M) has NOT happened yet —
+  sign-off-complete, not fully gate-closed in the strict R-M sense.**
+- **Changed files:**
+  - `superpos_backend/pos/models.py` — `ProductUnit.minimum_order_qty`
+    (nullable, `> 0` CHECK when set) + 2 new models (below).
+  - `superpos_backend/pos/migrations/0024_product_unit_pricing_foundation.py`
+    — **new**, additive schema only (2 tables + field/constraint additions),
+    zero data rows (R-F).
+  - `superpos_backend/pos/services/pricing.py` — **new**: single authority
+    `resolve_unit_price(*, product_unit, price_tier=None) -> Decimal`. Order:
+    active `ProductUnitTierPrice` row for `(product_unit, price_tier)` when a
+    tier is given and a row exists; otherwise `product_unit.product.price`.
+    No other code path may derive a unit price by scaling `Product.price`
+    with `conversion_to_base`.
+  - `superpos_backend/pos/serializers.py` — `PriceTierSerializer`,
+    `ProductUnitTierPriceSerializer` (tenant/active `price_tier` validation,
+    `(product_unit, price_tier)` uniqueness 400-twin of the DB constraint,
+    `price > 0`); `ProductUnitSerializer` gained `minimum_order_qty` +
+    `validate_minimum_order_qty` (`> 0` when set, `null` allowed).
+  - `superpos_backend/pos/views.py` — `PriceTierListCreateView`/`Detail`/
+    `Deactivate` (flat, tenant-scoped, same conventions as `UnitGroup`);
+    `_ProductUnitScopedMixin` + `ProductUnitTierPriceListCreateView`/`Detail`
+    nested two levels under product → product_unit.
+  - `superpos_backend/pos/urls.py` — `catalog/price-tiers/` (+detail/
+    deactivate), `products/{pk}/units/{unit_pk}/tier-prices/` (+detail).
+  - `superpos_backend/pos/test_pricing.py` — new (+25 tests).
+- **Models added:** `PriceTier` (tenant-scoped, free-text `name` — not a
+  fixed enum, since each tenant names its own tiers; `unique(tenant, name)`).
+  `ProductUnitTierPrice` (`tenant`, `product` convenience FK mirroring the
+  `ProductBarcodeUnit.product` pattern, `product_unit` FK `CASCADE`,
+  `price_tier` FK `PROTECT` — a tier referenced by any price is deactivated,
+  never deleted, `price` `Decimal(10,2)`, `is_active`;
+  **`unique(product_unit, price_tier)`, not `product_unit` alone** — the
+  same unit supports multiple tiers by design; `price > 0` CHECK).
+  **Discovery confirming the design direction:** `accounts.Customer.
+  price_tier_id` and `accounts.BranchSettings.default_price_tier_id` were
+  already forward-declared plain `BigIntegerField`s awaiting exactly this
+  model (comment: *"price_tier_id is a forward-declared plain BigInt because
+  PriceTier ... does not exist today"*); neither field is read anywhere yet,
+  so wiring them to real FKs + automatic tier resolution in the sale flow is
+  deliberately deferred to Batch 5a+ as a separate decision (see below).
+- **Migration numbers:** `pos/0024_product_unit_pricing_foundation` (applied
+  to dev DB; `makemigrations --check` clean).
+- **API endpoints added:** `catalog/price-tiers/` (GET list + POST),
+  `catalog/price-tiers/{id}/` (GET/PATCH),
+  `catalog/price-tiers/{id}/deactivate/` (POST);
+  `products/{pk}/units/{unit_pk}/tier-prices/` (GET list + POST),
+  `products/{pk}/units/{unit_pk}/tier-prices/{id}/` (GET/PATCH — PATCH
+  `is_active=false` deactivates, no DELETE). `products/{pk}/units/{id}/`
+  response gains `minimum_order_qty` (nullable). Tenant-scoped via
+  `TenantMixin`; cross-tenant product/unit/tier → 404/400 per the existing
+  conventions.
+- **Tests executed:** full backend suite — **549 passed, 0 failed** (42.6 s;
+  524 baseline + 25 new). `python manage.py check` clean;
+  `makemigrations --check` clean. New coverage: `PriceTier` CRUD + tenant
+  isolation + deactivate + cashier read-only; `ProductUnitTierPrice` CRUD,
+  **the same product_unit holding two active tier prices simultaneously**
+  (the core requirement), duplicate `(product_unit, price_tier)` pair
+  rejected, non-positive price rejected, cross-tenant `price_tier` rejected,
+  inactive `price_tier` rejected, cross-tenant product/unit scope 404s;
+  `minimum_order_qty` null/positive/non-positive validation;
+  `resolve_unit_price` — tier price used when present, falls back to
+  `Product.price` when a tier is given but has no matching row, falls back
+  when no tier is given at all, ignores inactive tier-price rows, and an
+  **explicit regression test asserting the resolved price is never equal to
+  `Product.price * conversion_to_base`** for a 12,000x carton mapping.
+- **Risks / blockers:**
+  - `Customer.price_tier_id` / `BranchSettings.default_price_tier_id` →
+    real FK conversion + automatic tier resolution in the sale flow is
+    explicitly out of scope here — a cross-app (`accounts` + `pos`) decision
+    on fields that may already carry data, deserving its own gate rather than
+    silent inclusion. Batch 5a will accept an explicit `price_tier_id` on the
+    sale request instead.
+  - `default_station` remains fully deferred (owner decision) — no code, no
+    migration, not even a placeholder field.
+  - G1/G2 are sign-off-complete but not ADR-promoted (see governance note
+    above) — v3.6 stays authoritative per R-M until promotion lands.
+- **Legacy compatibility:** CONFIRMED — zero legacy fields/routes changed,
+  every addition is either a new table or a nullable field with a DB default
+  of NULL, sale/stock/purchase flows untouched (proven by the 524-test
+  baseline staying green + the new suite).
+- **Next batch:** Batch 5a — POS integration (backend only): barcode
+  resolution (`ProductBarcodeUnit` → `ProductUnit` → `Product`, legacy
+  `Product.barcode` fallback), `SaleItem`/`PurchaseInvoiceLine` audit
+  snapshot (`product_unit`, entered quantity, converted base quantity, price
+  actually used), `show_on_pos` catalog filtering, `minimum_order_qty`
+  purchase-line validation. Batch 5b (frontend) follows once 5a is stable —
+  first frontend change in the entire Sprint 1+2 stack.
 
 ---
 

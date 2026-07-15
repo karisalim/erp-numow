@@ -26,18 +26,21 @@ from .filters import (
 )
 from .models import (
     AuditLog, BranchWarehouse, Category, InventoryBatch, InventoryCategory,
-    Product, ProductBarcodeUnit, ProductUnit, PurchaseInvoice, Sale, SaleItem,
-    SalesCategory, StockMovement, Unit, UnitGroup, Warehouse, WarehouseStock,
+    PriceTier, Product, ProductBarcodeUnit, ProductUnit, ProductUnitTierPrice,
+    PurchaseInvoice, Sale, SaleItem, SalesCategory, StockMovement, Unit,
+    UnitGroup, Warehouse, WarehouseStock,
 )
 from .serializers import (
     BranchWarehouseSerializer,
     CategorySerializer,
     InventoryBatchSerializer,
     InventoryCategorySerializer,
+    PriceTierSerializer,
     ProductBarcodeUnitSerializer,
     ProductSerializer,
     ProductStockUpdateSerializer,
     ProductUnitSerializer,
+    ProductUnitTierPriceSerializer,
     PurchaseInvoiceSerializer,
     PurchaseReceiptSerializer,
     ReceiptSerializer,
@@ -1814,6 +1817,120 @@ class ProductBarcodeUnitListCreateView(_ProductScopedMixin, generics.ListCreateA
 
     def get_permissions(self):
         if self.request.method == 'POST':
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+
+# ── Unit-aware pricing (Sprint 2 Batch 4 remainder — MASTER_DATA_CONTRACT §2) ─
+# PriceTier is tenant-scoped and flat (same conventions as UnitGroup).
+# ProductUnitTierPrice is nested two levels deep: product -> product_unit ->
+# tier-prices, mirroring the ProductUnit / ProductBarcodeUnit nesting pattern.
+
+
+class PriceTierListCreateView(TenantMixin, generics.ListCreateAPIView):
+    queryset         = PriceTier.objects.all()
+    serializer_class = PriceTierSerializer
+    search_fields    = ['name']
+    ordering_fields  = ['name', 'created_at']
+    ordering         = ['name']
+
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+
+class PriceTierDetailView(TenantMixin, generics.RetrieveUpdateAPIView):
+    """GET / PATCH a price tier. No DELETE — deactivate instead."""
+
+    queryset          = PriceTier.objects.all()
+    serializer_class  = PriceTierSerializer
+    http_method_names = ['get', 'patch', 'head', 'options']
+
+    def get_permissions(self):
+        if self.request.method in ('PUT', 'PATCH'):
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+
+class PriceTierDeactivateView(TenantMixin, generics.GenericAPIView):
+    """POST — soft-delete by flipping `is_active=False`."""
+
+    queryset           = PriceTier.objects.all()
+    serializer_class   = PriceTierSerializer
+    permission_classes = [IsManagerOrAbove]
+
+    def post(self, request, *args, **kwargs):
+        tier = self.get_object()
+        if tier.is_active:
+            tier.is_active = False
+            tier.save(update_fields=['is_active', 'updated_at'])
+        return Response(self.get_serializer(tier).data)
+
+
+class _ProductUnitScopedMixin(TenantMixin):
+    """Resolves the parent product AND product_unit from the URL, tenant-scoped.
+
+    404s for either falling outside the caller's tenant or the product_unit
+    not belonging to the product (same isolation contract as
+    `_ProductScopedMixin`).
+    """
+
+    def get_product(self):
+        qs = Product.objects.all()
+        tenant = self._tenant()
+        if tenant:
+            qs = qs.filter(tenant=tenant)
+        return get_object_or_404(qs, pk=self.kwargs['product_pk'])
+
+    def get_product_unit(self):
+        qs = ProductUnit.objects.filter(product_id=self.kwargs['product_pk'])
+        tenant = self._tenant()
+        if tenant:
+            qs = qs.filter(tenant=tenant)
+        return get_object_or_404(qs, pk=self.kwargs['unit_pk'])
+
+    def get_serializer_context(self):
+        ctx = super().get_serializer_context()
+        ctx['product'] = self.get_product()
+        ctx['product_unit'] = self.get_product_unit()
+        return ctx
+
+    def perform_create(self, serializer):
+        tenant = self._tenant()
+        product_unit = self.get_product_unit()
+        if tenant:
+            serializer.save(tenant=tenant, product=product_unit.product, product_unit=product_unit)
+        else:
+            serializer.save(product=product_unit.product, product_unit=product_unit)
+
+
+class ProductUnitTierPriceListCreateView(_ProductUnitScopedMixin, generics.ListCreateAPIView):
+    queryset         = ProductUnitTierPrice.objects.select_related('price_tier').all()
+    serializer_class = ProductUnitTierPriceSerializer
+    ordering         = ['price_tier_id']
+
+    def get_queryset(self):
+        return super().get_queryset().filter(product_unit_id=self.kwargs['unit_pk'])
+
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+
+class ProductUnitTierPriceDetailView(_ProductUnitScopedMixin, generics.RetrieveUpdateAPIView):
+    """GET / PATCH one tier price. No DELETE — deactivate via PATCH."""
+
+    queryset          = ProductUnitTierPrice.objects.select_related('price_tier').all()
+    serializer_class  = ProductUnitTierPriceSerializer
+    http_method_names = ['get', 'patch', 'head', 'options']
+
+    def get_queryset(self):
+        return super().get_queryset().filter(product_unit_id=self.kwargs['unit_pk'])
+
+    def get_permissions(self):
+        if self.request.method in ('PUT', 'PATCH'):
             return [IsManagerOrAbove()]
         return [IsCashierOrAbove()]
 

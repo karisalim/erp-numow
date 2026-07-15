@@ -1016,6 +1016,12 @@ class ProductUnit(models.Model):
     # Recipe flag is plain data in this batch; consumed by the Recipe slice
     # (Sprint 3).
     is_recipe_unit     = models.BooleanField(default=False)
+    # Minimum quantity (in THIS unit) a purchase/replenishment line may use.
+    # NULL = no minimum. Sprint 2 Batch 4 remainder — plain data; enforced by
+    # the purchase-line serializer in Batch 5a, not here.
+    minimum_order_qty  = models.DecimalField(
+        max_digits=14, decimal_places=3, null=True, blank=True,
+    )
     is_active          = models.BooleanField(default=True)
     created_at         = models.DateTimeField(auto_now_add=True)
     updated_at         = models.DateTimeField(auto_now=True)
@@ -1041,6 +1047,10 @@ class ProductUnit(models.Model):
             models.CheckConstraint(
                 check=~models.Q(is_base=True) | models.Q(conversion_to_base=1),
                 name='pos_productunit_base_conversion_is_1',
+            ),
+            models.CheckConstraint(
+                check=models.Q(minimum_order_qty__isnull=True) | models.Q(minimum_order_qty__gt=0),
+                name='pos_productunit_min_order_qty_positive',
             ),
         ]
 
@@ -1176,3 +1186,93 @@ class InventoryCategory(models.Model):
 
     def __str__(self):
         return self.name
+
+
+# ── Unit-aware pricing (Sprint 2 Batch 4 remainder — MASTER_DATA_CONTRACT §2) ─
+# Real ERP price-tier foundation, not a calculated price. `PriceTier` is the
+# table `Customer.price_tier_id` / `BranchSettings.default_price_tier_id`
+# were forward-declared for (see accounts/models.py) — those stay plain
+# BigInt hints in this batch; wiring them to real FKs + automatic tier
+# resolution in the sale flow is a separate follow-up decision (Batch 5a
+# accepts an explicit price_tier_id instead). `Product.price` remains the
+# fallback/default retail price; it is never multiplied by a unit's
+# conversion_to_base to derive a price — see `pos/services/pricing.py`.
+
+
+class PriceTier(models.Model):
+    """A named pricing level per tenant (Retail, Wholesale, VIP, Distributor, …).
+
+    Free-text name (not a fixed enum) — each tenant defines its own tiers.
+    """
+
+    tenant     = models.ForeignKey(
+        'accounts.Tenant', on_delete=models.CASCADE,
+        related_name='price_tiers', db_index=True,
+    )
+    name       = models.CharField(max_length=60)
+    is_active  = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['tenant', 'name'],
+                name='pos_pricetier_tenant_name_uniq',
+            ),
+        ]
+
+    def __str__(self):
+        return self.name
+
+
+class ProductUnitTierPrice(models.Model):
+    """The price of one product-unit at one price tier.
+
+    Explicit per-(product_unit, price_tier) row — never derived by scaling
+    `Product.price` with `conversion_to_base` (a carton price is a real
+    business decision, not `piece_price * 12`). Absence of a row for a given
+    (product_unit, price_tier) means "no tier override" — callers fall back
+    to `Product.price` via `pos/services/pricing.resolve_unit_price`.
+    """
+
+    tenant       = models.ForeignKey(
+        'accounts.Tenant', on_delete=models.CASCADE,
+        related_name='product_unit_tier_prices', db_index=True,
+    )
+    # Denormalized alongside product_unit (same convenience pattern as
+    # ProductBarcodeUnit.product) to avoid a join on every price lookup.
+    product      = models.ForeignKey(
+        Product, on_delete=models.CASCADE, related_name='unit_tier_prices',
+    )
+    product_unit = models.ForeignKey(
+        ProductUnit, on_delete=models.CASCADE, related_name='tier_prices',
+    )
+    # PROTECT: a price tier referenced by any price row is deactivated, never
+    # deleted — deleting it would strand historical pricing intent.
+    price_tier   = models.ForeignKey(
+        PriceTier, on_delete=models.PROTECT, related_name='unit_prices',
+    )
+    price        = models.DecimalField(max_digits=10, decimal_places=2)
+    is_active    = models.BooleanField(default=True)
+    created_at   = models.DateTimeField(auto_now_add=True)
+    updated_at   = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['product_id', 'product_unit_id', 'price_tier_id']
+        constraints = [
+            # The same unit supports multiple tiers — uniqueness is the pair,
+            # not product_unit alone.
+            models.UniqueConstraint(
+                fields=['product_unit', 'price_tier'],
+                name='pos_puttp_product_unit_price_tier_uniq',
+            ),
+            models.CheckConstraint(
+                check=models.Q(price__gt=0),
+                name='pos_puttp_price_positive',
+            ),
+        ]
+
+    def __str__(self):
+        return f'product_unit={self.product_unit_id} tier={self.price_tier_id} = {self.price}'

@@ -22,6 +22,11 @@ urlpatterns = [
     path('catalog/units/<int:pk>/',                  views.UnitDetailView.as_view(),          name='unit-detail'),
     path('catalog/units/<int:pk>/deactivate/',       views.UnitDeactivateView.as_view(),      name='unit-deactivate'),
 
+    # Catalog — price tiers (Sprint 2 Batch 4 remainder, MASTER_DATA_CONTRACT §2)
+    path('catalog/price-tiers/',                     views.PriceTierListCreateView.as_view(), name='price-tier-list'),
+    path('catalog/price-tiers/<int:pk>/',            views.PriceTierDetailView.as_view(),     name='price-tier-detail'),
+    path('catalog/price-tiers/<int:pk>/deactivate/', views.PriceTierDeactivateView.as_view(), name='price-tier-deactivate'),
+
     # Products
     path('products/',                       views.ProductListCreateView.as_view(), name='product-list'),
     path('products/export/',                views.products_export,                 name='product-export'),
@@ -39,6 +44,9 @@ urlpatterns = [
     path('products/<int:product_pk>/units/',          views.ProductUnitListCreateView.as_view(),        name='product-unit-list'),
     path('products/<int:product_pk>/units/<int:pk>/', views.ProductUnitDetailView.as_view(),            name='product-unit-detail'),
     path('products/<int:product_pk>/barcodes/',       views.ProductBarcodeUnitListCreateView.as_view(), name='product-barcode-list'),
+    # Sprint 2 Batch 4 remainder — per-(product_unit, price_tier) prices.
+    path('products/<int:product_pk>/units/<int:unit_pk>/tier-prices/',          views.ProductUnitTierPriceListCreateView.as_view(), name='product-unit-tier-price-list'),
+    path('products/<int:product_pk>/units/<int:unit_pk>/tier-prices/<int:pk>/', views.ProductUnitTierPriceDetailView.as_view(),     name='product-unit-tier-price-detail'),
 
     # Inventory — batches (CRUD)
     path('inventory/batches/',          views.InventoryBatchListCreateView.as_view(), name='batch-list'),

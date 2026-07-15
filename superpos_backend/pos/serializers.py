@@ -11,9 +11,10 @@ from accounts.models import (
 )
 from .models import (
     BranchWarehouse, Category, InsufficientStockError, InventoryBatch,
-    InventoryCategory, Payment, Product, ProductBarcodeUnit, ProductUnit,
-    PurchaseInvoice, PurchaseInvoiceLine, Sale, SaleItem, SalesCategory,
-    StockMovement, Unit, UnitGroup, Warehouse, WarehouseStock,
+    InventoryCategory, Payment, PriceTier, Product, ProductBarcodeUnit,
+    ProductUnit, ProductUnitTierPrice, PurchaseInvoice, PurchaseInvoiceLine,
+    Sale, SaleItem, SalesCategory, StockMovement, Unit, UnitGroup, Warehouse,
+    WarehouseStock,
 )
 
 logger = logging.getLogger(__name__)
@@ -654,6 +655,7 @@ class ProductUnitSerializer(serializers.ModelSerializer):
             'id', 'unit', 'unit_name', 'unit_symbol', 'allow_decimal',
             'conversion_to_base', 'is_base',
             'is_sale_unit', 'is_purchase_unit', 'is_recipe_unit',
+            'minimum_order_qty',
             'is_active', 'created_at', 'updated_at',
         ]
         read_only_fields = [
@@ -678,6 +680,11 @@ class ProductUnitSerializer(serializers.ModelSerializer):
     def validate_conversion_to_base(self, value):
         if value <= 0:
             raise serializers.ValidationError('conversion_to_base must be > 0.')
+        return value
+
+    def validate_minimum_order_qty(self, value):
+        if value is not None and value <= 0:
+            raise serializers.ValidationError('minimum_order_qty must be > 0 when set.')
         return value
 
     def validate(self, attrs):
@@ -806,6 +813,83 @@ class ProductBarcodeUnitSerializer(serializers.ModelSerializer):
                         'This barcode already identifies a product '
                         '(legacy Product.barcode); pick a distinct pack barcode.'
                     ),
+                })
+        return attrs
+
+
+class PriceTierSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = PriceTier
+        fields = ['id', 'name', 'is_active', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate_name(self, value):
+        request = self.context.get('request')
+        tenant = getattr(getattr(request, 'user', None), 'tenant', None)
+        if tenant is None:
+            return value
+        qs = PriceTier.objects.filter(tenant=tenant, name=value)
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError(
+                'A price tier with this name already exists for this tenant.',
+            )
+        return value
+
+
+class ProductUnitTierPriceSerializer(serializers.ModelSerializer):
+    """The price of one product-unit at one price tier
+    (nested under /products/{pk}/units/{unit_pk}/tier-prices/).
+
+    `product` and `product_unit` come from the URL (view passes them via
+    `save(product=.., product_unit=..)`), never from the body. `price_tier`
+    must belong to the same tenant. Uniqueness is (product_unit, price_tier)
+    — the same unit supports multiple tiers.
+    """
+
+    price_tier_name = serializers.CharField(source='price_tier.name', read_only=True)
+
+    class Meta:
+        model  = ProductUnitTierPrice
+        fields = [
+            'id', 'price_tier', 'price_tier_name', 'price',
+            'is_active', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'price_tier_name', 'created_at', 'updated_at']
+
+    def _tenant(self):
+        request = self.context.get('request')
+        return getattr(getattr(request, 'user', None), 'tenant', None)
+
+    def validate_price_tier(self, price_tier):
+        tenant = self._tenant()
+        if tenant is not None and price_tier is not None and price_tier.tenant_id != tenant.id:
+            raise serializers.ValidationError(
+                "price_tier must belong to the caller's tenant.",
+            )
+        if price_tier is not None and not price_tier.is_active:
+            raise serializers.ValidationError('price_tier is inactive.')
+        return price_tier
+
+    def validate_price(self, value):
+        if value <= 0:
+            raise serializers.ValidationError('price must be > 0.')
+        return value
+
+    def validate(self, attrs):
+        product_unit = self.context.get('product_unit') or getattr(self.instance, 'product_unit', None)
+        price_tier = attrs.get('price_tier') or getattr(self.instance, 'price_tier', None)
+
+        if product_unit is not None and price_tier is not None:
+            qs = ProductUnitTierPrice.objects.filter(
+                product_unit=product_unit, price_tier=price_tier,
+            )
+            if self.instance is not None:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise serializers.ValidationError({
+                    'price_tier': 'This product unit already has a price for this tier.',
                 })
         return attrs
 
