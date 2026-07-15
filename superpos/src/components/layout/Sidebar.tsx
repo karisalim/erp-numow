@@ -46,6 +46,8 @@ const NAV_GROUPS: NavGroup[] = [
     labelKey: 'nav.groupCatalog', fallback: 'Catalog & Stock',
     items: [
       { path: '/products',   labelKey: 'nav.products',   fallback: 'Products',   icon: 'tag' },
+      { path: '/units',      labelKey: 'nav.units',      fallback: 'Units',      icon: 'box' },
+      { path: '/price-tiers', labelKey: 'nav.priceTiers', fallback: 'Price Tiers', icon: 'chart' },
       { path: '/inventory',  labelKey: 'nav.inventory',  fallback: 'Inventory',  icon: 'layers' },
       { path: '/warehouses', labelKey: 'nav.warehouses', fallback: 'Warehouses', icon: 'archive' },
       { path: '/scale',      labelKey: 'nav.scale',      fallback: 'Scale / PLU', icon: 'barcode' },

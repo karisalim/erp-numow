@@ -14,6 +14,7 @@ import { ProductImportControl } from '../components/products/ProductImportContro
 import { ProductActionsMenu, type RowAction } from '../components/products/ProductActionsMenu';
 import { StockMovementsModal } from '../components/products/StockMovementsModal';
 import { ReceiveStockModal } from '../components/products/ReceiveStockModal';
+import { ProductUnitsDrawer } from './products/ProductUnitsDrawer';
 import type { Product } from '../types';
 
 type StockFilter = 'All' | 'In stock' | 'Low' | 'Out';
@@ -77,6 +78,7 @@ export const ProductsPage: React.FC = () => {
   const [toast, setToast] = useState<Toast | null>(null);
   const [historyProduct, setHistoryProduct] = useState<Product | null>(null);
   const [receiveProduct, setReceiveProduct] = useState<Product | null>(null);
+  const [unitsProduct, setUnitsProduct] = useState<Product | null>(null);
 
   const refetch = () => setRefreshKey((k) => k + 1);
 
@@ -161,6 +163,7 @@ export const ProductsPage: React.FC = () => {
     if (action === 'edit')    setFormModal({ mode: 'edit', product: p });
     if (action === 'history') setHistoryProduct(p);
     if (action === 'receive') setReceiveProduct(p);
+    if (action === 'units')   setUnitsProduct(p);
     if (action === 'delete')  setConfirmDelete(p);
   };
 
@@ -430,6 +433,14 @@ export const ProductsPage: React.FC = () => {
             });
             refetch();
           }}
+        />
+      )}
+
+      {/* Units & pricing */}
+      {unitsProduct && (
+        <ProductUnitsDrawer
+          product={unitsProduct}
+          onClose={() => setUnitsProduct(null)}
         />
       )}
 

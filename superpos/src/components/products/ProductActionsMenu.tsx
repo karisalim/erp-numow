@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Icon } from '../ui/Icon';
 
-export type RowAction = 'view' | 'edit' | 'history' | 'receive' | 'delete';
+export type RowAction = 'view' | 'edit' | 'history' | 'receive' | 'units' | 'delete';
 
 interface Props {
   onSelect: (action: RowAction) => void;
@@ -60,6 +60,7 @@ export const ProductActionsMenu: React.FC<Props> = ({ onSelect }) => {
           <div className="my-1 border-t border-neutral-100" />
           <MenuItem onClick={() => choose('history')} icon="receipt">Stock movements</MenuItem>
           <MenuItem onClick={() => choose('receive')} icon="plus">Receive stock</MenuItem>
+          <MenuItem onClick={() => choose('units')}   icon="layers">Units & pricing</MenuItem>
           <div className="my-1 border-t border-neutral-100" />
           <MenuItem onClick={() => choose('delete')}  icon="trash" tone="danger">Delete</MenuItem>
         </div>

@@ -29,6 +29,8 @@ const PurchaseDetailPage = React.lazy(() => import('./pages/purchases/PurchaseDe
 const PurchaseCreatePage = React.lazy(() => import('./pages/purchases/PurchaseCreatePage').then(m => ({ default: m.PurchaseCreatePage })));
 const WarehousesPage = React.lazy(() => import('./pages/warehouses/WarehousesPage').then(m => ({ default: m.WarehousesPage })));
 const FinancePage    = React.lazy(() => import('./pages/finance/FinancePage').then(m => ({ default: m.FinancePage })));
+const UnitsPage       = React.lazy(() => import('./pages/units/UnitsPage').then(m => ({ default: m.UnitsPage })));
+const PriceTiersPage  = React.lazy(() => import('./pages/pricing/PriceTiersPage').then(m => ({ default: m.PriceTiersPage })));
 
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { isAuthenticated } = useAuthStore();
@@ -108,6 +110,8 @@ export const App: React.FC = () => {
       <Route path="/purchases/:id" element={<Guarded min="Manager"><Lazy><PurchaseDetailPage /></Lazy></Guarded>} />
       <Route path="/warehouses" element={<Guarded min="Manager"><Lazy><WarehousesPage /></Lazy></Guarded>} />
       <Route path="/finance" element={<Guarded min="Manager"><Lazy><FinancePage /></Lazy></Guarded>} />
+      <Route path="/units" element={<Guarded min="Manager"><Lazy><UnitsPage /></Lazy></Guarded>} />
+      <Route path="/price-tiers" element={<Guarded min="Manager"><Lazy><PriceTiersPage /></Lazy></Guarded>} />
 
       <Route path="/" element={<Navigate to="/pos" replace />} />
       <Route path="*" element={<Navigate to="/pos" replace />} />

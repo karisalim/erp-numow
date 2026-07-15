@@ -41,4 +41,7 @@ export const ROUTE_MIN_ROLE: Record<string, UserRole> = {
   '/suppliers': 'Manager',
   '/purchases': 'Manager',
   '/finance': 'Manager',
+  '/units': 'Manager',
+  '/price-tiers': 'Manager',
+  '/categories': 'Manager',
 };
