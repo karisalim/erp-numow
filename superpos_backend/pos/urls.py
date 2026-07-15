@@ -22,6 +22,9 @@ urlpatterns = [
     path('catalog/units/<int:pk>/',                  views.UnitDetailView.as_view(),          name='unit-detail'),
     path('catalog/units/<int:pk>/deactivate/',       views.UnitDeactivateView.as_view(),      name='unit-deactivate'),
 
+    # Catalog — standard unit codes (Sprint 2 Phase 1.5, UN/CEFACT Rec 20 subset)
+    path('catalog/standard-unit-codes/', views.StandardUnitCodeListView.as_view(), name='standard-unit-code-list'),
+
     # Catalog — price tiers (Sprint 2 Batch 4 remainder, MASTER_DATA_CONTRACT §2)
     path('catalog/price-tiers/',                     views.PriceTierListCreateView.as_view(), name='price-tier-list'),
     path('catalog/price-tiers/<int:pk>/',            views.PriceTierDetailView.as_view(),     name='price-tier-detail'),

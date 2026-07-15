@@ -7,6 +7,7 @@ from django.db import models, transaction
 # Import-cycle note: services/product_types.py imports Django only (never
 # pos.models), so pulling the type enum + matrix from it here is safe.
 from pos.services.product_types import ProductType, get_behavior
+from pos.services.standard_units import StandardUnitCode
 
 
 class InsufficientStockError(Exception):
@@ -953,6 +954,13 @@ class Unit(models.Model):
     )
     name          = models.CharField(max_length=60)
     symbol        = models.CharField(max_length=10, blank=True, default='')
+    # Optional UN/CEFACT Rec 20 code (Sprint 2 Phase 1.5) — metadata only,
+    # never required. `name` stays the free-text label users pick; this is a
+    # tag for future e-invoice/reporting compatibility. Existing units keep
+    # working with no code at all.
+    standard_code = models.CharField(
+        max_length=10, choices=StandardUnitCode.choices, blank=True, default='',
+    )
     # Precision Decimal(16,6) per the approved Sprint 2 design (D-13 working
     # proposal). Convention: pick the smallest practical unit as each group's
     # base (g not kg, ml not L) so factors are >= 1 and almost always integral.

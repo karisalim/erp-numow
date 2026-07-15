@@ -208,6 +208,68 @@ class UnitCatalogApiTests(_UnitsTestBase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  Standard unit codes (Sprint 2 Phase 1.5 — UN/CEFACT Rec 20 subset)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class StandardUnitCodeTests(_UnitsTestBase):
+    """`Unit.standard_code` is purely optional metadata — never required,
+    never backfilled, and never changes behavior for units created before
+    this batch (backward compatibility)."""
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.manager)
+
+    def test_existing_units_have_no_code_and_remain_valid(self):
+        # Fixture units (self.ml, self.gram, self.carton, self.bag) were
+        # created before Phase 1.5 existed — they must be unaffected.
+        for unit in (self.ml, self.gram, self.carton, self.bag):
+            unit.refresh_from_db()
+            self.assertEqual(unit.standard_code, '')
+        resp = self.client.get(reverse('unit-list'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_create_unit_without_standard_code_still_works(self):
+        resp = self.client.post(reverse('unit-list'), {
+            'unit_group': self.mass.pk, 'name': 'Ounce', 'factor_to_base': '28.35',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        self.assertEqual(resp.json()['standard_code'], '')
+
+    def test_create_unit_with_valid_standard_code(self):
+        resp = self.client.post(reverse('unit-list'), {
+            'unit_group': self.mass.pk, 'name': 'Kilogram', 'symbol': 'kg',
+            'factor_to_base': '1000', 'standard_code': 'KGM',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        body = resp.json()
+        self.assertEqual(body['standard_code'], 'KGM')
+        self.assertEqual(body['standard_code_display'], 'Kilogram')
+        unit = Unit.objects.get(pk=body['id'])
+        self.assertEqual(unit.standard_code, 'KGM')
+
+    def test_invalid_standard_code_rejected(self):
+        resp = self.client.post(reverse('unit-list'), {
+            'unit_group': self.mass.pk, 'name': 'Mystery', 'factor_to_base': '1',
+            'standard_code': 'NOT-A-REAL-CODE',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('standard_code', resp.json())
+
+    def test_standard_unit_code_list_endpoint(self):
+        resp = self.client.get(reverse('standard-unit-code-list'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        body = resp.json()
+        self.assertGreater(len(body), 50)
+        self.assertIn({'code': 'KGM', 'label': 'Kilogram'}, body)
+        self.assertIn({'code': 'EA', 'label': 'Each'}, body)
+
+    def test_standard_unit_code_list_is_cashier_readable(self):
+        self.client.force_authenticate(user=self.cashier)
+        resp = self.client.get(reverse('standard-unit-code-list'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  ProductUnit mapping rules
 # ══════════════════════════════════════════════════════════════════════════════
 

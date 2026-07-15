@@ -589,16 +589,30 @@ class UnitGroupSerializer(serializers.ModelSerializer):
 
 
 class UnitSerializer(serializers.ModelSerializer):
-    unit_group_name = serializers.CharField(source='unit_group.name', read_only=True)
+    """A unit inside a group.
+
+    `standard_code` (Sprint 2 Phase 1.5) is a purely optional UN/CEFACT
+    Rec 20 tag — `name` stays the required free-text label users pick
+    ("كرتونة", "Box", ...). Units created before this batch simply have
+    `standard_code == ''`; nothing about them changes or needs backfilling.
+    """
+
+    unit_group_name       = serializers.CharField(source='unit_group.name', read_only=True)
+    standard_code_display = serializers.CharField(
+        source='get_standard_code_display', read_only=True)
 
     class Meta:
         model  = Unit
         fields = [
             'id', 'unit_group', 'unit_group_name', 'name', 'symbol',
+            'standard_code', 'standard_code_display',
             'factor_to_base', 'allow_decimal', 'is_active',
             'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'unit_group_name', 'created_at', 'updated_at']
+        read_only_fields = [
+            'id', 'unit_group_name', 'standard_code_display',
+            'created_at', 'updated_at',
+        ]
 
     def _tenant(self):
         request = self.context.get('request')

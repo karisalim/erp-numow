@@ -239,10 +239,12 @@ roadmap and the §5 freeze in TARGET_BOUNDARIES.md).
 (committed `00fddae`); Batch 2 (Category Trees Foundation) executed 2026-07-14
 on branch `s2/batch-2-category-trees`; Batches 3+4 (Product Type Foundation +
 Unit Integration) executed 2026-07-15; Batch 4 remainder (Tier Pricing
-Foundation) executed 2026-07-15 on branch
-`s2/batch-4-tier-pricing-remainder`; suite 549 green.** Design authority:
+Foundation) executed 2026-07-15; Phase 1.5 (Standard Unit Codes, UN/CEFACT
+Rec 20 subset) executed 2026-07-15 — all on branch
+`s2/batch-4-tier-pricing-remainder`; suite 555 green.** Design authority:
 the approved Sprint 2 design (plan approved 2026-07-13) + MASTER_DATA_CONTRACT
-§2/§3. Remaining: Batch 5a/5b (POS integration, backend then frontend).
+§2/§3. Remaining: architecture review checkpoint, then Batch 5a/5b (POS
+integration, backend then frontend).
 
 **Governance flag — RESOLVED 2026-07-15 (see §4 below):**
 ARCHITECTURE_DECISIONS_REQUIRED §4 now records **G1 (D-01) and G2 (D-13,
@@ -620,6 +622,71 @@ Station/Kitchen-Bar domain is designed), barcode scan-precedence wiring,
   actually used), `show_on_pos` catalog filtering, `minimum_order_qty`
   purchase-line validation. Batch 5b (frontend) follows once 5a is stable —
   first frontend change in the entire Sprint 1+2 stack.
+
+### 5. Phase 1.5 execution record (2026-07-15, authorized) — Standard Unit Codes
+
+**Scope executed (per the owner's 2026-07-15 manual-testing follow-up):**
+during manual Postman verification of Batch 4, the owner raised a real
+master-data gap — `Unit.name` is free text with zero cross-branch
+standardization — and asked for a UN/CEFACT Recommendation 20 code tag (the
+same code set the Egyptian e-invoice/e-receipt system, ETA, requires in its
+`unitType` field) to be added **before** Batch 5a, since sale/purchase/
+barcode flows will be built on top of unit master data. Explicit owner
+constraints: `standard_code` is **purely optional** metadata (never required,
+never enforced, no dropdown-only mode); no data migration backfills existing
+units; implemented as a Python `TextChoices` enum (no new DB table, no
+joins, zero query overhead) rather than a shared lookup table; a curated,
+verified subset (not the full 2138-row Rec 20 list, which is ~95% obscure
+physics/engineering units irrelevant to retail/F&B/wholesale). **No ETA API
+integration in this batch** — code storage only, for future compatibility.
+
+- **Changed files:**
+  - `superpos_backend/pos/services/standard_units.py` — **new**:
+    `StandardUnitCode(models.TextChoices)`, 87 verified UN/CEFACT Rec 20
+    codes across count, mass, volume, length, area, time, and
+    packaging/trade categories. Every code/label pair was cross-checked
+    against the source Rec 20 list the owner supplied — no invented codes,
+    favoring correctness over hitting a round number.
+  - `superpos_backend/pos/models.py` — `Unit.standard_code`
+    (`CharField(max_length=10, choices=StandardUnitCode.choices,
+    blank=True, default='')`) — same optional-field convention already used
+    for `Product.plu`/`Unit.symbol`.
+  - `superpos_backend/pos/migrations/0025_unit_standard_code.py` — **new**,
+    additive-only (single `AddField`, no data migration, existing rows keep
+    `standard_code=''`).
+  - `superpos_backend/pos/serializers.py` — `UnitSerializer` gained
+    `standard_code` (writable, optional) + `standard_code_display`
+    (read-only, `get_standard_code_display()`).
+  - `superpos_backend/pos/views.py` — `StandardUnitCodeListView` (GET-only,
+    no DB query, returns the static enum as `[{code, label}, ...]`).
+  - `superpos_backend/pos/urls.py` — `catalog/standard-unit-codes/`.
+  - `superpos_backend/pos/test_units.py` — new `StandardUnitCodeTests`
+    class (+6 tests).
+- **Migration numbers:** `pos/0025_unit_standard_code` (applied to dev DB;
+  `makemigrations --check` clean).
+- **API endpoints added:** `GET catalog/standard-unit-codes/` (Cashier+
+  read, static list, no tenant scoping — shared across all tenants, same
+  philosophy as the legacy `Product.unit` choices). `catalog/units/` and
+  `catalog/units/{id}/` responses gain `standard_code` (writable) +
+  `standard_code_display` (read-only); both blank/omittable.
+- **Tests executed:** full backend suite — **555 passed, 0 failed** (87.4 s;
+  549 baseline + 6 new). `python manage.py check` clean;
+  `makemigrations --check` clean. New coverage: pre-existing fixture units
+  confirmed to still carry `standard_code=''` after the migration; a unit
+  created without `standard_code` still succeeds; a unit created with a
+  valid code (`KGM`) persists the code and its display label; an invalid
+  code is rejected with 400; the new list endpoint returns the full set
+  including known entries and is readable by Cashier role.
+- **Risks / blockers:** none — additive field, additive endpoint, zero
+  existing behavior changed. The 87-code list is intentionally
+  extensible: adding a code later is a one-line enum change plus a matching
+  additive migration, never a backfill of existing `Unit` rows.
+- **Legacy compatibility:** CONFIRMED — every existing `Unit` row keeps
+  working with `standard_code=''`; no screen, endpoint, or validation rule
+  changed for callers that never send the field.
+- **Next:** owner-mandated architecture review checkpoint (see plan file)
+  before opening any Batch 5a code, then Batch 5a — POS integration
+  (backend only), per the Batch 4 remainder record above.
 
 ---
 

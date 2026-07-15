@@ -55,6 +55,7 @@ from .serializers import (
     WarehouseStockSerializer,
 )
 from .services import idempotency
+from .services.standard_units import StandardUnitCode
 
 
 # ── Tenant isolation mixin ────────────────────────────────────────────────────
@@ -1740,6 +1741,24 @@ class UnitDeactivateView(TenantMixin, generics.GenericAPIView):
             unit.is_active = False
             unit.save(update_fields=['is_active', 'updated_at'])
         return Response(self.get_serializer(unit).data)
+
+
+class StandardUnitCodeListView(APIView):
+    """GET — the static UN/CEFACT Rec 20 subset (Sprint 2 Phase 1.5).
+
+    Pure enum readout, no DB query, no tenant scoping — the list is shared
+    across every tenant, same as `Product.unit`'s legacy choices. Powers a
+    future `Unit.standard_code` picker (Batch 5b); usable for manual
+    verification today.
+    """
+
+    permission_classes = [IsCashierOrAbove]
+
+    def get(self, request):
+        return Response([
+            {'code': code, 'label': label}
+            for code, label in StandardUnitCode.choices
+        ])
 
 
 class _ProductScopedMixin(TenantMixin):
