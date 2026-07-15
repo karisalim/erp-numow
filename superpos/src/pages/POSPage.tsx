@@ -1,13 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AxiosError } from 'axios';
-import apiClient from '../api/client';
+import { posApi } from '../api/pos';
+import { priceTiersApi, asResults } from '../api/erp';
+import { previewUnitPrice } from '../utils/pricing';
 import { usePosStore } from '../store/posStore';
 import { useAppStore } from '../store/appStore';
 import { useAuthStore } from '../store/authStore';
-import { parseScaleBarcode } from '../utils/barcode';
 import { useMoney } from '../utils/money';
+import { useDebounced } from '../hooks/useQuery';
 import type { Product, CompletedTransaction } from '../types';
+import type { PriceTier } from '../types/erp';
 import { Header } from '../components/layout/Header';
 import { OfflineBanner } from '../components/layout/OfflineBanner';
 import { BarcodeInput } from '../components/pos/BarcodeInput';
@@ -16,42 +19,13 @@ import { CartLine } from '../components/pos/CartLine';
 import { PaymentModal } from '../components/pos/PaymentModal';
 import { CustomerSelectModal } from '../components/pos/CustomerSelectModal';
 import { DiscountModal } from '../components/pos/DiscountModal';
+import { UnitPickerModal } from '../components/pos/UnitPickerModal';
 import { Button } from '../components/ui/Button';
 import { Badge } from '../components/ui/Badge';
 import { Card } from '../components/ui/Card';
 import { Icon } from '../components/ui/Icon';
-
-interface CategoryDto { id: number; name: string; }
-interface PaginatedResponse<T> {
-  count: number;
-  next: string | null;
-  previous: string | null;
-  results: T[];
-}
-interface SaleResponseDto {
-  id: number;
-  sale_uuid?: string;
-  cashier_name?: string;
-  branch_name?: string;
-  terminal_name?: string;
-  subtotal: string | number;
-  tax_amount: string | number;
-  total: string | number;
-  paid: string | number;
-  change: string | number;
-  method: 'cash' | 'card' | 'wallet' | 'credit';
-  offline?: boolean;
-  status: string;
-  created_at?: string;
-  warnings?: string[];
-}
-
-/** Unwrap a paginated DRF list response (or accept a bare array). */
-function unwrapList<T>(payload: unknown): T[] {
-  if (Array.isArray(payload)) return payload as T[];
-  const obj = payload as PaginatedResponse<T> | undefined;
-  return obj?.results ?? [];
-}
+import { SearchField } from '../components/ui/FormField';
+import type { SaleItemPayload } from '../api/pos';
 
 /** If the API returns 401, kick the session immediately. */
 function handle401(err: unknown): boolean {
@@ -69,10 +43,10 @@ export const POSPage: React.FC = () => {
 
   const {
     cart, barcode, paymentMode, flashId, error,
-    customer, discountType, discountValue,
+    customer, discountType, discountValue, priceTierId,
     addItem, removeItem, updateQty, clearCart,
     setBarcode, setPaymentMode, setError, setReceiptTxn,
-    setCustomer, setDiscount,
+    setCustomer, setDiscount, setPriceTier,
   } = usePosStore();
 
   const online = useAppStore((s) => s.online);
@@ -81,11 +55,21 @@ export const POSPage: React.FC = () => {
   const [activeCategory, setActiveCategory] = useState('All');
   const [customerModal, setCustomerModal] = useState(false);
   const [discountModal, setDiscountModal] = useState(false);
+  const [unitPickerProduct, setUnitPickerProduct] = useState<Product | null>(null);
 
-  // ── Server-driven Quick Grid + Categories ───────────────────────────────
+  // ── Server-driven Quick Grid + Categories (always show_on_pos=true) ────
   const [quickGrid, setQuickGrid]   = useState<Product[]>([]);
   const [categories, setCategories] = useState<string[]>(['All']);
   const [gridLoading, setGridLoading] = useState(false);
+
+  // ── Product search (server-side, replaces the quick grid while active) ─
+  const [search, setSearch] = useState('');
+  const debouncedSearch = useDebounced(search, 300);
+  const [searchResults, setSearchResults] = useState<Product[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+
+  // ── Price tiers ──────────────────────────────────────────────────────
+  const [priceTiers, setPriceTiers] = useState<PriceTier[]>([]);
 
   // ── In-flight indicators for barcode lookup + sale submission ──────────
   const [barcodeLoading, setBarcodeLoading] = useState(false);
@@ -103,20 +87,20 @@ export const POSPage: React.FC = () => {
     return () => clearTimeout(t);
   }, [scanInfo]);
 
-  /* ─── Initial fetch: 8 products + categories ──────────────────────────── */
+  /* ─── Initial fetch: 8 POS-visible products + categories + price tiers ── */
   useEffect(() => {
     let cancelled = false;
     setGridLoading(true);
     Promise.all([
-      apiClient.get<PaginatedResponse<Product> | Product[]>('/products/', { params: { active: 'true' } }),
-      apiClient.get<PaginatedResponse<CategoryDto> | CategoryDto[]>('/categories/'),
+      posApi.listPosProducts(),
+      posApi.listCategories(),
+      priceTiersApi.list({ is_active: 'true' }),
     ])
-      .then(([prodRes, catRes]) => {
+      .then(([allProducts, allCats, tiers]) => {
         if (cancelled) return;
-        const allProducts = unwrapList<Product>(prodRes.data);
-        const allCats     = unwrapList<CategoryDto>(catRes.data);
         setQuickGrid(allProducts.slice(0, 8));
         setCategories(['All', ...allCats.map(c => c.name)]);
+        setPriceTiers(asResults(tiers));
       })
       .catch((err) => {
         handle401(err);
@@ -129,6 +113,21 @@ export const POSPage: React.FC = () => {
 
     return () => { cancelled = true; };
   }, []);
+
+  /* ─── Product search: server-side, replaces the grid while a query is set ── */
+  useEffect(() => {
+    if (!debouncedSearch.trim()) {
+      setSearchResults([]);
+      return;
+    }
+    let cancelled = false;
+    setSearchLoading(true);
+    posApi.listPosProducts({ search: debouncedSearch.trim() })
+      .then((results) => { if (!cancelled) setSearchResults(results.slice(0, 24)); })
+      .catch((err) => { handle401(err); if (!cancelled) setSearchResults([]); })
+      .finally(() => { if (!cancelled) setSearchLoading(false); });
+    return () => { cancelled = true; };
+  }, [debouncedSearch]);
 
   /* ─── Auto-dismiss saleError after 5s ─────────────────────────────────── */
   useEffect(() => {
@@ -167,13 +166,18 @@ export const POSPage: React.FC = () => {
     return () => document.removeEventListener('keydown', handler);
   }, [cart.length, setPaymentMode]);
 
-  /* ─── Quick grid filter (client-side over the fetched 8) ──────────────── */
+  /* ─── Quick grid filter (client-side over the fetched 8, search off) ──── */
   const filteredGrid = useMemo(() => {
     if (activeCategory === 'All') return quickGrid;
     return quickGrid.filter(p => (p.category_name ?? p.category) === activeCategory);
   }, [quickGrid, activeCategory]);
 
-  /* ─── Barcode submit: weight-barcode short-circuit, then regular lookup ─ */
+  const isSearching = debouncedSearch.trim().length > 0;
+  const displayedGrid = isSearching ? searchResults : filteredGrid;
+
+  /* ─── Barcode submit: /products/scan/ handles weight-encoded + unit
+   *     resolution server-side (single source of truth — no client-side
+   *     duplication of the scale-barcode decode or scan precedence rules). */
   const submitBarcode = useCallback(async (raw: string) => {
     const code = raw.trim();
     if (!code) return;
@@ -181,58 +185,36 @@ export const POSPage: React.FC = () => {
     setBarcodeLoading(true);
 
     try {
-      // 1. EAN-13 weight barcode (`<prefix>` + 5-digit PLU + 5-digit weight + check)?
-      //    Prefix comes from tenant settings; defaults to "21".
-      const scale = parseScaleBarcode(code, user?.tenant_scale_barcode_prefix);
-      if (scale) {
-        // Weight=0 means the customer pressed "PRINT" before placing the
-        // item on the platform. Don't add a 0kg line — ask for a rescan.
-        if (scale.weightKg <= 0) {
+      const result = await posApi.scanBarcode(code);
+
+      if (result.type === 'weight_encoded') {
+        const qty = Number(result.quantity);
+        if (qty <= 0) {
           setError('Invalid weight. Rescan.');
           return;
         }
-
-        try {
-          // Resolve the PLU to a Product via the server-side filter. Limit to
-          // weighted catalog entries so a stray non-weighted match can't be
-          // added as a kg line. unique_together(tenant, plu) guarantees ≤1
-          // result; we still pick the first defensively.
-          const lookup = await apiClient.get<PaginatedResponse<Product> | Product[]>(
-            '/products/', { params: { plu: scale.plu, weighted: 'true' } },
-          );
-          const matches = unwrapList<Product>(lookup.data);
-          const prod = matches[0];
-
-          if (!prod) {
-            setError(`PLU ${scale.plu} not found in catalog.`);
-            return;
-          }
-
-          if (!prod.weighted) {
-            setError(`${prod.name} is not a weighted item.`);
-            return;
-          }
-
-          addItem(prod, scale.weightKg);
-          const lineTotal = scale.weightKg * Number(prod.price);
-          setScanInfo(
-            `Added ${prod.name} (${scale.weightKg.toFixed(3)} kg) — ${money(lineTotal)}`,
-          );
-          setBarcode('');
-          return;
-        } catch (err) {
-          if (handle401(err)) return;
-          // Treat lookup failures as a hard scale-flow error — the regular
-          // barcode path would just hit the same 404 since this isn't a
-          // standard product code.
-          setError('Scale lookup failed. Try again.');
-          return;
-        }
+        addItem(result.product, qty);
+        setScanInfo(`Added ${result.product.name} (${qty.toFixed(3)} kg) — ${money(Number(result.line_total))}`);
+        setBarcode('');
+        return;
       }
 
-      // 2. Regular barcode lookup.
-      const res = await apiClient.get<Product>(`/products/barcode/${code}/`);
-      addItem(res.data);
+      // type === 'barcode'
+      const { product, product_unit } = result;
+      if (product_unit && !product_unit.is_base) {
+        const displayPrice = await previewUnitPrice(
+          Number(product.id), product_unit.id, priceTierId, Number(product.price),
+        );
+        addItem(product, 1, {
+          productUnitId: product_unit.id,
+          unitLabel: product_unit.unit_name,
+          displayPrice,
+        });
+        setScanInfo(`Added ${product.name} (${product_unit.unit_name}) — ${money(displayPrice)}`);
+      } else {
+        addItem(product);
+        setScanInfo(`Added ${product.name}`);
+      }
       setBarcode('');
     } catch (err) {
       if (handle401(err)) return;
@@ -244,7 +226,7 @@ export const POSPage: React.FC = () => {
     } finally {
       setBarcodeLoading(false);
     }
-  }, [addItem, money, setBarcode, setError, user?.tenant_scale_barcode_prefix]);
+  }, [addItem, money, priceTierId, setBarcode, setError]);
 
   /* ─── Idempotency key: one per checkout attempt ───────────────────────── */
   // Generated lazily on the first submit of a cart and reused on retries, so
@@ -259,11 +241,16 @@ export const POSPage: React.FC = () => {
     if (saleLoading) return;
     setSaleError(null);
 
-    const items = cart.map(c => ({
-      product:    typeof c.id === 'number' ? c.id : Number(c.id),
-      qty:        c.qty,
-      price_each: Number(Number(c.price).toFixed(2)),
-    }));
+    const items: SaleItemPayload[] = cart.map(c => {
+      const productId = typeof c.id === 'number' ? c.id : Number(c.id);
+      // Unit-aware line: send product_unit + entered_qty, server derives
+      // qty/price_each — never send price_each ourselves for these.
+      if (c.productUnitId) {
+        return { product: productId, product_unit: c.productUnitId, entered_qty: c.qty };
+      }
+      // Legacy base-unit shape, unchanged.
+      return { product: productId, qty: c.qty, price_each: Number(Number(c.price).toFixed(2)) };
+    });
 
     const body: Record<string, unknown> = {
       method,
@@ -271,6 +258,7 @@ export const POSPage: React.FC = () => {
       items,
     };
     if (customer) body.customer = customer.id;
+    if (priceTierId != null) body.price_tier = priceTierId;
     if (discountType && discountValue > 0) {
       body.discount_type = discountType;
       body.discount_value = Number(discountValue.toFixed(2));
@@ -280,9 +268,7 @@ export const POSPage: React.FC = () => {
 
     setSaleLoading(true);
     try {
-      const { data } = await apiClient.post<SaleResponseDto>('/sales/', body, {
-        headers: { 'Idempotency-Key': idemKeyRef.current },
-      });
+      const data = await posApi.createSale(body as never, idemKeyRef.current);
       idemKeyRef.current = null;
 
       // Invoice discount from the backend's own numbers, so the receipt
@@ -383,7 +369,7 @@ export const POSPage: React.FC = () => {
       {!online && <OfflineBanner />}
 
       <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-5 p-5 min-h-0 bg-neutral-100 overflow-y-auto lg:overflow-hidden">
-        {/* LEFT — Scan + Quick grid */}
+        {/* LEFT — Scan + Search + Quick grid */}
         <section className="lg:col-span-7 flex flex-col gap-5 min-h-0">
           {/* Sale-level banners */}
           {saleError && (
@@ -449,58 +435,79 @@ export const POSPage: React.FC = () => {
               onSubmit={submitBarcode}
               error={!!error}
             />
-            <div className="flex items-center gap-2 mt-2 text-[12px] text-neutral-500">
-              <span>Try:</span>
-              {['5410188006353', '8480000200013', '2100041015002', '9999999999'].map(b => (
-                <button
-                  key={b}
-                  onClick={() => { setBarcode(b); submitBarcode(b); }}
-                  disabled={barcodeLoading}
-                  className="font-mono text-[11.5px] px-2 py-1 rounded border border-neutral-300 bg-white hover:border-brand-500 hover:text-brand-700 focus-ring disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {b}
-                </button>
-              ))}
-            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <SearchField
+              value={search}
+              onChange={setSearch}
+              placeholder="Search products by name, barcode or SKU…"
+              className="flex-1"
+            />
+            {priceTiers.length > 0 && (
+              <select
+                value={priceTierId ?? ''}
+                onChange={(e) => setPriceTier(e.target.value ? Number(e.target.value) : null)}
+                className="h-10 px-3 rounded-md border border-neutral-300 bg-white text-[13.5px] focus-ring shrink-0"
+                aria-label="Price tier"
+                title="Price tier applied to unit-aware lines"
+              >
+                <option value="">Retail (default)</option>
+                {priceTiers.map((t) => (
+                  <option key={t.id} value={t.id}>{t.name}</option>
+                ))}
+              </select>
+            )}
           </div>
 
           <div className="flex-1 flex flex-col min-h-0">
             <div className="flex items-center justify-between mb-2">
-              <h3 className="text-[12px] font-semibold uppercase tracking-wider text-neutral-500">Quick select</h3>
-              <div className="flex gap-1 text-[12px] flex-wrap justify-end max-w-[60%]">
-                {categories.map((c) => (
-                  <button
-                    key={c}
-                    onClick={() => setActiveCategory(c)}
-                    className={`px-2.5 py-1 rounded-md font-medium focus-ring
-                      ${activeCategory === c
-                        ? 'bg-neutral-900 text-white'
-                        : 'text-neutral-600 hover:bg-neutral-200'
-                      }`}
-                  >
-                    {c}
-                  </button>
-                ))}
-              </div>
+              <h3 className="text-[12px] font-semibold uppercase tracking-wider text-neutral-500">
+                {isSearching ? `Search results${searchLoading ? '…' : ` (${searchResults.length})`}` : 'Quick select'}
+              </h3>
+              {!isSearching && (
+                <div className="flex gap-1 text-[12px] flex-wrap justify-end max-w-[60%]">
+                  {categories.map((c) => (
+                    <button
+                      key={c}
+                      onClick={() => setActiveCategory(c)}
+                      className={`px-2.5 py-1 rounded-md font-medium focus-ring
+                        ${activeCategory === c
+                          ? 'bg-neutral-900 text-white'
+                          : 'text-neutral-600 hover:bg-neutral-200'
+                        }`}
+                    >
+                      {c}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
 
-            {gridLoading ? (
+            {(isSearching ? searchLoading : gridLoading) ? (
               <div className="flex-1 grid place-items-center text-neutral-500 text-[13px]">
                 <span className="inline-flex items-center gap-2">
                   <span className="w-4 h-4 border-2 border-neutral-300 border-t-brand-500 rounded-full spin" />
-                  Loading quick grid…
+                  {isSearching ? 'Searching…' : 'Loading quick grid…'}
                 </span>
               </div>
-            ) : filteredGrid.length === 0 ? (
+            ) : displayedGrid.length === 0 ? (
               <div className="flex-1 grid place-items-center text-[13px] text-neutral-500">
-                {quickGrid.length === 0
-                  ? 'No products available.'
-                  : 'No products in this category.'}
+                {isSearching
+                  ? `No products match "${debouncedSearch}".`
+                  : quickGrid.length === 0
+                    ? 'No products available.'
+                    : 'No products in this category.'}
               </div>
             ) : (
               <div className="grid grid-cols-4 gap-3 overflow-auto pr-1 pb-1">
-                {filteredGrid.map(p => (
-                  <QuickProductCard key={String(p.id)} product={p} onAdd={(prod: Product) => addItem(prod)} />
+                {displayedGrid.map(p => (
+                  <QuickProductCard
+                    key={String(p.id)}
+                    product={p}
+                    onAdd={(prod: Product) => addItem(prod)}
+                    onPickUnit={(prod: Product) => setUnitPickerProduct(prod)}
+                  />
                 ))}
               </div>
             )}
@@ -570,7 +577,7 @@ export const POSPage: React.FC = () => {
                   </div>
                   <div className="text-[15px] font-semibold text-neutral-700">Cart is empty</div>
                   <div className="text-[13px] text-neutral-500 mt-1 max-w-[260px]">
-                    Scan a barcode or tap a product on the left to start a new transaction.
+                    Scan a barcode, search, or tap a product on the left to start a new transaction.
                   </div>
                   <div className="mt-4 flex items-center gap-2 text-[11.5px] text-neutral-500">
                     <kbd className="px-2 py-0.5 rounded border border-neutral-300 bg-neutral-50 font-mono">F2</kbd>
@@ -669,6 +676,18 @@ export const POSPage: React.FC = () => {
           currentValue={discountValue}
           onApply={setDiscount}
           onClose={() => setDiscountModal(false)}
+        />
+      )}
+
+      {unitPickerProduct && (
+        <UnitPickerModal
+          product={unitPickerProduct}
+          priceTierId={priceTierId}
+          onClose={() => setUnitPickerProduct(null)}
+          onConfirm={(qty, unit) => {
+            addItem(unitPickerProduct, qty, unit);
+            setUnitPickerProduct(null);
+          }}
         />
       )}
     </div>

@@ -34,11 +34,21 @@ export const CartLine: React.FC<CartLineProps> = ({
     </div>
 
     <div className="flex-1 min-w-0">
-      <div className="text-[13.5px] font-semibold truncate">{item.name}</div>
+      <div className="text-[13.5px] font-semibold truncate">
+        {item.name}
+        {item.unitLabel && (
+          <span className="ms-1.5 text-[10.5px] font-semibold text-brand-700 bg-brand-50 border border-brand-500/30 rounded px-1.5 py-0.5 align-middle">
+            {item.unitLabel}
+          </span>
+        )}
+      </div>
       <div className="text-[11.5px] text-neutral-500 flex items-center gap-2">
         <span className="font-mono">{item.barcode}</span>
         <span>·</span>
-        <span>{money(item.price)}{item.weighted ? '/kg' : ''}</span>
+        <span>
+          {money(item.price)}
+          {item.weighted ? '/kg' : item.unitLabel ? ` / ${item.unitLabel}` : ''}
+        </span>
       </div>
     </div>
 
@@ -89,7 +99,7 @@ export const CartLine: React.FC<CartLineProps> = ({
         onClick={() => setEditing(item.lineId)}
         className="text-[13px] font-mono text-neutral-600 hover:text-brand-600 hover:bg-brand-50 px-2 py-1 rounded focus-ring"
       >
-        ×{item.qty}
+        ×{item.qty}{item.unitLabel ? ` ${item.unitLabel}` : ''}
       </button>
     )}
 

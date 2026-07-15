@@ -11,6 +11,15 @@ export interface PosCustomer {
   credit_limit: string;
 }
 
+/** Non-base ProductUnit selection, passed to `addItem` for a pack/carton line. */
+export interface PosUnitChoice {
+  productUnitId: number;
+  unitLabel: string;
+  /** Resolved display price for ONE of this unit (tier price, or the
+   * product's base price as fallback preview — server is authoritative). */
+  displayPrice: number;
+}
+
 interface PosState {
   cart: CartItem[];
   barcode: string;
@@ -24,8 +33,10 @@ interface PosState {
   /** Invoice-level discount (mirrors backend discount_type/discount_value). */
   discountType: PosDiscountType | null;
   discountValue: number;
+  /** Optional price tier applied to this sale's unit-aware lines. */
+  priceTierId: number | null;
 
-  addItem: (product: Product, qty?: number) => void;
+  addItem: (product: Product, qty?: number, unit?: PosUnitChoice) => void;
   removeItem: (lineId: string) => void;
   updateQty: (lineId: string, delta: number) => void;
   clearCart: () => void;
@@ -36,6 +47,7 @@ interface PosState {
   setReceiptTxn: (txn: CompletedTransaction | null) => void;
   setCustomer: (customer: PosCustomer | null) => void;
   setDiscount: (type: PosDiscountType | null, value: number) => void;
+  setPriceTier: (id: number | null) => void;
 }
 
 function playBeep() {
@@ -65,14 +77,18 @@ export const usePosStore = create<PosState>((set, get) => ({
   customer: null,
   discountType: null,
   discountValue: 0,
+  priceTierId: null,
 
-  addItem: (product: Product, qty = 1) => {
+  addItem: (product: Product, qty = 1, unit?: PosUnitChoice) => {
     const { cart, lineCounter } = get();
     playBeep();
-    // Group repeats of the same product onto the same line — including
-    // weighted items (multiple bananas weigh-ins should accumulate kg).
-    // toFixed(3) keeps floating-point math clean for sub-gram precision.
-    const existing = cart.find(x => x.id === product.id);
+    // Group repeats of the same (product, unit) pair onto the same line —
+    // a base-unit line and a carton line of the same product are DIFFERENT
+    // lines and must never merge. toFixed(3) keeps floating-point math
+    // clean for sub-gram precision.
+    const existing = cart.find(
+      x => x.id === product.id && x.productUnitId === unit?.productUnitId,
+    );
     if (existing) {
       set(state => ({
         cart: state.cart.map(x =>
@@ -85,8 +101,16 @@ export const usePosStore = create<PosState>((set, get) => ({
       setTimeout(() => set({ flashId: null }), 600);
     } else {
       const lineId = 'L' + lineCounter;
+      const line: CartItem = unit
+        ? {
+            ...product, lineId, qty: +qty.toFixed(3),
+            price: unit.displayPrice,
+            productUnitId: unit.productUnitId,
+            unitLabel: unit.unitLabel,
+          }
+        : { ...product, lineId, qty: +qty.toFixed(3) };
       set(state => ({
-        cart: [...state.cart, { ...product, lineId, qty: +qty.toFixed(3) }],
+        cart: [...state.cart, line],
         lineCounter: state.lineCounter + 1,
         flashId: lineId,
       }));
@@ -110,8 +134,11 @@ export const usePosStore = create<PosState>((set, get) => ({
   },
 
   clearCart: () => {
-    // A new sale starts clean: no carried-over customer or discount.
-    set({ cart: [], barcode: '', customer: null, discountType: null, discountValue: 0 });
+    // A new sale starts clean: no carried-over customer, discount, or tier.
+    set({
+      cart: [], barcode: '', customer: null,
+      discountType: null, discountValue: 0, priceTierId: null,
+    });
   },
 
   setBarcode: (value: string) => set({ barcode: value }),
@@ -131,4 +158,6 @@ export const usePosStore = create<PosState>((set, get) => ({
 
   setDiscount: (type, value) =>
     set({ discountType: type, discountValue: type ? Math.max(0, value) : 0 }),
+
+  setPriceTier: (id) => set({ priceTierId: id }),
 }));

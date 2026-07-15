@@ -14,6 +14,8 @@ import type {
   BranchPaymentMethod,
   BranchPaymentMethodPayload,
   BranchWarehouseLink,
+  CategoryTreeNode,
+  CategoryTreeNodePayload,
   Customer,
   CustomerARMovement,
   CustomerPayload,
@@ -26,14 +28,27 @@ import type {
   PartyBalance,
   PaymentMethodPayload,
   PaymentMethodRecord,
+  PriceTier,
+  PriceTierPayload,
+  ProductBarcodeUnit,
+  ProductBarcodeUnitPayload,
+  ProductUnit,
+  ProductUnitPayload,
+  ProductUnitTierPrice,
+  ProductUnitTierPricePayload,
   PurchaseInvoice,
   PurchaseInvoicePayload,
+  StandardUnitCode,
   StatementSummary,
   Supplier,
   SupplierAPMovement,
   SupplierPayload,
   SupplierPayment,
   SupplierPaymentPayload,
+  Unit,
+  UnitGroup,
+  UnitGroupPayload,
+  UnitPayload,
   Warehouse,
   WarehouseStockRow,
 } from '../types/erp';
@@ -181,3 +196,99 @@ export const branchesApi = {
 export function asResults<T>(data: T[] | Paginated<T>): T[] {
   return Array.isArray(data) ? data : data.results;
 }
+
+/* ── Units (Sprint 2 Batch 1 + Phase 1.5) ───────────────────────────────── */
+
+export const unitsApi = {
+  listGroups: (params?: ListParams) =>
+    apiClient.get<Paginated<UnitGroup> | UnitGroup[]>('/catalog/unit-groups/', { params }).then(r => r.data),
+  createGroup: (payload: UnitGroupPayload) =>
+    apiClient.post<UnitGroup>('/catalog/unit-groups/', payload).then(r => r.data),
+  updateGroup: (id: number, payload: Partial<UnitGroupPayload>) =>
+    apiClient.patch<UnitGroup>(`/catalog/unit-groups/${id}/`, payload).then(r => r.data),
+  deactivateGroup: (id: number) =>
+    apiClient.post<UnitGroup>(`/catalog/unit-groups/${id}/deactivate/`).then(r => r.data),
+
+  list: (params?: ListParams) =>
+    apiClient.get<Paginated<Unit> | Unit[]>('/catalog/units/', { params }).then(r => r.data),
+  create: (payload: UnitPayload) =>
+    apiClient.post<Unit>('/catalog/units/', payload).then(r => r.data),
+  update: (id: number, payload: Partial<UnitPayload>) =>
+    apiClient.patch<Unit>(`/catalog/units/${id}/`, payload).then(r => r.data),
+  deactivate: (id: number) =>
+    apiClient.post<Unit>(`/catalog/units/${id}/deactivate/`).then(r => r.data),
+
+  standardCodes: () =>
+    apiClient.get<StandardUnitCode[]>('/catalog/standard-unit-codes/').then(r => r.data),
+};
+
+/* ── Per-product unit conversions & pack barcodes ───────────────────────── */
+
+export const productUnitsApi = {
+  list: (productId: number) =>
+    apiClient.get<Paginated<ProductUnit> | ProductUnit[]>(`/products/${productId}/units/`).then(r => r.data),
+  create: (productId: number, payload: ProductUnitPayload) =>
+    apiClient.post<ProductUnit>(`/products/${productId}/units/`, payload).then(r => r.data),
+  update: (productId: number, unitMappingId: number, payload: Partial<ProductUnitPayload>) =>
+    apiClient.patch<ProductUnit>(`/products/${productId}/units/${unitMappingId}/`, payload).then(r => r.data),
+
+  listBarcodes: (productId: number) =>
+    apiClient.get<Paginated<ProductBarcodeUnit> | ProductBarcodeUnit[]>(`/products/${productId}/barcodes/`).then(r => r.data),
+  createBarcode: (productId: number, payload: ProductBarcodeUnitPayload) =>
+    apiClient.post<ProductBarcodeUnit>(`/products/${productId}/barcodes/`, payload).then(r => r.data),
+};
+
+/* ── Price Tiers & per-unit tiered pricing ──────────────────────────────── */
+
+export const priceTiersApi = {
+  list: (params?: ListParams) =>
+    apiClient.get<Paginated<PriceTier> | PriceTier[]>('/catalog/price-tiers/', { params }).then(r => r.data),
+  create: (payload: PriceTierPayload) =>
+    apiClient.post<PriceTier>('/catalog/price-tiers/', payload).then(r => r.data),
+  update: (id: number, payload: Partial<PriceTierPayload>) =>
+    apiClient.patch<PriceTier>(`/catalog/price-tiers/${id}/`, payload).then(r => r.data),
+  deactivate: (id: number) =>
+    apiClient.post<PriceTier>(`/catalog/price-tiers/${id}/deactivate/`).then(r => r.data),
+
+  listTierPrices: (productId: number, unitMappingId: number) =>
+    apiClient
+      .get<Paginated<ProductUnitTierPrice> | ProductUnitTierPrice[]>(
+        `/products/${productId}/units/${unitMappingId}/tier-prices/`,
+      )
+      .then(r => r.data),
+  createTierPrice: (productId: number, unitMappingId: number, payload: ProductUnitTierPricePayload) =>
+    apiClient
+      .post<ProductUnitTierPrice>(`/products/${productId}/units/${unitMappingId}/tier-prices/`, payload)
+      .then(r => r.data),
+  updateTierPrice: (
+    productId: number, unitMappingId: number, tierPriceId: number,
+    payload: Partial<ProductUnitTierPricePayload>,
+  ) =>
+    apiClient
+      .patch<ProductUnitTierPrice>(
+        `/products/${productId}/units/${unitMappingId}/tier-prices/${tierPriceId}/`, payload,
+      )
+      .then(r => r.data),
+};
+
+/* ── Category trees (Sprint 2 Batch 2) ──────────────────────────────────── */
+
+export const categoriesApi = {
+  listSales: (params?: ListParams) =>
+    apiClient.get<Paginated<CategoryTreeNode> | CategoryTreeNode[]>('/catalog/sales-categories/', { params }).then(r => r.data),
+  createSales: (payload: CategoryTreeNodePayload) =>
+    apiClient.post<CategoryTreeNode>('/catalog/sales-categories/', payload).then(r => r.data),
+  updateSales: (id: number, payload: Partial<CategoryTreeNodePayload>) =>
+    apiClient.patch<CategoryTreeNode>(`/catalog/sales-categories/${id}/`, payload).then(r => r.data),
+  deactivateSales: (id: number) =>
+    apiClient.post<CategoryTreeNode>(`/catalog/sales-categories/${id}/deactivate/`).then(r => r.data),
+
+  listInventory: (params?: ListParams) =>
+    apiClient.get<Paginated<CategoryTreeNode> | CategoryTreeNode[]>('/catalog/inventory-categories/', { params }).then(r => r.data),
+  createInventory: (payload: CategoryTreeNodePayload) =>
+    apiClient.post<CategoryTreeNode>('/catalog/inventory-categories/', payload).then(r => r.data),
+  updateInventory: (id: number, payload: Partial<CategoryTreeNodePayload>) =>
+    apiClient.patch<CategoryTreeNode>(`/catalog/inventory-categories/${id}/`, payload).then(r => r.data),
+  deactivateInventory: (id: number) =>
+    apiClient.post<CategoryTreeNode>(`/catalog/inventory-categories/${id}/deactivate/`).then(r => r.data),
+};

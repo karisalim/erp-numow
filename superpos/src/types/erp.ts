@@ -395,3 +395,162 @@ export interface BranchLite {
   id: number;
   name: string;
 }
+
+/* ── Units (Sprint 2 Batch 1 + Phase 1.5) ───────────────────────────────── */
+
+export interface UnitGroup {
+  id: number;
+  name: string;
+  is_active: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface UnitGroupPayload {
+  name: string;
+  is_active?: boolean;
+}
+
+export interface StandardUnitCode {
+  code: string;
+  label: string;
+}
+
+export interface Unit {
+  id: number;
+  unit_group: number;
+  unit_group_name: string;
+  name: string;
+  symbol: string;
+  /** Optional UN/CEFACT Rec 20 code — metadata only, never required. */
+  standard_code: string;
+  standard_code_display: string;
+  factor_to_base: string;
+  allow_decimal: boolean;
+  is_active: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface UnitPayload {
+  unit_group: number;
+  name: string;
+  symbol?: string;
+  standard_code?: string;
+  factor_to_base?: string;
+  allow_decimal?: boolean;
+  is_active?: boolean;
+}
+
+/** Per-product unit conversion mapping (nested under /products/:id/units/). */
+export interface ProductUnit {
+  id: number;
+  unit: number;
+  unit_name: string;
+  unit_symbol: string;
+  allow_decimal: boolean;
+  conversion_to_base: string;
+  is_base: boolean;
+  is_sale_unit: boolean;
+  is_purchase_unit: boolean;
+  is_recipe_unit: boolean;
+  minimum_order_qty: string | null;
+  is_active: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ProductUnitPayload {
+  unit: number;
+  conversion_to_base?: string;
+  is_base?: boolean;
+  is_sale_unit?: boolean;
+  is_purchase_unit?: boolean;
+  is_recipe_unit?: boolean;
+  minimum_order_qty?: string | null;
+  is_active?: boolean;
+}
+
+/** Per-pack barcode (nested under /products/:id/barcodes/). */
+export interface ProductBarcodeUnit {
+  id: number;
+  product_unit: number;
+  unit_name: string;
+  conversion_to_base: string;
+  barcode: string;
+  is_default: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ProductBarcodeUnitPayload {
+  product_unit: number;
+  barcode: string;
+  is_default?: boolean;
+}
+
+/* ── Price Tiers (Sprint 2 Batch 4 remainder) ───────────────────────────── */
+
+export interface PriceTier {
+  id: number;
+  name: string;
+  is_active: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface PriceTierPayload {
+  name: string;
+  is_active?: boolean;
+}
+
+/** Price of one product-unit at one tier (nested under
+ * /products/:id/units/:unitId/tier-prices/). */
+export interface ProductUnitTierPrice {
+  id: number;
+  price_tier: number;
+  price_tier_name: string;
+  price: string;
+  is_active: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ProductUnitTierPricePayload {
+  price_tier: number;
+  price: string;
+  is_active?: boolean;
+}
+
+/* ── Category trees (Sprint 2 Batch 2) ──────────────────────────────────── */
+
+export interface CategoryTreeNode {
+  id: number;
+  name: string;
+  parent: number | null;
+  parent_name: string;
+  is_active: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface CategoryTreeNodePayload {
+  name: string;
+  parent?: number | null;
+  is_active?: boolean;
+}
+
+/* ── Product classification (Sprint 2 Batch 3) ──────────────────────────── */
+
+export type ProductTypeValue =
+  | 'stock_item' | 'ingredient' | 'prep_item' | 'recipe_product'
+  | 'resale' | 'packaging' | 'service' | 'bundle' | 'fixed_asset';
+
+export interface ProductTypeBehavior {
+  can_sell: boolean;
+  can_purchase: boolean;
+  track_inventory: boolean;
+  affects_stock: boolean;
+  requires_cost: boolean;
+  can_have_recipe: boolean;
+}

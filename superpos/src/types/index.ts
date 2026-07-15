@@ -53,7 +53,14 @@ export interface Product {
 
 export interface CartItem extends Product {
   lineId: string;
+  /** Quantity in whichever unit this line is denominated in (base unit, or
+   * `unitLabel` below when a non-base ProductUnit was picked). */
   qty: number;
+  /** Set only when the cashier chose a non-base ProductUnit (e.g. a carton
+   * pack). `price` on this CartItem is then the resolved price for ONE of
+   * this unit, not the product's base-unit price. */
+  productUnitId?: number;
+  unitLabel?: string;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
