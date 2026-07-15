@@ -337,7 +337,12 @@ export interface PurchaseInvoiceLinePayload {
   product: number;
   warehouse?: number | null;
   line_type: 'stock_item';
-  qty: string;
+  // Legacy base-unit shape — either this…
+  qty?: string;
+  // …or the unit-aware shape (Sprint 2 Batch 5a): server derives qty via
+  // convert_to_base and enforces product_unit.minimum_order_qty.
+  product_unit?: number;
+  entered_qty?: string;
   unit_cost: string;
   discount_amount?: string;
   tax_amount?: string;

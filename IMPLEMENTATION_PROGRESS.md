@@ -242,10 +242,16 @@ Unit Integration) executed 2026-07-15; Batch 4 remainder (Tier Pricing
 Foundation) executed 2026-07-15; Phase 1.5 (Standard Unit Codes, UN/CEFACT
 Rec 20 subset) executed 2026-07-15 on branch `s2/batch-4-tier-pricing-remainder`;
 Batch 5a (POS Integration, backend only) executed 2026-07-15/16 on branch
-`s2/batch-5a-pos-backend`; suite 574 green.** Design authority: the approved
-Sprint 2 design (plan approved 2026-07-13) + MASTER_DATA_CONTRACT §2/§3.
-Remaining: Batch 5b (POS integration, frontend — first frontend change in
-the entire Sprint 1+2 stack, needs its own UX planning session).
+`s2/batch-5a-pos-backend`; suite 574 green; Batch 5b (frontend integration —
+POS unit-aware selling, Units/Price-Tier/Category-Tree admin UI, purchase
+unit picker) executed 2026-07-15 on branch
+`s2/batch-5b-frontend-pos-integration`.** Design authority: the approved
+Sprint 2 design (plan approved 2026-07-13) + MASTER_DATA_CONTRACT §2/§3,
+preceded by a full frontend/backend integration audit (see the plan file
+referenced in that session) that catalogued every gap this batch closes.
+Sprint 2 is now functionally complete end-to-end (backend + frontend);
+remaining work is UX polish / manual QA against a live backend, not new
+scope.
 
 **Governance flag — RESOLVED 2026-07-15 (see §4 below):**
 ARCHITECTURE_DECISIONS_REQUIRED §4 now records **G1 (D-01) and G2 (D-13,
@@ -806,6 +812,137 @@ on the sale request instead), `default_station`.
   Sprint 1+2 stack; needs its own UX-focused planning session before any
   code (unit picker on the sale screen, price-tier selection, POS catalog
   filtering, barcode-scan UI, purchase-line unit picker).
+
+### 7. Batch 5b execution record (2026-07-15, authorized) — Frontend Integration (POS + admin UI)
+
+Preceded by a full read-only Frontend/Backend Integration Audit (Parts 1–10,
+112 backend URL patterns inventoried, 124 endpoint-method rows classified
+consumed/partial/never) that found **zero frontend consumer for every
+Sprint 2 backend addition** — Units, Category Trees, Product Types,
+PriceTier/ProductUnitTierPrice, Barcode Resolution, Standard Unit Codes,
+`show_on_pos`, `minimum_order_qty` — not just on POS but across product
+admin, purchasing, and settings. This batch closes that gap.
+
+- **Scope executed (sub-batches 5b-1 → 5b-4, all on one branch):**
+  1. **POS core unit-aware selling.** Barcode scan switched from the legacy
+     `/products/barcode/<code>/` to `/products/scan/<code>/` (server-side
+     weight-barcode decode + `ProductBarcodeUnit → ProductUnit → Product`
+     resolution) — removes a duplicated, drifted client-side scale-barcode
+     parser (`utils/barcode.ts` had default prefix `'21'` vs. the backend's
+     `'23'` default; deleted, now dead). Product catalog fetch now passes
+     `show_on_pos=true`. New server-side product search box (previously
+     absent — discovery was scan-or-8-tiles only). New `UnitPickerModal`
+     lets the cashier choose a non-base `ProductUnit` with a live price
+     preview (tier price if one matches the active tier, else the
+     product's base price — mirrors the backend's own `resolve_unit_price`
+     fallback, display-only). Unit-aware lines send `{product,
+     product_unit, entered_qty}`; the server derives `qty`/`price_each` —
+     never computed client-side. Optional price-tier selector wired to the
+     sale's top-level `price_tier`. Removed the hardcoded demo-barcode
+     buttons.
+  2. **Admin CRUD for Units and Price Tiers** (previously zero UI —
+     Django admin only). New `/units` page (Unit Groups + Units tabs,
+     `standard_code` picker sourced from `/catalog/standard-unit-codes/`).
+     New `/price-tiers` page. New `ProductUnitsDrawer` (row action on
+     Products → "Units & pricing") managing one product's `ProductUnit`
+     conversions (incl. `minimum_order_qty`, sale/purchase eligibility),
+     `ProductBarcodeUnit` pack barcodes, and per-tier
+     `ProductUnitTierPrice` rows.
+  3. **Category Trees admin UI + product classification form.** New
+     `/categories` page (Sales/Inventory tabs, indented tree view,
+     create/edit/deactivate with a parent picker that excludes a node's
+     own subtree — client-side mirror of the backend's cycle guard, which
+     stays authoritative). `ProductFormModal` (Full Add tab, additive):
+     `product_type` select (9 values, labels only — the behavior matrix
+     itself is never duplicated client-side; existing products show their
+     server-computed `behavior` flags read-only), `sales_category`/
+     `inventory_category` tree-aware selects, `show_on_pos`/
+     `is_discountable` toggles. Legacy flat `category` field and Quick Add
+     tab untouched.
+  4. **Purchase-line unit awareness + cleanup.** `PurchaseCreatePage` gets
+     a per-line purchase-eligible unit picker; unit-aware lines send
+     `{product_unit, entered_qty}` instead of `{qty}`; client-side
+     `minimum_order_qty` check mirrors the server's own guard for instant
+     feedback (server check stays authoritative). Deleted the confirmed-
+     dead `src/data/mock.ts` (zero importers anywhere in the tree, per the
+     audit).
+- **Changed / new files (highlights):**
+  * New: `superpos/src/api/pos.ts` (typed POS layer — `scanBarcode`,
+    `listPosProducts`, `createSale`), `utils/pricing.ts`
+    (`previewUnitPrice`, shared by `UnitPickerModal` and `POSPage`),
+    `utils/tree.ts` (`flattenTree`, `descendantIds`, shared by
+    `CategoriesPage` and `ProductFormModal`'s category selects).
+  * New pages: `pages/units/UnitsPage.tsx`, `pages/pricing/PriceTiersPage.tsx`,
+    `pages/categories/CategoriesPage.tsx`, `pages/products/ProductUnitsDrawer.tsx`.
+  * New component: `components/pos/UnitPickerModal.tsx`.
+  * Modified: `api/erp.ts` (+`unitsApi`, `productUnitsApi`, `priceTiersApi`,
+    `categoriesApi`), `types/erp.ts` (+`Unit`, `UnitGroup`, `ProductUnit`,
+    `ProductBarcodeUnit`, `PriceTier`, `ProductUnitTierPrice`,
+    `StandardUnitCode`, `CategoryTreeNode`, `ProductTypeValue`,
+    `ProductTypeBehavior`, extended `PurchaseInvoiceLinePayload`),
+    `types/index.ts` (extended `Product` with the Sprint 2 fields,
+    extended `CartItem` with `productUnitId`/`unitLabel`), `store/posStore.ts`
+    (`addItem` unit param, `priceTierId` state), `pages/POSPage.tsx`,
+    `components/pos/CartLine.tsx`, `components/pos/QuickProductCard.tsx`
+    (optional "choose unit" affordance), `components/products/ProductFormModal.tsx`,
+    `components/products/ProductActionsMenu.tsx` (+`units` row action),
+    `pages/ProductsPage.tsx`, `pages/purchases/PurchaseCreatePage.tsx`,
+    `App.tsx` (+`/units`, `/price-tiers`, `/categories` routes, Manager+),
+    `auth/permissions.ts`, `components/layout/Sidebar.tsx`, both i18n
+    locale files.
+  * Deleted (confirmed dead): `src/utils/barcode.ts`, `src/data/mock.ts`.
+- **Migration numbers:** none — frontend-only batch, no backend schema touched.
+- **API changes:** none — this batch is pure frontend consumption of
+  already-shipped Batch 1/2/3/4/5a endpoints; no backend route, field, or
+  response shape was added or changed.
+- **Tests executed:** the frontend has no test framework configured
+  (`package.json` has no `test` script) — verification was `tsc --noEmit`
+  + `vite build` (full production build), run clean after every
+  sub-batch, plus a `vite dev` boot-and-serve smoke check (200 on `/` and
+  on the entry module with no console/transform errors). **No interactive
+  browser click-through was performed** — there is no running backend in
+  this environment to exercise the flows end-to-end against, so unit
+  picker behavior, tier-price preview correctness, and the new admin CRUD
+  screens are verified by type-safety and code review only, not by
+  observed runtime behavior. This is an explicit gap, not a claimed pass —
+  flagged here per the project's testing discipline (see the repo's UI
+  verification guidance) rather than asserting the UI "works."
+  Two pre-existing, unrelated environment issues were found and fixed
+  locally to make the build runnable at all (not committed — they're
+  container/`node_modules` state, not project changes): a lost executable
+  bit on `node_modules/.bin/*` (caused `npm run build` to silently resolve
+  a wrong, incompatible global `tsc`) and a missing optional native
+  dependency (`@rollup/rollup-linux-x64-gnu`, the documented npm optional-
+  deps bug). A fresh `npm install` on a clean checkout should not hit
+  either.
+- **Risks / blockers:**
+  - **No live QA.** Per the above, nothing in this batch has been clicked
+    through against a real backend + database. The highest-risk surfaces
+    to verify first: `UnitPickerModal`'s tier-price preview fetch timing,
+    the POS sale payload's `product_unit`/`entered_qty` shape against a
+    real `/sales/` POST, and `ProductUnitsDrawer`'s nested create flows.
+  - `Customer.price_tier_id`/`BranchSettings.default_price_tier_id` are
+    still not surfaced anywhere in the frontend (matches the backend's own
+    deferred-decision stance from Batch 5a) — price tier selection on POS
+    is always an explicit per-sale choice, never auto-resolved from the
+    customer or branch.
+  - Split payment, per-line discounts, and the dedicated `/sales/<uuid>/receipt/`
+    endpoint remain out of scope for this batch (flagged in the audit,
+    not part of the Sprint 2 backend gap this batch was closing).
+  - Bundle size warning from `vite build` (main chunk >500kB) is
+    pre-existing and unrelated to this batch's changes — not addressed
+    here (would need route-level code-splitting beyond the already-lazy
+    ERP module pages).
+- **Legacy compatibility:** every new field/prop is optional and additive;
+  a product/sale/purchase-line with no Sprint 2 data configured renders
+  and behaves exactly as before this batch (base-unit-only, legacy
+  barcode-equivalent flow via `/products/scan/`'s own fallback, no unit
+  picker ever shown, no category/type fields required). No existing page,
+  route, or component was removed except the two confirmed-dead files.
+- **Next:** Live QA against a running backend (the gap flagged above);
+  optional stretch cleanup noted in `BATCH5B_FRONTEND_PLAN.md` (consolidating
+  the duplicated `Sale` DTOs) was not attempted — all four planned
+  sub-batches were completed first and this was explicitly lower priority.
 
 ---
 

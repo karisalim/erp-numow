@@ -8,7 +8,7 @@ import { Card, CardHeader, CardBody } from '../../components/ui/Card';
 import { SelectField, FormField, TextAreaField } from '../../components/ui/FormField';
 import { AlertBanner } from '../../components/ui/states';
 import { PaymentRouteLabel } from '../../components/erp/PaymentRouteLabel';
-import { branchesApi, financeApi, purchasesApi, suppliersApi, warehousesApi, asResults } from '../../api/erp';
+import { branchesApi, financeApi, purchasesApi, productUnitsApi, suppliersApi, warehousesApi, asResults } from '../../api/erp';
 import { generateIdempotencyKey } from '../../api/idempotency';
 import { useQuery, useDebounced } from '../../hooks/useQuery';
 import { parseApiError, type ApiError } from '../../utils/apiError';
@@ -18,6 +18,7 @@ import {
   COMPATIBLE_DESTINATIONS,
   type Paginated,
   type PaymentMethodType,
+  type ProductUnit,
   type PurchaseInvoicePayload,
 } from '../../types/erp';
 
@@ -42,10 +43,18 @@ interface ProductLite {
 interface LineDraft {
   key: string;
   product: ProductLite | null;
+  // Quantity in whichever unit this line is denominated in — the product's
+  // base unit by default, or `productUnit`'s unit when one is chosen below.
   qty: string;
   unit_cost: string;
   discount_amount: string;
   tax_amount: string;
+  /** Purchase-eligible ProductUnits for the picked product (Sprint 2). Empty
+   * until a product is picked; a product with none configured behaves
+   * exactly as before — plain base-unit qty/unit_cost. */
+  purchaseUnits: ProductUnit[];
+  /** Non-base unit chosen for this line, if any. */
+  productUnit: ProductUnit | null;
 }
 
 const newLine = (): LineDraft => ({
@@ -55,6 +64,8 @@ const newLine = (): LineDraft => ({
   unit_cost: '',
   discount_amount: '',
   tax_amount: '',
+  purchaseUnits: [],
+  productUnit: null,
 });
 
 /* ── Inline product search picker ───────────────────────────────────────── */
@@ -200,6 +211,13 @@ export const PurchaseCreatePage: React.FC = () => {
     for (const l of usable) {
       if (!(Number(l.qty) > 0)) { errs.lines = 'Every line needs a quantity greater than zero.'; break; }
       if (!(Number(l.unit_cost) >= 0) || l.unit_cost === '') { errs.lines = 'Every line needs a unit cost.'; break; }
+      // Client-side mirror of the backend's minimum_order_qty guard — fast
+      // feedback only; the server check on post is authoritative either way.
+      const minQty = l.productUnit?.minimum_order_qty;
+      if (minQty && Number(l.qty) < Number(minQty)) {
+        errs.lines = `${l.product?.name}: quantity must be at least ${minQty} ${l.productUnit?.unit_name} (minimum order qty).`;
+        break;
+      }
     }
     const paid = Number(paidAmount) || 0;
     if (paid < 0) errs.paid_amount = 'Paid amount cannot be negative.';
@@ -228,7 +246,11 @@ export const PurchaseCreatePage: React.FC = () => {
           product: l.product!.id,
           warehouse: warehouseId ? Number(warehouseId) : undefined,
           line_type: 'stock_item' as const,
-          qty: Number(l.qty).toFixed(3),
+          // Unit-aware line: server derives qty via convert_to_base — never
+          // send both shapes.
+          ...(l.productUnit
+            ? { product_unit: l.productUnit.id, entered_qty: Number(l.qty).toFixed(3) }
+            : { qty: Number(l.qty).toFixed(3) }),
           unit_cost: Number(l.unit_cost).toFixed(2),
           discount_amount: (Number(l.discount_amount) || 0).toFixed(2),
           tax_amount: (Number(l.tax_amount) || 0).toFixed(2),
@@ -332,14 +354,41 @@ export const PurchaseCreatePage: React.FC = () => {
                       <td className="px-3 py-2 border-b border-neutral-100 min-w-[240px]">
                         <ProductPicker
                           value={l.product}
-                          onPick={(p) =>
+                          onPick={(p) => {
                             setLine(l.key, {
                               product: p,
                               // Prefill from catalog cost; editable.
                               unit_cost: p && l.unit_cost === '' && p.cost !== undefined ? String(p.cost) : l.unit_cost,
-                            })
-                          }
+                              purchaseUnits: [],
+                              productUnit: null,
+                            });
+                            if (p) {
+                              productUnitsApi.list(p.id).then(asResults).then((units) => {
+                                setLine(l.key, {
+                                  purchaseUnits: units.filter((u) => u.is_active && u.is_purchase_unit && !u.is_base),
+                                });
+                              }).catch(() => {});
+                            }
+                          }}
                         />
+                        {l.product && l.purchaseUnits.length > 0 && (
+                          <select
+                            value={l.productUnit?.id ?? ''}
+                            onChange={(e) => {
+                              const unit = l.purchaseUnits.find((u) => u.id === Number(e.target.value)) ?? null;
+                              setLine(l.key, { productUnit: unit });
+                            }}
+                            className="mt-1.5 w-full h-8 px-2 rounded-md border border-neutral-300 bg-white text-[12px] focus-ring"
+                            aria-label="Purchase unit"
+                          >
+                            <option value="">Base unit</option>
+                            {l.purchaseUnits.map((u) => (
+                              <option key={u.id} value={u.id}>
+                                {u.unit_name} (× {u.conversion_to_base})
+                              </option>
+                            ))}
+                          </select>
+                        )}
                       </td>
                       {(['qty', 'unit_cost', 'discount_amount', 'tax_amount'] as const).map((f) => (
                         <td key={f} className="px-3 py-2 border-b border-neutral-100 w-28">
