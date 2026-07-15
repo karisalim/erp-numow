@@ -1004,21 +1004,37 @@ class BranchWarehouseSerializer(serializers.ModelSerializer):
 # ── Purchase Invoices (Phase 1.5 Slice H) ─────────────────────────────────────
 
 class PurchaseInvoiceLineSerializer(serializers.ModelSerializer):
+    """
+    `product_unit` + `entered_qty` (Sprint 2 Batch 5a) are optional: when
+    set, `qty` is derived server-side via
+    `pos.services.units.convert_to_base` and `entered_qty` is checked
+    against `product_unit.minimum_order_qty` — both in
+    `pos.services.purchase_invoices.post_purchase_invoice`, which is also
+    where `qty` (required at the field level below) actually gets
+    overwritten with the converted base quantity for a unit-aware line.
+    """
+
     product_name = serializers.CharField(source='product.name', read_only=True)
+    # Not required at the field level — a unit-aware line supplies
+    # `entered_qty` instead and `qty` is derived server-side (see class
+    # docstring); `validate()` enforces presence for whichever shape applies.
+    qty          = serializers.DecimalField(max_digits=14, decimal_places=3, required=False)
+    product_unit = serializers.PrimaryKeyRelatedField(
+        queryset=ProductUnit.objects.none(), required=False, allow_null=True,
+    )
+    entered_qty  = serializers.DecimalField(
+        max_digits=14, decimal_places=3, required=False, allow_null=True,
+    )
 
     class Meta:
         model  = PurchaseInvoiceLine
         fields = [
             'id', 'product', 'product_name', 'warehouse', 'line_type',
+            'product_unit', 'entered_qty',
             'qty', 'unit_cost', 'discount_amount', 'tax_amount',
             'line_total', 'notes',
         ]
         read_only_fields = ['id', 'product_name', 'line_total']
-
-    def validate_qty(self, value):
-        if value is None or value <= 0:
-            raise serializers.ValidationError('qty must be > 0')
-        return value
 
     def validate_line_type(self, value):
         if value and value != PurchaseInvoiceLine.LineType.STOCK_ITEM:
@@ -1035,6 +1051,21 @@ class PurchaseInvoiceLineSerializer(serializers.ModelSerializer):
             val = attrs.get(fld)
             if val is not None and val < 0:
                 raise serializers.ValidationError({fld: f'{fld} must be >= 0'})
+
+        product_unit = attrs.get('product_unit')
+        if product_unit is not None:
+            product = attrs.get('product')
+            if product is not None and product_unit.product_id != product.pk:
+                raise serializers.ValidationError(
+                    {'product_unit': 'product_unit must belong to the same product as this line.'})
+            entered_qty = attrs.get('entered_qty')
+            if entered_qty is None or entered_qty <= 0:
+                raise serializers.ValidationError(
+                    {'entered_qty': 'entered_qty is required and must be > 0 when product_unit is set.'})
+        else:
+            qty = attrs.get('qty')
+            if qty is None or qty <= 0:
+                raise serializers.ValidationError({'qty': 'qty must be > 0'})
         return attrs
 
 
@@ -1072,8 +1103,9 @@ class PurchaseInvoiceSerializer(serializers.ModelSerializer):
             self.fields['payment_method'].queryset = PaymentMethod.objects.filter(tenant=tenant)
             self.fields['source_account'].queryset = FinancialAccount.objects.filter(tenant=tenant)
             line_fields = self.fields['lines'].child.fields
-            line_fields['product'].queryset   = Product.objects.filter(tenant=tenant)
-            line_fields['warehouse'].queryset = Warehouse.objects.filter(tenant=tenant)
+            line_fields['product'].queryset      = Product.objects.filter(tenant=tenant)
+            line_fields['warehouse'].queryset    = Warehouse.objects.filter(tenant=tenant)
+            line_fields['product_unit'].queryset = ProductUnit.objects.filter(tenant=tenant)
 
     def validate(self, attrs):
         paid = attrs.get('paid_amount') or Decimal('0')
@@ -1113,14 +1145,34 @@ class PurchaseInvoiceSerializer(serializers.ModelSerializer):
 
 class SaleItemSerializer(serializers.ModelSerializer):
     """
-    Client sends: product (id), qty, price_each, optional warehouse.
+    Client sends EITHER:
+      * legacy shape — product (id), qty, price_each, optional warehouse
+        (unchanged, exactly as before Batch 5a); or
+      * unit-aware shape (Sprint 2 Batch 5a) — product, product_unit (id),
+        entered_qty, optional warehouse. `qty`/`price_each` are then derived
+        server-side (`SaleSerializer.validate`/`create`) via
+        `pos.services.units.convert_to_base` +
+        `pos.services.pricing.resolve_unit_price` — never sent by the client.
     Server fills:  product_name, barcode, line_total, unit_cost automatically.
     """
+
+    # Not required at the field level so a unit-aware line (product_unit +
+    # entered_qty) can omit them; `SaleSerializer.validate` enforces presence
+    # for whichever shape the line actually uses.
+    qty        = serializers.DecimalField(max_digits=8, decimal_places=3, required=False)
+    price_each = serializers.DecimalField(max_digits=10, decimal_places=2, required=False)
+    product_unit = serializers.PrimaryKeyRelatedField(
+        queryset=ProductUnit.objects.none(), required=False, allow_null=True,
+    )
+    entered_qty = serializers.DecimalField(
+        max_digits=14, decimal_places=3, required=False, allow_null=True,
+    )
 
     class Meta:
         model  = SaleItem
         fields = [
             'id', 'product', 'product_name', 'barcode',
+            'product_unit', 'entered_qty',
             'qty', 'price_each', 'line_total', 'unit_cost', 'warehouse',
         ]
         read_only_fields = ['id', 'product_name', 'barcode', 'line_total', 'unit_cost']
@@ -1158,6 +1210,14 @@ class SaleSerializer(serializers.ModelSerializer):
     amount_paid   = serializers.DecimalField(
         max_digits=10, decimal_places=2, write_only=True, required=False,
     )
+    # Sprint 2 Batch 5a: optional price tier for THIS sale's unit-aware lines
+    # (`items[].product_unit`). Not a Sale column — `Customer.price_tier_id`/
+    # `BranchSettings.default_price_tier_id` auto-resolution stays deferred
+    # (see IMPLEMENTATION_PROGRESS.md); callers pass it explicitly per sale.
+    price_tier    = serializers.PrimaryKeyRelatedField(
+        queryset=PriceTier.objects.none(), required=False, allow_null=True,
+        write_only=True,
+    )
 
     class Meta:
         model  = Sale
@@ -1166,7 +1226,7 @@ class SaleSerializer(serializers.ModelSerializer):
             'cashier', 'cashier_name',
             'branch', 'branch_name',
             'terminal', 'terminal_name',
-            'customer',
+            'customer', 'price_tier',
             'subtotal', 'tax_amount', 'total',
             'discount_type', 'discount_value',
             'method', 'paid', 'amount_paid', 'change',
@@ -1187,9 +1247,11 @@ class SaleSerializer(serializers.ModelSerializer):
         tenant = getattr(getattr(request, 'user', None), 'tenant', None)
         if tenant is not None:
             self.fields['customer'].queryset = Customer.objects.filter(tenant=tenant)
+            self.fields['price_tier'].queryset = PriceTier.objects.filter(tenant=tenant)
             item_fields = self.fields['items'].child.fields
             item_fields['product'].queryset = Product.objects.filter(tenant=tenant)
             item_fields['warehouse'].queryset = Warehouse.objects.filter(tenant=tenant)
+            item_fields['product_unit'].queryset = ProductUnit.objects.filter(tenant=tenant)
 
     def get_cashier_name(self, obj):
         if obj.cashier:
@@ -1208,22 +1270,65 @@ class SaleSerializer(serializers.ModelSerializer):
     # ── Validation ─────────────────────────────────────────────────────────────
 
     def validate(self, data):
+        from pos.services import pricing as pricing_svc
+        from pos.services import units as units_svc
+
         items = data.get('items', [])
         if not items:
             raise serializers.ValidationError({'items': 'At least one item is required.'})
 
+        price_tier = data.get('price_tier')
+
         errors = {}
         for i, item in enumerate(items):
+            product      = item.get('product')
+            product_unit = item.get('product_unit')
+            key          = f'items[{i}]'
+
+            # Sprint 2 Batch 5a: a unit-aware line derives qty/price_each
+            # server-side instead of accepting them from the client — never
+            # both shapes at once, and the client-supplied qty/price_each (if
+            # any) for a unit-aware line are silently overwritten by design
+            # (they were only field-optional to allow this shape at all).
+            if product_unit is not None:
+                entered_qty = item.get('entered_qty')
+                if entered_qty is None or entered_qty <= 0:
+                    errors[f'{key}.entered_qty'] = (
+                        'entered_qty is required and must be > 0 when product_unit is set.'
+                    )
+                elif product is not None and product_unit.product_id != product.pk:
+                    errors[f'{key}.product_unit'] = (
+                        'product_unit must belong to the same product as this line.'
+                    )
+                else:
+                    try:
+                        item['qty'] = units_svc.convert_to_base(
+                            product=product, qty=entered_qty, product_unit=product_unit,
+                        )
+                    except units_svc.UnitConversionError as exc:
+                        errors[f'{key}.product_unit'] = str(exc)
+                    else:
+                        item['price_each'] = pricing_svc.resolve_unit_price(
+                            product_unit=product_unit, price_tier=price_tier,
+                        )
+
             qty        = item.get('qty',        Decimal('0'))
             price_each = item.get('price_each', Decimal('0'))
-            product    = item.get('product')
-            key        = f'items[{i}]'
 
             if qty <= 0:
                 errors[f'{key}.qty'] = 'Must be greater than 0.'
             if price_each <= 0:
                 errors[f'{key}.price_each'] = 'Must be greater than 0.'
-            if product and product.unit == Product.Unit.PIECE and qty != qty.to_integral_value():
+            # The whole-number rule reads whatever quantity the cashier
+            # actually entered — `entered_qty` for a unit-aware line (the
+            # converted base `qty` need not itself be an integer), the
+            # legacy `qty` otherwise.
+            whole_check_qty = item.get('entered_qty') if product_unit is not None else qty
+            if (
+                product and product.unit == Product.Unit.PIECE
+                and whole_check_qty is not None
+                and whole_check_qty != whole_check_qty.to_integral_value()
+            ):
                 errors[f'{key}.qty'] = 'Qty must be a whole number for piece-based products.'
             # Oversell is intentionally allowed — warning returned in response
 
@@ -1245,6 +1350,17 @@ class SaleSerializer(serializers.ModelSerializer):
 
     # ── Create ─────────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _money_qty(item):
+        """The quantity money math (subtotal/tax/line_total) is denominated
+        in for one item: `entered_qty` for a unit-aware line (its
+        `price_each` is priced per THAT unit), otherwise the legacy `qty`
+        (unchanged — `qty` and `price_each` have always shared a
+        denomination in the pre-Batch-5a shape)."""
+        if item.get('product_unit') is not None:
+            return item['entered_qty']
+        return item['qty']
+
     def create(self, validated_data):
         items_data = validated_data.pop('items')
 
@@ -1253,10 +1369,13 @@ class SaleSerializer(serializers.ModelSerializer):
         amount_paid_alias = validated_data.pop('amount_paid', None)
         if amount_paid_alias is not None and validated_data.get('paid') in (None, Decimal('0')):
             validated_data['paid'] = amount_paid_alias
+        # `price_tier` is a per-request hint (Sprint 2 Batch 5a), already
+        # consumed in `validate()` — not a Sale column.
+        validated_data.pop('price_tier', None)
 
-        subtotal   = sum(item['qty'] * item['price_each'] for item in items_data)
+        subtotal   = sum(self._money_qty(item) * item['price_each'] for item in items_data)
         tax_amount = sum(
-            item['qty'] * item['price_each'] * (
+            self._money_qty(item) * item['price_each'] * (
                 item['product'].tax_rate if item.get('product') else Decimal('0')
             )
             for item in items_data
@@ -1316,7 +1435,7 @@ class SaleSerializer(serializers.ModelSerializer):
                 product = item_data.get('product')
                 item_data['product_name'] = product.name        if product else ''
                 item_data['barcode']      = product.barcode or '' if product else ''
-                item_data['line_total']   = item_data['qty'] * item_data['price_each']
+                item_data['line_total']   = self._money_qty(item_data) * item_data['price_each']
                 # Cost snapshot for future COGS; explicit-or-default warehouse.
                 item_data['unit_cost']    = product.cost if product else Decimal('0')
                 if item_data.get('warehouse') is None:

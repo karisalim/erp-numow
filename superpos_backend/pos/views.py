@@ -54,7 +54,7 @@ from .serializers import (
     WarehouseSerializer,
     WarehouseStockSerializer,
 )
-from .services import idempotency
+from .services import barcode_resolution, idempotency
 from .services.standard_units import StandardUnitCode
 
 
@@ -219,13 +219,20 @@ def product_scan(request, barcode):
             'line_total': str(line_total),
         })
 
-    qs = Product.objects.filter(barcode=barcode, active=True)
-    if tenant:
-        qs = qs.filter(tenant=tenant)
-    product = qs.first()
-    if product is None:
+    resolved = barcode_resolution.resolve_barcode(tenant=tenant, code=barcode)
+    if resolved is None:
         return Response({'detail': 'Product not found.'}, status=status.HTTP_404_NOT_FOUND)
-    return Response({'type': 'barcode', 'product': ProductSerializer(product).data})
+    product, product_unit = resolved
+    body = {'type': 'barcode', 'product': ProductSerializer(product).data}
+    if product_unit is not None:
+        body['product_unit'] = {
+            'id': product_unit.id,
+            'unit_id': product_unit.unit_id,
+            'unit_name': product_unit.unit.name,
+            'conversion_to_base': str(product_unit.conversion_to_base),
+            'is_base': product_unit.is_base,
+        }
+    return Response(body)
 
 
 @api_view(['PATCH'])

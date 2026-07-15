@@ -240,11 +240,12 @@ roadmap and the §5 freeze in TARGET_BOUNDARIES.md).
 on branch `s2/batch-2-category-trees`; Batches 3+4 (Product Type Foundation +
 Unit Integration) executed 2026-07-15; Batch 4 remainder (Tier Pricing
 Foundation) executed 2026-07-15; Phase 1.5 (Standard Unit Codes, UN/CEFACT
-Rec 20 subset) executed 2026-07-15 — all on branch
-`s2/batch-4-tier-pricing-remainder`; suite 555 green.** Design authority:
-the approved Sprint 2 design (plan approved 2026-07-13) + MASTER_DATA_CONTRACT
-§2/§3. Remaining: architecture review checkpoint, then Batch 5a/5b (POS
-integration, backend then frontend).
+Rec 20 subset) executed 2026-07-15 on branch `s2/batch-4-tier-pricing-remainder`;
+Batch 5a (POS Integration, backend only) executed 2026-07-15/16 on branch
+`s2/batch-5a-pos-backend`; suite 574 green.** Design authority: the approved
+Sprint 2 design (plan approved 2026-07-13) + MASTER_DATA_CONTRACT §2/§3.
+Remaining: Batch 5b (POS integration, frontend — first frontend change in
+the entire Sprint 1+2 stack, needs its own UX planning session).
 
 **Governance flag — RESOLVED 2026-07-15 (see §4 below):**
 ARCHITECTURE_DECISIONS_REQUIRED §4 now records **G1 (D-01) and G2 (D-13,
@@ -687,6 +688,124 @@ integration in this batch** — code storage only, for future compatibility.
 - **Next:** owner-mandated architecture review checkpoint (see plan file)
   before opening any Batch 5a code, then Batch 5a — POS integration
   (backend only), per the Batch 4 remainder record above.
+
+### 6. Batch 5a execution record (2026-07-15/16, authorized) — POS Integration (backend only)
+
+**Scope executed:** the architecture review checkpoint passed (manage.py
+check clean, no missing migrations, `PriceTier`/`ProductUnitTierPrice`
+untouched, `Customer.price_tier_id`/`BranchSettings.default_price_tier_id`
+still plain BigInt) on branch `s2/batch-5a-pos-backend` (cut from the
+Phase 1.5 tip). Then: barcode resolution service, `SaleItem`/
+`PurchaseInvoiceLine` audit snapshot, `show_on_pos` catalog filter,
+`minimum_order_qty` purchase enforcement. **Deliberately NOT executed:**
+frontend (Batch 5b), `Customer.price_tier_id`/`BranchSettings.
+default_price_tier_id` → real FK + automatic tier resolution (still a
+separate deferred decision — this batch accepts an explicit `price_tier`
+on the sale request instead), `default_station`.
+
+- **Changed files:**
+  - `superpos_backend/pos/services/barcode_resolution.py` — **new**:
+    `resolve_barcode(*, tenant, code) -> (Product, ProductUnit|None) | None`.
+    Mandatory chain `ProductBarcodeUnit → ProductUnit → Product` first;
+    legacy `Product.barcode` fallback paired with `get_base_product_unit`
+    second. No `scan_priority` field needed (uniqueness within each table
+    plus this fixed two-step order is sufficient).
+  - `superpos_backend/pos/views.py` — `product_scan`'s plain-barcode branch
+    now calls `resolve_barcode` instead of querying `Product.barcode`
+    directly; response gains an additive `product_unit` key (present only
+    when a unit resolved) — the `weight_encoded` shape and the `barcode`
+    shape's existing keys are byte-identical to before. New
+    `StandardUnitCodeListView` import wiring unaffected.
+  - `superpos_backend/pos/models.py` — `SaleItem.product_unit` (`SET_NULL`,
+    nullable) + `SaleItem.entered_qty`; `PurchaseInvoiceLine.product_unit`
+    (`SET_NULL`, nullable) + `PurchaseInvoiceLine.entered_qty`. `qty` on
+    both models keeps its existing meaning (base-unit quantity, matching
+    every stock-writing path) — a unit-aware line's `qty` is always the
+    `convert_to_base` result, never `entered_qty` itself.
+  - `superpos_backend/pos/migrations/0026_batch5a_audit_snapshot.py` —
+    **new**, 4 additive `AddField`s, zero data rows (R-F).
+  - `superpos_backend/pos/serializers.py` —
+    * `SaleItemSerializer`: `qty`/`price_each` no longer field-required
+      (unit-aware lines omit them); new `product_unit`/`entered_qty`.
+    * `SaleSerializer`: new write-only `price_tier` (per-sale hint, not a
+      Sale column); `validate()` derives `qty` (`convert_to_base`) and
+      `price_each` (`resolve_unit_price`) for any line carrying
+      `product_unit`, enforces `entered_qty` presence/positivity and
+      `product_unit.product == line.product`; the legacy no-`product_unit`
+      shape is completely unchanged (same required-field checks as before).
+      New `_money_qty` static helper resolves which quantity subtotal/tax/
+      line_total math uses: `entered_qty` for a unit-aware line (its
+      `price_each` is priced per THAT unit), the legacy `qty` otherwise —
+      required so `qty` can stay base-unit-denominated without breaking the
+      money math (multiplying a base-unit quantity by a whole-carton price
+      would be wrong by the conversion factor).
+    * `PurchaseInvoiceLineSerializer`: same `product_unit`/`entered_qty`
+      addition; `qty` no longer field-required (derived server-side for a
+      unit-aware line); `validate()` requires `qty` only for the legacy
+      shape, `entered_qty` only for the unit-aware shape.
+  - `superpos_backend/pos/services/purchase_invoices.py` —
+    `post_purchase_invoice` gains the same conversion + `minimum_order_qty`
+    enforcement; `moving_average_cost` is fed a per-BASE-unit cost rate
+    (`line_subtotal ÷ base qty` — the real total money paid divided by the
+    real base quantity received, standard weighted-average COGS math, never
+    a price/cost multiplied by `conversion_to_base`) so `Product.cost`'s
+    long-standing per-base-unit meaning stays intact for unit-aware lines.
+  - `superpos_backend/pos/filters.py` — `ProductFilter` gains `show_on_pos`
+    as an opt-in filter field (django-filter auto-generates it from
+    `Meta.fields`); omitted by default, so every existing caller (admin
+    product screens) sees every product exactly as before.
+  - `superpos_backend/pos/test_pos_integration.py` — **new** (+19 tests):
+    barcode resolution service (chain-first, legacy fallback, tenant
+    isolation, unknown code), `product_scan` endpoint wiring, unit-aware
+    Sale lines (tier price resolved / fallback to `Product.price` /
+    missing `entered_qty` rejected / cross-product `product_unit` rejected
+    / legacy shape byte-identical), unit-aware `PurchaseInvoiceLine`
+    (conversion + moving-average correctness / `minimum_order_qty`
+    rejection with full rollback / legacy shape byte-identical),
+    `show_on_pos` filter (default unfiltered / `true` hides / `false`
+    isolates).
+- **Migration numbers:** `pos/0026_batch5a_audit_snapshot` (applied to dev
+  DB; `makemigrations --check` clean).
+- **API changes (additive only):**
+  * `POST /api/sales/` — `items[]` accepts `product_unit` + `entered_qty`
+    as an alternative to `qty`/`price_each`; top-level optional `price_tier`.
+    Response `items[]` gains `product_unit`/`entered_qty` (null for legacy
+    rows/lines).
+  * `POST /api/purchase-invoices/` — `lines[]` accepts `product_unit` +
+    `entered_qty` as an alternative to `qty`; response `lines[]` gains the
+    same two fields.
+  * `GET /api/products/scan/<barcode>/` — plain-barcode responses gain an
+    additive `product_unit` object when one resolves; a pack-level
+    (`ProductBarcodeUnit`) barcode now resolves at all (previously 404).
+  * `GET /api/products/` — new opt-in `?show_on_pos=true|false` filter.
+  No existing route removed or renamed; no existing response key removed.
+- **Tests executed:** full backend suite — **574 passed, 0 failed** (79.4 s;
+  555 baseline + 19 new). `python manage.py check` clean;
+  `makemigrations --check` clean.
+- **Risks / blockers:**
+  - `Customer.price_tier_id`/`BranchSettings.default_price_tier_id` remain
+    plain BigInt, unread anywhere — still an explicit `price_tier` on the
+    sale request, per the Batch 4 remainder decision. Auto-resolution from
+    customer/branch is a separate future decision.
+  - The moving-average-cost re-denomination (`line_subtotal ÷ base qty`)
+    is new math introduced by this batch; it is exercised by
+    `test_unit_aware_line_converts_qty_and_updates_moving_average` with a
+    zero-stock fixture chosen specifically so the result is an exact
+    division (no rounding ambiguity to mask a formula error) — a
+    non-zero-stock, non-exact-division scenario is not separately covered
+    yet.
+  - `scan_priority` was confirmed unnecessary per the original planning
+    note; if a future requirement needs per-barcode priority ordering
+    within a single table, this simplification would need revisiting.
+- **Legacy compatibility:** CONFIRMED — every existing Sale/PurchaseInvoice
+  line shape (no `product_unit`) is byte-identical to pre-Batch-5a
+  behavior (explicit regression tests), `product_by_barcode` untouched,
+  admin product screens see every product by default (`show_on_pos` is
+  opt-in), the 555-test baseline stayed green.
+- **Next:** Batch 5b (frontend) — first frontend change across the entire
+  Sprint 1+2 stack; needs its own UX-focused planning session before any
+  code (unit picker on the sale screen, price-tier selection, POS catalog
+  filtering, barcode-scan UI, purchase-line unit picker).
 
 ---
 

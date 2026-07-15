@@ -286,7 +286,32 @@ class SaleItem(models.Model):
     product      = models.ForeignKey(Product, on_delete=models.SET_NULL, null=True)
     product_name = models.CharField(max_length=120)
     barcode      = models.CharField(max_length=30, blank=True, default='')
+    # Audit snapshot (Sprint 2 Batch 5a): the ProductUnit the cashier actually
+    # picked + the quantity as entered in THAT unit, preserved verbatim so a
+    # historical sale stays correct even if the unit's conversion factor or
+    # its tier prices change later. Both nullable — a line with no
+    # `product_unit` is the pre-Batch-5a legacy shape (qty/price_each entered
+    # directly, no unit conversion involved) and is completely unaffected.
+    # SET_NULL: a unit mapping may be deactivated later without invalidating
+    # historical sale rows.
+    product_unit = models.ForeignKey(
+        'pos.ProductUnit', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='sale_items',
+    )
+    entered_qty  = models.DecimalField(
+        max_digits=14, decimal_places=3, null=True, blank=True,
+    )
+    # `qty` stays the product's BASE-unit quantity (unchanged meaning — every
+    # stock movement / report reads it that way); for a `product_unit` line
+    # it is the result of `pos.services.units.convert_to_base`, never the
+    # raw `entered_qty`.
     qty          = models.DecimalField(max_digits=8, decimal_places=3)
+    # `price_each` is the actual unit price used at sale time (Batch 4
+    # remainder's `resolve_unit_price` when `product_unit` is set — priced
+    # per THAT unit, e.g. per carton — otherwise the legacy client-supplied
+    # value). `line_total` is computed against `entered_qty` (not `qty`) for
+    # `product_unit` lines so the money math stays denominated consistently;
+    # see `SaleSerializer.create`.
     price_each   = models.DecimalField(max_digits=10, decimal_places=2)
     line_total   = models.DecimalField(max_digits=10, decimal_places=2)
     # Cost snapshot taken from Product.cost at sale time (Phase 1.5 Slice I).
@@ -875,7 +900,25 @@ class PurchaseInvoiceLine(models.Model):
     line_type       = models.CharField(
         max_length=20, choices=LineType.choices, default=LineType.STOCK_ITEM,
     )
+    # Audit snapshot (Sprint 2 Batch 5a) — same philosophy as SaleItem: the
+    # ProductUnit actually purchased in + the entered quantity in that unit,
+    # nullable so pre-Batch-5a lines (and non-stock line types) are unaffected.
+    product_unit    = models.ForeignKey(
+        'pos.ProductUnit', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='purchase_invoice_lines',
+    )
+    entered_qty     = models.DecimalField(
+        max_digits=14, decimal_places=3, null=True, blank=True,
+    )
+    # `qty` stays the BASE-unit quantity actually received into stock
+    # (unchanged meaning — StockMovement/moving-average cost read it that
+    # way); for a `product_unit` line it is `convert_to_base(entered_qty)`.
     qty             = models.DecimalField(max_digits=14, decimal_places=3)
+    # `unit_cost` is the cost per the unit actually purchased in (per carton,
+    # say) when `product_unit` is set, otherwise the legacy per-base-unit
+    # value. `line_total`/moving-average cost are computed against
+    # `entered_qty` for `product_unit` lines; see
+    # `pos.services.purchase_invoices.post_purchase_invoice`.
     unit_cost       = models.DecimalField(max_digits=14, decimal_places=2)
     discount_amount = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     tax_amount      = models.DecimalField(max_digits=14, decimal_places=2, default=0)

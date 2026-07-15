@@ -60,7 +60,10 @@ class ProductFilter(django_filters.FilterSet):
         model  = Product
         # `plu` is exact-match: the POS scanner queries `?plu=00041` to resolve
         # a weight-barcode (EAN-13 `21`-prefixed) back to its catalog product.
-        fields = ['category', 'active', 'weighted', 'plu']
+        # `show_on_pos` is opt-in (Sprint 2 Batch 5a): omitted entirely by
+        # default, so existing admin screens keep seeing every product
+        # unchanged; the POS catalog view passes `?show_on_pos=true` explicitly.
+        fields = ['category', 'active', 'weighted', 'plu', 'show_on_pos']
 
     def filter_low_stock(self, queryset, name, value):
         if value:

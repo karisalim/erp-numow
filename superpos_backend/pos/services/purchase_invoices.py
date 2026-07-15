@@ -41,6 +41,7 @@ from pos.models import (
     BranchWarehouse, Product, PurchaseInvoice, PurchaseInvoiceLine, Warehouse,
 )
 from pos.services import stock_movements as stock
+from pos.services import units as units_svc
 
 
 _CENTS = Decimal('0.01')
@@ -166,20 +167,67 @@ def post_purchase_invoice(
             raise PurchaseInvoiceError('stock_item line requires a product')
         _same_tenant(product, tenant, 'product')
 
-        qty       = _qty(raw['qty'])
         unit_cost = _money(raw['unit_cost'])
         discount  = _money(raw.get('discount_amount', 0))
         tax       = _money(raw.get('tax_amount', 0))
 
-        if qty <= 0:
-            raise PurchaseInvoiceError('qty must be > 0')
         if unit_cost < 0:
             raise PurchaseInvoiceError('unit_cost must be >= 0')
         if discount < 0 or tax < 0:
             raise PurchaseInvoiceError('discount_amount and tax_amount must be >= 0')
 
-        line_subtotal = (qty * unit_cost).quantize(_CENTS, rounding=ROUND_HALF_UP)
-        line_total    = line_subtotal - discount + tax
+        # Sprint 2 Batch 5a: a unit-aware line (`product_unit` +
+        # `entered_qty`) is priced per the unit actually purchased in (a
+        # carton, say) — `entered_qty` is what money math (line_subtotal,
+        # moving-average cost) uses; `qty` becomes the converted BASE
+        # quantity, matching every other stock-writing path (R-B). A legacy
+        # line keeps `qty`/`unit_cost` sharing one denomination, unchanged.
+        product_unit = raw.get('product_unit')
+        entered_qty  = raw.get('entered_qty')
+        if product_unit is not None:
+            _same_tenant(product_unit, tenant, 'product_unit')
+            if product_unit.product_id != product.pk:
+                raise PurchaseInvoiceError(
+                    'product_unit must belong to the same product as this line')
+            if entered_qty is None:
+                raise PurchaseInvoiceError('entered_qty is required when product_unit is set')
+            entered_qty = _qty(entered_qty)
+            if entered_qty <= 0:
+                raise PurchaseInvoiceError('entered_qty must be > 0')
+            if (
+                product_unit.minimum_order_qty is not None
+                and entered_qty < product_unit.minimum_order_qty
+            ):
+                raise PurchaseInvoiceError(
+                    f'entered_qty ({entered_qty}) is below minimum_order_qty '
+                    f'({product_unit.minimum_order_qty}) for this product unit',
+                )
+            try:
+                qty = units_svc.convert_to_base(
+                    product=product, qty=entered_qty, product_unit=product_unit,
+                )
+            except units_svc.UnitConversionError as exc:
+                raise PurchaseInvoiceError(str(exc))
+
+            line_subtotal = (entered_qty * unit_cost).quantize(_CENTS, rounding=ROUND_HALF_UP)
+            # Cost per BASE unit for the moving-average formula below — the
+            # real total money paid for this line divided by the real base
+            # quantity received (standard weighted-average COGS math), never
+            # a price scaled by `conversion_to_base`.
+            moving_avg_unit_cost = (
+                (line_subtotal / qty).quantize(_CENTS, rounding=ROUND_HALF_UP)
+                if qty > 0 else unit_cost
+            )
+        else:
+            if raw.get('qty') is None:
+                raise PurchaseInvoiceError('qty must be > 0')
+            qty = _qty(raw['qty'])
+            if qty <= 0:
+                raise PurchaseInvoiceError('qty must be > 0')
+            line_subtotal = (qty * unit_cost).quantize(_CENTS, rounding=ROUND_HALF_UP)
+            moving_avg_unit_cost = unit_cost
+
+        line_total = line_subtotal - discount + tax
 
         warehouse = _resolve_line_warehouse(
             tenant=tenant, branch=branch, line=raw,
@@ -192,7 +240,10 @@ def post_purchase_invoice(
 
         prepared.append({
             'product': product, 'warehouse': warehouse, 'line_type': line_type,
-            'qty': qty, 'unit_cost': unit_cost, 'discount_amount': discount,
+            'product_unit': product_unit, 'entered_qty': entered_qty,
+            'qty': qty, 'unit_cost': unit_cost,
+            'moving_avg_unit_cost': moving_avg_unit_cost,
+            'discount_amount': discount,
             'tax_amount': tax, 'line_total': line_total,
             'notes': raw.get('notes', '') or '',
         })
@@ -243,6 +294,8 @@ def post_purchase_invoice(
             product=p['product'],
             warehouse=p['warehouse'],
             line_type=p['line_type'],
+            product_unit=p['product_unit'],
+            entered_qty=p['entered_qty'],
             qty=p['qty'],
             unit_cost=p['unit_cost'],
             discount_amount=p['discount_amount'],
@@ -254,9 +307,13 @@ def post_purchase_invoice(
         # Moving-average cost BEFORE the stock increase, under a row lock so a
         # concurrent purchase/sale can't race the valuation. record_stock_in
         # re-locks the same row in this transaction and applies the +qty.
+        # `moving_avg_unit_cost` is per-BASE-unit (== `unit_cost` for a
+        # legacy line; derived from the real line total ÷ real base qty for
+        # a unit-aware line) — `Product.cost` has always been a per-base-unit
+        # average, so blending anything else in would corrupt it.
         locked = Product.objects.select_for_update().get(pk=p['product'].pk)
         new_cost = moving_average_cost(
-            locked.stock, locked.cost, p['qty'], p['unit_cost'],
+            locked.stock, locked.cost, p['qty'], p['moving_avg_unit_cost'],
         )
         Product.objects.filter(pk=locked.pk).update(cost=new_cost)
 
