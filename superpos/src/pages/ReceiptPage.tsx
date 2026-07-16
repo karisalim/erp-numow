@@ -150,12 +150,14 @@ export const ReceiptPage: React.FC = () => {
                   return (
                     <div key={i} className="py-0.5">
                       <div className="flex">
-                        <span className="flex-1 truncate pr-1">{it.name.toUpperCase()}</span>
+                        <span className="flex-1 truncate pr-1">
+                          {it.name.toUpperCase()}{it.unitLabel ? ` (${it.unitLabel.toUpperCase()})` : ''}
+                        </span>
                         <span className="w-10 text-right">{it.qty}{it.weighted ? 'kg' : ''}</span>
                         <span className="w-20 text-right">{(it.qty * price).toFixed(2)}</span>
                       </div>
                       <div className="text-[11px] text-[#666] pl-1">
-                        @ {price.toFixed(2)}{it.weighted ? '/kg' : ''}
+                        @ {price.toFixed(2)}{it.weighted ? '/kg' : it.unitLabel ? `/${it.unitLabel}` : ''}
                         {showTax ? `  ·  VAT ${(taxRate * 100).toFixed(0)}%` : ''}
                       </div>
                     </div>
