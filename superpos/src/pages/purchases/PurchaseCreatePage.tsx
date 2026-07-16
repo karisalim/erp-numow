@@ -105,6 +105,12 @@ const ProductPicker: React.FC<{
     );
   }
 
+  // Typed something, then clicked/tabbed away without picking a result from
+  // the dropdown — the line LOOKS filled in (qty/cost may already be typed)
+  // but `product` is still null and the line will be silently dropped on
+  // submit. Surface it instead of failing silently.
+  const abandoned = !open && !value && term.trim().length > 0;
+
   return (
     <div className="relative" ref={boxRef}>
       <input
@@ -113,8 +119,13 @@ const ProductPicker: React.FC<{
         onFocus={() => setOpen(true)}
         onBlur={() => setTimeout(() => setOpen(false), 150)}
         placeholder="Search product name / SKU / barcode…"
-        className="w-full h-9 px-2.5 rounded-md border border-neutral-300 bg-white text-[13px] focus-ring"
+        className={`w-full h-9 px-2.5 rounded-md border bg-white text-[13px] focus-ring ${abandoned ? 'border-danger-500' : 'border-neutral-300'}`}
       />
+      {abandoned && (
+        <div className="text-[11.5px] text-danger-600 mt-1">
+          No product selected — click a result from the list, or clear this field.
+        </div>
+      )}
       {open && term.trim().length >= 1 && (
         <div className="absolute z-20 top-10 start-0 w-full min-w-[260px] bg-white border border-neutral-200 rounded-md shadow-lg max-h-56 overflow-y-auto">
           {q.loading ? (
@@ -207,7 +218,18 @@ export const PurchaseCreatePage: React.FC = () => {
     if (!supplierId) errs.supplier = 'Select a supplier.';
     if (!branchId) errs.branch = 'Select a branch.';
     const usable = lines.filter((l) => l.product);
-    if (usable.length === 0) errs.lines = 'Add at least one product line.';
+    if (usable.length === 0) {
+      // A line can have qty/cost typed in but no product actually picked
+      // from the search dropdown — that line silently doesn't count. Say so
+      // explicitly instead of the generic "add a line" message when that's
+      // what actually happened.
+      const hasAbandonedLine = lines.some(
+        (l) => !l.product && (l.unit_cost !== '' || l.discount_amount !== '' || l.tax_amount !== '' || l.qty !== '1'),
+      );
+      errs.lines = hasAbandonedLine
+        ? 'One of your lines has values entered but no product selected — click a result from the product search dropdown.'
+        : 'Add at least one product line.';
+    }
     for (const l of usable) {
       if (!(Number(l.qty) > 0)) { errs.lines = 'Every line needs a quantity greater than zero.'; break; }
       if (!(Number(l.unit_cost) >= 0) || l.unit_cost === '') { errs.lines = 'Every line needs a unit cost.'; break; }
