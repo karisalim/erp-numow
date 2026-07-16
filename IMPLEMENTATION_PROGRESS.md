@@ -1016,6 +1016,108 @@ decisions Open and deferred to a future GL slice) is recorded in
   `pos/services/costing.py` and wire `post_purchase_invoice()` to write
   through `InventoryCost` instead of inlining the math.
 
+### Batch 2 — `pos/services/costing.py` (AVCO engine) + purchase-posting wiring
+
+**Scope executed:** extracted the moving-average formula out of
+`purchase_invoices.py` into a dedicated service, matching the AVCO rule set
+the Business Owner confirmed against SAP/Oracle/Odoo/Cleverence practice
+(2026-07-16 planning session, before any code was written): the average
+updates on exactly two events — a purchase receipt and a positive inventory
+count — everything else (sale, sale return, purchase return, shrinkage
+adjustment, transfer, recipe consumption) consumes the current average via
+a read-only accessor without changing it. **Deliberately NOT executed:**
+wiring `update_cost_from_adjustment` into the actual stock-adjustment
+endpoint (owner's explicit call — the function exists in `costing.py` now,
+the endpoint wiring is Batch 3, alongside the manual cost-override flow it
+sits next to).
+
+- **Changed files:**
+  - `superpos_backend/pos/services/costing.py` — **new**: `CostingError`;
+    `quantize_cost` (4dp HALF_UP, D-13) / `quantize_money` (2dp HALF_UP,
+    D-12); `moving_average_cost` (pure function, extracted verbatim from
+    `purchase_invoices.py`, now quantized to 4dp instead of 2dp);
+    `get_or_create_inventory_cost` (defensive lazy fetch for a product that
+    predates the Batch 1 seed); `initialize_inventory_cost` (opening-value
+    seed at product-create time, no movement row); `apply_purchase_receipt`
+    (`@transaction.atomic`, locks `Product`+`InventoryCost`, blends via
+    `moving_average_cost`, syncs the `Product.cost` mirror, writes one
+    `InventoryCostMovement`); `update_cost_from_adjustment` (same blend
+    math, `source_document_type='stock_adjustment'`, rejects `qty <= 0` —
+    a shrinkage adjustment has no cost to blend in and must never call
+    this function); `get_cost_for_sale` / `get_cost_for_return` (read-only,
+    identical implementation today — kept as two names because a future
+    purchase-return should read the *original* purchase line's cost
+    snapshot rather than the live average, while a sale return reads the
+    live average like a sale does; neither return document exists yet, so
+    this is a placeholder read accessor per the owner's "design
+    accommodates future consumers" instruction, not built-ahead logic).
+  - `superpos_backend/pos/services/purchase_invoices.py` — removed the
+    inline `moving_average_cost()` definition (now
+    `moving_average_cost = costing_svc.moving_average_cost`, a thin
+    backward-compat re-export — confirmed no external caller imported the
+    old inline function directly) and the inline
+    `select_for_update()`/`.update(cost=...)` block; `post_purchase_invoice`
+    now calls `costing_svc.apply_purchase_receipt(...)` per stock line,
+    immediately followed by `stock.record_stock_in(...)` in the same
+    transaction (Postgres allows re-acquiring a row lock already held in
+    the same transaction, so the "cost computed on pre-increase stock, then
+    stock increases" ordering guarantee from the original inline code is
+    unchanged). Module docstring corrected — no longer claims `Product.cost`
+    is the moving-average field's sole home.
+  - `superpos_backend/pos/test_costing.py` — +14 tests:
+    `MovingAverageCostFunctionTests` (the Business Owner's exact worked
+    example 10kg@500→10kg@600→550; the pre-extraction single-purchase
+    assertion ported at 4dp; a 3-purchase sequential-compounding chain —
+    closing a real coverage gap, no prior test verified a second purchase
+    blending into an already-updated average; negative-stock/zero-
+    denominator fallback regression; a small-quantity high-precision case
+    validating D-13's stated 4dp rationale) and `CostingServiceTests`
+    (`apply_purchase_receipt` updates `InventoryCost` + syncs the
+    `Product.cost` mirror + writes a movement row; confirms it does NOT
+    touch `Product.stock` itself — that stays `record_stock_in`'s job;
+    `update_cost_from_adjustment` blends correctly and rejects `qty <= 0`;
+    `get_cost_for_sale`/`get_cost_for_return` never write a movement row;
+    the defensive lazy-fetch path for a product with no `InventoryCost` row
+    yet).
+  - `superpos_backend/pos/tests.py` — +1 integration test:
+    `test_sequential_purchases_compound_correctly_via_costing_service` on
+    `PurchaseInvoicePostingTests` — the owner's worked example exercised
+    end-to-end through the real `POST /api/purchase-invoices/` API (not
+    just the pure function), asserting `Product.stock`/`Product.cost`,
+    `InventoryCost.avg_unit_cost`, and both `InventoryCostMovement` rows
+    (correct `source_document_id` linkage to each invoice) all match.
+- **Migration number:** none — pure service-layer refactor, `InventoryCost`/
+  `InventoryCostMovement` already exist from Batch 1.
+  `makemigrations --check` clean before and after.
+- **API changes:** none — no serializer/view/url touched; every purchase-
+  invoice request/response shape is byte-identical to before this batch.
+- **Tests executed:** `pos.test_costing` + `pos.tests.PurchaseInvoicePostingTests`
+  (36/36 green) + full suite (598/598 green — 584 baseline + 14 new).
+  `manage.py check` clean. All 12 pre-existing purchase-posting tests pass
+  **with unchanged assertion values**, including
+  `test_cash_purchase_increases_stock_updates_cost_decreases_cashbox`'s
+  literal `Decimal('7.00')` and the atomic-rollback test (confirming the
+  nested `@transaction.atomic` in `apply_purchase_receipt` correctly rolls
+  back via Django's savepoint mechanism when the outer transaction fails).
+- **Live verification (beyond the automated suite):** posted two real
+  purchases through `post_purchase_invoice` against the dev DB's existing
+  seeded "Apple 1kg" product (pre-existing stock=50/cost=9.00, not a fresh
+  fixture) — 10 @ 12.00 → 9.50, then 10 @ 16.00 → 10.4286 (`InventoryCost`)
+  / 10.43 (`Product.cost` mirror), matching the hand-computed weighted
+  average exactly; `InventoryCostMovement` audit trail correctly linked
+  both entries to their respective purchase-invoice IDs.
+- **Risks:** none identified — `update_cost_from_adjustment` is fully
+  implemented and tested but has zero callers today (Batch 3's job to
+  wire it up), so it carries no behavior-change risk in this batch.
+- **Not touched this batch:** `serializers.py`, `views.py`, `urls.py`,
+  the stock-adjustment endpoint, frontend, GL, recipes.
+- **Next:** Batch 3 — wire `update_cost_from_adjustment` into the stock
+  adjustment endpoint, add the manual cost-override flow (`cost` becomes
+  read-only on `PATCH /products/{id}/` for an existing product, a new
+  audited `POST /products/{id}/cost-adjustment/` endpoint takes its place,
+  CSV-import cost changes route through the same audited path), close the
+  three previously-uncoordinated `Product.cost` write paths down to one.
+
 ---
 
 *(Later sprints get their own sections here after their pre-sprint audits.)*

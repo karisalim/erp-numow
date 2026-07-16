@@ -736,6 +736,59 @@ class PurchaseInvoicePostingTests(_PurchaseInvoiceTestBase):
             Decimal('0.00'),
         )
 
+    def test_sequential_purchases_compound_correctly_via_costing_service(self):
+        """Sprint 3 Batch 2 — the Business Owner's worked example, exercised
+        end-to-end through the real API (not just the pure function): two
+        sequential purchase invoices at different unit costs must blend into
+        the correct average, and the InventoryCost/InventoryCostMovement
+        audit trail introduced in Batch 1/2 must stay in sync with it."""
+        from pos.models import InventoryCost, InventoryCostMovement
+
+        # Start clean: this product already has stock=100/cost=6.00 from the
+        # class fixture — reset it to match the owner's own numbers (10kg
+        # @500, then 10kg @600) so the assertions read exactly like the
+        # worked example.
+        self.product.stock = Decimal('0')
+        self.product.cost = Decimal('0.00')
+        self.product.save(update_fields=['stock', 'cost'])
+        InventoryCost.objects.filter(product=self.product).delete()
+
+        body1 = self._body(lines=[{
+            'product': self.product.id, 'warehouse': self.warehouse.id,
+            'qty': '10.000', 'unit_cost': '500.00',
+        }])
+        resp1 = self.client.post(reverse('purchase-invoice-list'), body1, format='json')
+        self.assertEqual(resp1.status_code, status.HTTP_201_CREATED, resp1.content)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, Decimal('10.000'))
+        self.assertEqual(self.product.cost, Decimal('500.00'))
+
+        body2 = self._body(lines=[{
+            'product': self.product.id, 'warehouse': self.warehouse.id,
+            'qty': '10.000', 'unit_cost': '600.00',
+        }])
+        resp2 = self.client.post(reverse('purchase-invoice-list'), body2, format='json')
+        self.assertEqual(resp2.status_code, status.HTTP_201_CREATED, resp2.content)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, Decimal('20.000'))
+        # (10*500 + 10*600) / 20 = 550.00 — matches the owner's worked example.
+        self.assertEqual(self.product.cost, Decimal('550.00'))
+
+        inv_cost = InventoryCost.objects.get(product=self.product)
+        self.assertEqual(inv_cost.avg_unit_cost, Decimal('550.0000'))
+
+        movements = list(
+            InventoryCostMovement.objects.filter(product=self.product).order_by('id')
+        )
+        self.assertEqual(len(movements), 2)
+        self.assertEqual(movements[0].avg_cost_before, Decimal('0.0000'))
+        self.assertEqual(movements[0].avg_cost_after, Decimal('500.0000'))
+        self.assertEqual(movements[0].source_document_type, 'purchase_invoice')
+        self.assertEqual(movements[0].source_document_id, resp1.json()['id'])
+        self.assertEqual(movements[1].avg_cost_before, Decimal('500.0000'))
+        self.assertEqual(movements[1].avg_cost_after, Decimal('550.0000'))
+        self.assertEqual(movements[1].source_document_id, resp2.json()['id'])
+
     def test_credit_purchase_increases_stock_and_supplier_ap(self):
         body = self._body()  # paid_amount defaults to 0 → fully on credit
         resp = self.client.post(reverse('purchase-invoice-list'), body, format='json')

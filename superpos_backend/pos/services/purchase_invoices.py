@@ -5,10 +5,12 @@ transaction performs every effect; any failure rolls all of them back:
 
     1. PurchaseInvoice + PurchaseInvoiceLine document rows.
     2. Per stock line:
-         * Product.cost updated to the weighted moving-average cost
-           (FLOW_v3_6 §7.1 formula) using the stock/cost BEFORE the
-           increase. `Product.cost` is used as the moving-average field
-           because ProductUnit.avg_cost does not exist yet (out of scope).
+         * The AVCO average cost is updated via
+           `pos.services.costing.apply_purchase_receipt` (Sprint 3 Batch 2)
+           — the moving-average math itself, and its `InventoryCost` /
+           `InventoryCostMovement` home, live there now; this module no
+           longer inlines the formula. `Product.cost` is kept in sync as a
+           2dp display mirror by that call (D-07).
          * StockMovement PURCHASE_IN via `pos.services.stock_movements`,
            warehouse-aware, linked by source_document_type='purchase_invoice'.
     3. If paid_amount > 0: FinancialAccountMovement CREDIT on the source
@@ -20,7 +22,7 @@ transaction performs every effect; any failure rolls all of them back:
 
 Accounting scope notes (intentional for this slice):
     * No Inventory GL FinancialAccountMovement — inventory is tracked by
-      StockMovement quantity + Product.cost. The purchase's debit side is
+      StockMovement quantity + InventoryCost. The purchase's debit side is
       stock value, not a GL row. Full double-entry inventory is a later slice.
     * tax_amount / tax_total are stored but NOT posted to any tax ledger —
       v3.6 leaves purchase-tax accounting undefined.
@@ -40,6 +42,7 @@ from accounts.services import supplier_ap as ap
 from pos.models import (
     BranchWarehouse, Product, PurchaseInvoice, PurchaseInvoiceLine, Warehouse,
 )
+from pos.services import costing as costing_svc
 from pos.services import stock_movements as stock
 from pos.services import units as units_svc
 
@@ -66,26 +69,13 @@ def _same_tenant(obj, tenant, label: str) -> None:
         raise PurchaseInvoiceError(f'{label} must belong to the same tenant')
 
 
-def moving_average_cost(current_stock, current_cost, qty, unit_cost) -> Decimal:
-    """Weighted moving-average cost after receiving `qty` at `unit_cost`.
-
-    new_cost = (current_stock × current_cost + qty × unit_cost)
-               ÷ (current_stock + qty)
-
-    Falls back to `unit_cost` when the resulting denominator is <= 0 (e.g.
-    the product was oversold to a negative balance) so we never divide by
-    zero or carry a nonsensical average.
-    """
-    current_stock = Decimal(str(current_stock or 0))
-    current_cost  = Decimal(str(current_cost or 0))
-    qty           = Decimal(str(qty))
-    unit_cost     = Decimal(str(unit_cost))
-
-    denom = current_stock + qty
-    if denom <= 0:
-        return unit_cost.quantize(_CENTS, rounding=ROUND_HALF_UP)
-    new_cost = (current_stock * current_cost + qty * unit_cost) / denom
-    return new_cost.quantize(_CENTS, rounding=ROUND_HALF_UP)
+# Backward-compat re-export — the moving-average formula now lives in
+# pos.services.costing (Sprint 3 Batch 2), extracted so it has one
+# reusable home instead of being inlined in this posting service. Nothing
+# outside this module imported the old inline function directly (checked),
+# but keep the name importable here as cheap insurance for any caller this
+# audit missed.
+moving_average_cost = costing_svc.moving_average_cost
 
 
 def _resolve_line_warehouse(*, tenant, branch, line: dict) -> Warehouse:
@@ -304,18 +294,23 @@ def post_purchase_invoice(
             notes=p['notes'],
         )
 
-        # Moving-average cost BEFORE the stock increase, under a row lock so a
-        # concurrent purchase/sale can't race the valuation. record_stock_in
-        # re-locks the same row in this transaction and applies the +qty.
+        # Moving-average cost BEFORE the stock increase — costing.apply_
+        # purchase_receipt locks Product + InventoryCost itself and blends
+        # `moving_avg_unit_cost` in under that lock. record_stock_in below
+        # re-locks the same product row in this same transaction and applies
+        # the +qty; Postgres allows re-acquiring a row lock already held in
+        # the same transaction, so the "cost computed on pre-increase stock,
+        # then stock increases" ordering guarantee is unchanged.
         # `moving_avg_unit_cost` is per-BASE-unit (== `unit_cost` for a
         # legacy line; derived from the real line total ÷ real base qty for
-        # a unit-aware line) — `Product.cost` has always been a per-base-unit
-        # average, so blending anything else in would corrupt it.
-        locked = Product.objects.select_for_update().get(pk=p['product'].pk)
-        new_cost = moving_average_cost(
-            locked.stock, locked.cost, p['qty'], p['moving_avg_unit_cost'],
+        # a unit-aware line) — the average has always been per-base-unit, so
+        # blending anything else in would corrupt it.
+        costing_svc.apply_purchase_receipt(
+            product=p['product'], qty=p['qty'], unit_cost=p['moving_avg_unit_cost'],
+            source_document_type='purchase_invoice', source_document_id=invoice.id,
+            actor_user=actor_user,
         )
-        Product.objects.filter(pk=locked.pk).update(cost=new_cost)
+        locked = Product.objects.select_for_update().get(pk=p['product'].pk)
 
         stock.record_stock_in(
             product=locked,
