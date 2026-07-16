@@ -14,11 +14,27 @@ interface NavItem {
   icon: string;
 }
 
+/** Accent classes for a nav group — icon color at rest, and the active pill's
+ * background+text once a route inside the group is selected. Gives each
+ * section of the sidebar a distinct identity instead of one flat gray list. */
+interface NavAccent {
+  icon: string;
+  activeBg: string;
+  activeText: string;
+}
+
 interface NavGroup {
   labelKey?: string;
   fallback?: string;
+  accent: NavAccent;
   items: NavItem[];
 }
+
+const ACCENT_BRAND:   NavAccent = { icon: 'text-brand-500',   activeBg: 'bg-brand-50',   activeText: 'text-brand-700' };
+const ACCENT_EMERALD: NavAccent = { icon: 'text-success-600', activeBg: 'bg-success-50', activeText: 'text-success-700' };
+const ACCENT_VIOLET:  NavAccent = { icon: 'text-violet-500',  activeBg: 'bg-violet-50',  activeText: 'text-violet-700' };
+const ACCENT_AMBER:   NavAccent = { icon: 'text-warn-600',    activeBg: 'bg-warn-50',    activeText: 'text-warn-700' };
+const ACCENT_ROSE:    NavAccent = { icon: 'text-rose-500',    activeBg: 'bg-rose-50',    activeText: 'text-rose-700' };
 
 /**
  * Grouped navigation following the approved prototype sidebar. Route
@@ -28,6 +44,7 @@ interface NavGroup {
  */
 const NAV_GROUPS: NavGroup[] = [
   {
+    accent: ACCENT_BRAND,
     items: [
       { path: '/pos',       labelKey: 'nav.pos',       fallback: 'Point of Sale', icon: 'pos' },
       { path: '/dashboard', labelKey: 'nav.dashboard', fallback: 'Dashboard',     icon: 'chart' },
@@ -35,6 +52,7 @@ const NAV_GROUPS: NavGroup[] = [
   },
   {
     labelKey: 'nav.groupOperations', fallback: 'Operations',
+    accent: ACCENT_EMERALD,
     items: [
       { path: '/sales',     labelKey: 'nav.sales',     fallback: 'Sales',     icon: 'receipt' },
       { path: '/purchases', labelKey: 'nav.purchases', fallback: 'Purchases', icon: 'truck' },
@@ -44,6 +62,7 @@ const NAV_GROUPS: NavGroup[] = [
   },
   {
     labelKey: 'nav.groupCatalog', fallback: 'Catalog & Stock',
+    accent: ACCENT_VIOLET,
     items: [
       { path: '/products',   labelKey: 'nav.products',   fallback: 'Products',   icon: 'tag' },
       { path: '/categories', labelKey: 'nav.categories', fallback: 'Categories', icon: 'archive' },
@@ -56,12 +75,14 @@ const NAV_GROUPS: NavGroup[] = [
   },
   {
     labelKey: 'nav.groupFinance', fallback: 'Finance',
+    accent: ACCENT_AMBER,
     items: [
       { path: '/finance', labelKey: 'nav.finance', fallback: 'Treasury / Finance', icon: 'bank' },
     ],
   },
   {
     labelKey: 'nav.groupAdmin', fallback: 'Admin',
+    accent: ACCENT_ROSE,
     items: [
       { path: '/users',    labelKey: 'nav.users',    fallback: 'Users',    icon: 'shield' },
       { path: '/settings', labelKey: 'nav.settings', fallback: 'Settings', icon: 'gear' },
@@ -129,11 +150,11 @@ export const Sidebar: React.FC = () => {
                   aria-current={active ? 'page' : undefined}
                   className={`h-[38px] px-2.5 rounded-md flex items-center gap-2.5 text-[13.5px] focus-ring text-start w-full shrink-0
                     ${active
-                      ? 'bg-brand-50 text-brand-700 font-semibold'
+                      ? `${g.accent.activeBg} ${g.accent.activeText} font-semibold`
                       : 'text-neutral-600 hover:bg-neutral-100'
                     }`}
                 >
-                  <Icon name={item.icon} size={18} />
+                  <Icon name={item.icon} size={18} className={active ? '' : g.accent.icon} />
                   <span className="truncate">{t(item.labelKey, item.fallback)}</span>
                 </button>
               );

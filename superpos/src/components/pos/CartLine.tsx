@@ -1,8 +1,8 @@
 import React from 'react';
 import type { CartItem } from '../../types';
-import { initials } from '../../utils/format';
 import { useMoney } from '../../utils/money';
 import { Icon } from '../ui/Icon';
+import { productVisual } from '../../utils/categoryVisual';
 
 interface CartLineProps {
   item: CartItem;
@@ -22,15 +22,15 @@ export const CartLine: React.FC<CartLineProps> = ({
   flash,
 }) => {
   const money = useMoney();
+  const { emoji, gradient } = productVisual(item.name, item.category_name ?? item.sales_category_name);
   return (
   <div
     className={`row-zebra group flex items-center gap-3 px-4 py-2.5 border-b border-neutral-100 ${flash ? 'scan-flash' : ''}`}
   >
     <div
-      className="w-9 h-9 rounded-md grid place-items-center text-white text-[11px] font-bold shrink-0"
-      style={{ background: item.color }}
+      className={`w-9 h-9 rounded-md grid place-items-center text-[16px] shrink-0 bg-gradient-to-br ${gradient}`}
     >
-      {initials(item.name)}
+      <span aria-hidden>{emoji}</span>
     </div>
 
     <div className="flex-1 min-w-0">

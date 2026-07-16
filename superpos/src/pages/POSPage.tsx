@@ -4,6 +4,7 @@ import { AxiosError } from 'axios';
 import { posApi } from '../api/pos';
 import { priceTiersApi, asResults } from '../api/erp';
 import { previewUnitPrice } from '../utils/pricing';
+import { productVisual } from '../utils/categoryVisual';
 import { usePosStore } from '../store/posStore';
 import { useAppStore } from '../store/appStore';
 import { useAuthStore } from '../store/authStore';
@@ -466,20 +467,27 @@ export const POSPage: React.FC = () => {
                 {isSearching ? `Search results${searchLoading ? '…' : ` (${searchResults.length})`}` : 'Quick select'}
               </h3>
               {!isSearching && (
-                <div className="flex gap-1 text-[12px] flex-wrap justify-end max-w-[60%]">
-                  {categories.map((c) => (
-                    <button
-                      key={c}
-                      onClick={() => setActiveCategory(c)}
-                      className={`px-2.5 py-1 rounded-md font-medium focus-ring
-                        ${activeCategory === c
-                          ? 'bg-neutral-900 text-white'
-                          : 'text-neutral-600 hover:bg-neutral-200'
-                        }`}
-                    >
-                      {c}
-                    </button>
-                  ))}
+                <div className="flex gap-1.5 text-[12px] flex-wrap justify-end max-w-[65%]">
+                  {categories.map((c) => {
+                    const active = activeCategory === c;
+                    const { emoji, gradient } = c === 'All'
+                      ? { emoji: '🗂️', gradient: 'from-neutral-700 to-neutral-900' }
+                      : productVisual(c, c);
+                    return (
+                      <button
+                        key={c}
+                        onClick={() => setActiveCategory(c)}
+                        className={`px-3 py-1.5 rounded-full font-semibold inline-flex items-center gap-1.5 focus-ring transition-all
+                          ${active
+                            ? `bg-gradient-to-br ${gradient} text-white shadow-sm`
+                            : 'bg-white border border-neutral-200 text-neutral-600 hover:border-neutral-300 hover:bg-neutral-50'
+                          }`}
+                      >
+                        <span aria-hidden>{emoji}</span>
+                        {c}
+                      </button>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -500,7 +508,7 @@ export const POSPage: React.FC = () => {
                     : 'No products in this category.'}
               </div>
             ) : (
-              <div className="grid grid-cols-4 gap-3 overflow-auto pr-1 pb-1">
+              <div className="grid grid-cols-3 sm:grid-cols-4 xl:grid-cols-5 gap-3 overflow-auto pr-1 pb-1">
                 {displayedGrid.map(p => (
                   <QuickProductCard
                     key={String(p.id)}
@@ -572,8 +580,8 @@ export const POSPage: React.FC = () => {
             <div className="flex-1 overflow-auto min-h-0">
               {cart.length === 0 ? (
                 <div className="h-full flex flex-col items-center justify-center text-center px-8 py-12">
-                  <div className="w-16 h-16 rounded-full bg-neutral-100 grid place-items-center text-neutral-400 mb-3">
-                    <Icon name="barcode" size={28} />
+                  <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-brand-50 to-violet-50 grid place-items-center text-4xl mb-3 shadow-inner">
+                    <span aria-hidden>🛒</span>
                   </div>
                   <div className="text-[15px] font-semibold text-neutral-700">Cart is empty</div>
                   <div className="text-[13px] text-neutral-500 mt-1 max-w-[260px]">

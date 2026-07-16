@@ -12,6 +12,7 @@ const lowStockBadge = (stock: number): { kind: BadgeKind; label: string } =>
     ? { kind: 'danger', label: 'Out' }
     : { kind: 'warn',   label: 'Low' };
 import { useMoney } from '../utils/money';
+import { productVisual } from '../utils/categoryVisual';
 import { Header } from '../components/layout/Header';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
@@ -149,24 +150,28 @@ export const DashboardPage: React.FC = () => {
       val:   money(kpis?.revenue ?? 0),
       trend: kpis?.revenue_trend ?? 0,
       color: '#3B82F6',
+      icon:  'cash',
     },
     {
       label: 'Transactions',
       val:   String(kpis?.transactions ?? 0),
       trend: kpis?.transactions_trend ?? 0,
       color: '#10B981',
+      icon:  'receipt',
     },
     {
       label: 'Avg. basket',
       val:   money(kpis?.avg_basket ?? 0),
       trend: kpis?.avg_basket_trend ?? 0,
       color: '#F59E0B',
+      icon:  'pos',
     },
     {
       label: 'Items sold',
       val:   fmtDecimal(kpis?.items_sold ?? 0),
       trend: kpis?.items_sold_trend ?? 0,
       color: '#06B6D4',
+      icon:  'box',
     },
   ];
 
@@ -230,7 +235,7 @@ export const DashboardPage: React.FC = () => {
                   </div>
                 </div>
                 <div className="w-9 h-9 rounded-md grid place-items-center shrink-0" style={{ background: `${s.color}1a`, color: s.color }}>
-                  <Icon name="chart" size={18} />
+                  <Icon name={s.icon} size={18} />
                 </div>
               </div>
             </Card>
@@ -301,10 +306,9 @@ export const DashboardPage: React.FC = () => {
                   return (
                     <div key={p.id} className="px-5 py-3 flex items-center gap-3 hover:bg-neutral-50">
                       <div
-                        className="w-8 h-8 rounded grid place-items-center text-white text-[10px] font-bold"
-                        style={{ background: p.color || '#6B7280' }}
+                        className={`w-8 h-8 rounded-md grid place-items-center text-[13px] shrink-0 bg-gradient-to-br ${productVisual(p.name).gradient}`}
                       >
-                        {p.name.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase()}
+                        <span aria-hidden>{productVisual(p.name).emoji}</span>
                       </div>
                       <div className="flex-1 min-w-0">
                         <div className="text-[13px] font-semibold truncate">{p.name}</div>

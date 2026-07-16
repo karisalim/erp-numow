@@ -16,6 +16,7 @@ import { StockMovementsModal } from '../components/products/StockMovementsModal'
 import { ReceiveStockModal } from '../components/products/ReceiveStockModal';
 import { ProductUnitsDrawer } from './products/ProductUnitsDrawer';
 import type { Product } from '../types';
+import { productVisual } from '../utils/categoryVisual';
 
 type StockFilter = 'All' | 'In stock' | 'Low' | 'Out';
 
@@ -41,12 +42,6 @@ function stockFilterToParams(filter: StockFilter): Record<string, true> {
     case 'Out': return { out_of_stock: true };
     default:    return {};
   }
-}
-
-function colorFor(p: Product): string { return p.color || '#6B7280'; }
-
-function initialsFor(name: string): string {
-  return name.split(/\s+/).filter(Boolean).map(w => w[0]).slice(0, 2).join('').toUpperCase();
 }
 
 export const ProductsPage: React.FC = () => {
@@ -328,10 +323,9 @@ export const ProductsPage: React.FC = () => {
                       <td className="px-4 py-1.5">
                         <div className="flex items-center gap-2.5">
                           <div
-                            className="w-7 h-7 rounded grid place-items-center text-white text-[9.5px] font-bold shrink-0"
-                            style={{ background: colorFor(p) }}
+                            className={`w-7 h-7 rounded-md grid place-items-center text-[13px] shrink-0 bg-gradient-to-br ${productVisual(p.name, p.category_name ?? p.sales_category_name).gradient}`}
                           >
-                            {initialsFor(p.name)}
+                            <span aria-hidden>{productVisual(p.name, p.category_name ?? p.sales_category_name).emoji}</span>
                           </div>
                           <span className="font-medium truncate">{p.name}</span>
                           {p.weighted && <Badge kind="info">{p.unit_display || p.unit || 'kg'}</Badge>}

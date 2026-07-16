@@ -1,8 +1,8 @@
 import React from 'react';
 import type { Product } from '../../types';
-import { initials } from '../../utils/format';
 import { useMoney } from '../../utils/money';
 import { Icon } from '../ui/Icon';
+import { productVisual } from '../../utils/categoryVisual';
 
 interface QuickProductCardProps {
   product: Product;
@@ -15,18 +15,27 @@ interface QuickProductCardProps {
 
 export const QuickProductCard: React.FC<QuickProductCardProps> = ({ product, onAdd, onPickUnit }) => {
   const money = useMoney();
+  const { emoji, gradient } = productVisual(product.name, product.category_name ?? product.sales_category_name);
+  const outOfStock = !product.weighted && product.stock <= 0;
+  const lowStock = !outOfStock && !product.weighted && product.stock > 0 && product.stock <= product.reorder;
+
   return (
     <div className="relative group">
       <button
         onClick={() => onAdd(product)}
-        className="text-start w-full bg-white border border-neutral-200 rounded-lg hover:border-brand-500 hover:shadow-md transition-all p-3 flex flex-col gap-2 focus-ring"
+        className="text-start w-full bg-white border border-neutral-200 rounded-xl hover:border-brand-400 hover:shadow-lg hover:-translate-y-0.5 transition-all p-2.5 flex flex-col gap-2 focus-ring overflow-hidden"
         aria-label={`Add ${product.name} to cart`}
       >
-        <div
-          className="aspect-square rounded-md grid place-items-center text-white font-bold text-xl"
-          style={{ background: product.color }}
-        >
-          {initials(product.name)}
+        <div className={`relative aspect-square rounded-lg grid place-items-center text-4xl bg-gradient-to-br ${gradient} shadow-inner`}>
+          <span className="drop-shadow-sm" aria-hidden>{emoji}</span>
+          {outOfStock && (
+            <span className="absolute inset-x-0 bottom-1.5 mx-auto w-fit px-2 py-0.5 rounded-full bg-black/70 text-white text-[9px] font-bold uppercase tracking-wide">
+              Out of stock
+            </span>
+          )}
+          {lowStock && (
+            <span className="absolute top-1.5 end-1.5 w-2.5 h-2.5 rounded-full bg-warn-500 ring-2 ring-white" title="Low stock" />
+          )}
         </div>
         <div className="min-h-[36px]">
           <div className="text-[13px] font-semibold leading-tight line-clamp-2">{product.name}</div>

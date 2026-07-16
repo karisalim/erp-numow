@@ -12,6 +12,7 @@ import { categoriesApi, asResults } from '../../api/erp';
 import { useQuery } from '../../hooks/useQuery';
 import { flattenTree, descendantIds } from '../../utils/tree';
 import { parseApiError, type ApiError } from '../../utils/apiError';
+import { productVisual } from '../../utils/categoryVisual';
 import type { CategoryTreeNode } from '../../types/erp';
 
 type TreeKind = 'sales' | 'inventory';
@@ -142,9 +143,13 @@ export const CategoriesPage: React.FC = () => {
       key: 'name', header: 'Name',
       render: (n) => {
         const depth = depthById.get(n.id) ?? 0;
+        const { emoji, gradient } = productVisual(n.name, n.name);
         return (
-          <span style={{ paddingInlineStart: depth * 20 }} className="inline-flex items-center gap-1">
+          <span style={{ paddingInlineStart: depth * 20 }} className="inline-flex items-center gap-2">
             {depth > 0 && <span className="text-neutral-300">↳</span>}
+            <span className={`w-6 h-6 rounded-md grid place-items-center text-[12px] shrink-0 bg-gradient-to-br ${gradient}`}>
+              <span aria-hidden>{emoji}</span>
+            </span>
             <span className="font-semibold">{n.name}</span>
           </span>
         );
