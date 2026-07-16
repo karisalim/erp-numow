@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Modal } from '../ui/Modal';
 import { Button } from '../ui/Button';
 import { FormField, SelectField, TextAreaField } from '../ui/FormField';
@@ -68,6 +68,30 @@ export const SettlementFormModal: React.FC<{
     if (!allowed) return active; // custom → any account
     return active.filter((a) => allowed.includes(a.account_type));
   }, [accounts, selectedMethod]);
+
+  // Live balance per account, shown next to its name in the picker so a
+  // cashier can see at a glance which treasury actually has funds — fetched
+  // lazily per account (there's no bulk endpoint) and cached for the modal's
+  // lifetime.
+  const [balances, setBalances] = useState<Record<number, string>>({});
+  useEffect(() => {
+    const missing = compatibleAccounts.filter((a) => !(a.id in balances));
+    if (missing.length === 0) return;
+    let cancelled = false;
+    Promise.allSettled(missing.map((a) => financeApi.accountBalance(a.id)))
+      .then((results) => {
+        if (cancelled) return;
+        setBalances((prev) => {
+          const next = { ...prev };
+          results.forEach((r, i) => {
+            if (r.status === 'fulfilled') next[missing[i].id] = r.value.balance;
+          });
+          return next;
+        });
+      });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [compatibleAccounts]);
 
   const handleSubmit = () => {
     const errs: Record<string, string> = {};
@@ -153,6 +177,9 @@ export const SettlementFormModal: React.FC<{
           {compatibleAccounts.map((a) => (
             <option key={a.id} value={a.id}>
               {a.name} ({a.account_type.replace(/_/g, ' ')})
+              {a.id in balances
+                ? ` — ${a.currency ? a.currency + ' ' : ''}${Number(balances[a.id]).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                : ''}
             </option>
           ))}
         </SelectField>
