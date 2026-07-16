@@ -946,4 +946,76 @@ admin, purchasing, and settings. This batch closes that gap.
 
 ---
 
+## Sprint 3 — Costing (AVCO Engine)
+
+**Pre-sprint architecture review checkpoint (2026-07-16, before any Sprint 3
+code):** verified Sprint 2 is genuinely complete before starting new work —
+574/574 tests green, `manage.py check` clean, `makemigrations --check`
+clean, zero TODO/FIXME/XXX in any Sprint 2 service file (frontend or
+backend). Spot-checked the three highest-risk surfaces directly against
+source: `ProductUnitTierPrice` (`pos/models.py`) confirmed
+`unique(product_unit, price_tier)` — not `product_unit` alone — with
+`PROTECT` on `price_tier`; `pos/services/pricing.py#resolve_unit_price`
+confirmed it never derives a price from `conversion_to_base`; barcode
+resolution (`pos/services/barcode_resolution.py#resolve_barcode`) confirmed
+the mandatory `ProductBarcodeUnit → ProductUnit → Product` chain with
+legacy-barcode fallback; POS unit-aware selling confirmed end-to-end
+(already DB-verified earlier this session with a real posted sale carrying
+`product_unit_id`/`entered_qty`/derived `qty`/`price_each`). Sprint 2
+declared closed; Sprint 3 proceeds on branch `s3/batch-1-inventory-cost-model`.
+
+Governance: Phase 0 (owner authorization to close the AVCO-relevant subset
+of gate G3 — D-07, D-09, D-12, D-13's avg-cost half, D-31 costing-ledger
+scope, D-35 — leaving D-02/D-08/D-10/D-11/D-16/D-17/D-22 GL/tax/period
+decisions Open and deferred to a future GL slice) is recorded in
+`ARCHITECTURE_DECISIONS_REQUIRED.md` per the Sprint 3 plan.
+
+### Batch 1 — `InventoryCost` + `InventoryCostMovement` data model
+
+- **Scope:** ship the D-35(b) valuation record additively — dark launch,
+  zero behavior change. No purchase-posting wiring yet (Batch 2).
+- **Files changed:**
+  - `pos/models.py` — two new model classes placed after `StockMovement`:
+    `InventoryCost` (`OneToOneField(Product)`, `avg_unit_cost` at
+    `Decimal(14,4)` — the new D-13 internal-precision tier, distinct from
+    money-2dp and qty-3dp) and `InventoryCostMovement` (append-only audit
+    ledger mirroring `StockMovement`'s `source_document_type`/
+    `source_document_id`/`actor_user` linkage pattern).
+  - `pos/migrations/0027_inventory_cost.py` — schema-only, two
+    `CreateModel` operations, zero `AlterField`/`RemoveField` on any
+    existing table. Verified additive by reverse-migrating to
+    `0026_batch5a_audit_snapshot` and re-applying cleanly.
+  - `pos/management/commands/seed_inventory_costs.py` (new) — mirrors the
+    `seed_product_units`/`provision_default_payment_routing` pattern
+    exactly: `--dry-run` (default)/`--apply`, `--tenant` scoping, backfills
+    `InventoryCost` from each product's current `Product.cost` as the
+    opening value. No `InventoryCostMovement` row written by the seed — an
+    opening value is not a "movement" (same convention D-17 uses for
+    FinancialAccount/Customer/Supplier opening balances). Idempotent
+    (`get_or_create` keyed on `product`), never overwrites an existing row.
+  - `pos/test_costing.py` (new) — 10 tests: model creation, the
+    `OneToOneField` uniqueness constraint (`IntegrityError` on a second row
+    for the same product), 4dp precision round-trip, movement ordering
+    (newest first), nullable qty/unit-cost fields for a future
+    non-purchase movement (Batch 3's manual adjustment), and 5 tests for
+    the seed command (dry-run doesn't write, apply creates from
+    `Product.cost`, apply is idempotent, apply never overwrites an
+    existing row, tenant scoping).
+- **Migration number:** `0027_inventory_cost` (additive only).
+- **API changes:** none — no serializer/view/url touched this batch.
+- **Tests executed:** `pos.test_costing` (10/10 green) + full suite
+  (584/584 green — 574 baseline + 10 new). `manage.py check` clean,
+  `makemigrations --check` clean before and after.
+- **Not touched this batch:** `purchase_invoices.py`, `serializers.py`,
+  `views.py`, `urls.py`, frontend — confirmed via `git status` showing only
+  `pos/models.py` (modified) plus the three new files above.
+- **Risks:** none identified — the new tables are empty until the seed
+  command runs, and nothing reads or writes them outside the seed command
+  and the new tests.
+- **Next:** Batch 2 — extract `moving_average_cost()` into
+  `pos/services/costing.py` and wire `post_purchase_invoice()` to write
+  through `InventoryCost` instead of inlining the math.
+
+---
+
 *(Later sprints get their own sections here after their pre-sprint audits.)*

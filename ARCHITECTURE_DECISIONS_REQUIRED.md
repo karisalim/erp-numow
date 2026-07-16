@@ -215,6 +215,47 @@ gate's promotion completes** (R-M).
   under G3 (see D-13 status). D-36/D-37 are traceability-only decisions, not
   gated. No other gate status changes; G0/G3/G4/G5x remain exactly as before.
 
+**2026-07-16 — Owner authorization to close G3 (costing-engine scope only, Sprint 3 planning session)**
+- Participant: **Business Owner** (session authorization; worked example: buy
+  10kg coffee for 5000 EGP → 500/kg, then +10kg for 6000 EGP → new average
+  550/kg; "any Recipe uses the current price" cited as a future consumer
+  only, not requested as in-scope work this sprint — confirmed explicitly).
+- Selections recorded:
+  - **D-07** (moving-average cost field location): **Option B** — move the
+    base-unit average off `Product.cost`'s sole-source role; exact home
+    refined by D-35. `Product.cost` is kept as a synced 2dp display mirror
+    during the transition (explicitly allowed by D-07's own recommendation
+    text) — not renamed or dropped this sprint.
+  - **D-09** (moving-average cost scope): reconfirmed **Option A**
+    (tenant-wide), already selected 2026-07-05 — formal sign-off only, no
+    re-litigation.
+  - **D-12** (rounding policy): **Option A** — line-level HALF_UP 2dp,
+    totals = Σ rounded lines; matches the purchase service's existing
+    convention.
+  - **D-13** (avg-cost precision half only): **Option B** reconfirmed —
+    internal unit-cost tracked at 4dp to avoid drift on small base units
+    (gram-level ingredients); `Product.cost` (2dp) stays the display
+    mirror. The units/inventory half of D-13 was already closed under G2
+    (2026-07-15); this closes the remaining avg-cost half only.
+  - **D-31** (snapshot representation): **Option B**, scoped to this
+    sprint's own costing audit ledger (`InventoryCostMovement`, normalized
+    rows, shipped Sprint 3 Batch 1) and the already-existing
+    `SaleItem.unit_cost` snapshot — **not** the full recipe/production
+    component-line snapshot, which stays with G4.
+  - **D-35** (average-cost ownership): **Option B** — a separate
+    `InventoryCost` valuation record per product (shipped Sprint 3 Batch 1),
+    not a field bolted onto `ProductUnit`. Migration is an additive
+    backfill from `Product.cost` via `seed_inventory_costs`.
+- **Gate impact: G3 is NOT fully exited.** D-02, D-08, D-10, D-11, D-16,
+  D-17, D-22 (GL/tax/fiscal-period decisions) remain **Open**, deferred to
+  the future GL slice — per `IMPLEMENTATION_ROADMAP.md`'s explicit boundary
+  that costing/valuation must be reportable **before** any JournalEntry
+  exists, and per this gate's own row noting "costing (Slice 6) never
+  waits for the recipe/production gate." Only the costing-engine subset
+  above is authorized to proceed to implementation, unblocking Slice 6
+  only. ADR promotion has not happened yet (R-M) — a separate follow-up
+  documentation task, same as G1/G2.
+
 ## 4. Sign-off — per gate (R-M)
 
 > **Decision selections recorded 2026-07-05 (§3.5) are NOT gate sign-off.**
@@ -229,6 +270,7 @@ gate's promotion completes** (R-M).
 | G1 | Catalog & category (D-01) | Owner (session directive) | n/a | n/a | n/a | 2026-07-15 |
 | G2 | Units & inventory (D-13, units/inventory scope) | Owner (session directive) | n/a | n/a | n/a | 2026-07-15 |
 | G3 | Costing & GL (D-02, D-07…D-12, D-16, D-17, D-22, D-31, D-35) | | | | | |
+| G3 (costing-engine scope only) | D-07, D-09, D-12, D-13 (avg-cost half), D-31 (costing-ledger scope), D-35 | Owner (session directive) | n/a | n/a | n/a | 2026-07-16 |
 | G4 | Recipe / variants / production (D-06, D-23, D-24, D-26…D-30, D-33, D-34) | | | | n/a | |
 | G5a | Delivery (D-03) | | | | | |
 | G5b | ETA / Compliance (D-05; + D-18 only if service charge enabled) | | | | | |

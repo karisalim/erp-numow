@@ -416,6 +416,94 @@ class StockMovement(models.Model):
         return f'{self.get_movement_type_display()} | {self.product.name} | qty={self.qty}'
 
 
+class InventoryCost(models.Model):
+    """The tenant-wide moving-average (AVCO) cost of one product's base unit
+    (Sprint 3 Batch 1, per D-35 Option B).
+
+    A dedicated valuation record rather than a field bolted onto
+    `ProductUnit` — `ProductUnit` stays a pure conversion table (R-B);
+    conversion units never carry an independent average, only the base
+    unit's cost lives here. `Product.cost` is kept as a synced 2dp display
+    mirror during the transition (D-07); this record is the source of
+    truth going forward, tracked at 4dp internal precision (D-13) so
+    small-quantity ingredients (e.g. grams of an expensive spice) don't
+    drift under repeated rounding.
+
+    One row per product (D-09 Option A — tenant-wide, not per-branch/
+    warehouse, for MVP). Upgrade path when WarehouseTransfer lands: add a
+    nullable `branch` FK and broaden the uniqueness to
+    `(tenant, product, branch)` with NULL meaning tenant-wide — an additive
+    migration, not a redesign.
+
+    Written only through `pos.services.costing` — never assign
+    `avg_unit_cost` directly from a view/serializer.
+    """
+
+    tenant = models.ForeignKey(
+        'accounts.Tenant', on_delete=models.CASCADE,
+        related_name='inventory_costs', db_index=True,
+    )
+    product = models.OneToOneField(
+        Product, on_delete=models.CASCADE, related_name='inventory_cost',
+    )
+    avg_unit_cost = models.DecimalField(max_digits=14, decimal_places=4, default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f'InventoryCost product={self.product_id} avg={self.avg_unit_cost}'
+
+
+class InventoryCostMovement(models.Model):
+    """Append-only audit ledger for every change to an `InventoryCost` row
+    (Sprint 3 Batch 1, per D-31 Option B — normalized rows, not a JSON
+    blob). Mirrors `StockMovement`'s `source_document_type`/
+    `source_document_id`/`actor_user` linkage pattern so any future document
+    kind (purchase invoice, manual adjustment, CSV import) can attach
+    without a schema change.
+
+    Never written directly — always through `pos.services.costing`. An
+    opening-cost seed (`initialize_inventory_cost`) writes no row here: an
+    opening value is not a "movement" (same convention D-17 already uses
+    for FinancialAccount/Customer/Supplier opening balances).
+    """
+
+    tenant = models.ForeignKey(
+        'accounts.Tenant', on_delete=models.CASCADE,
+        related_name='inventory_cost_movements', db_index=True,
+    )
+    product = models.ForeignKey(
+        Product, on_delete=models.CASCADE, related_name='cost_movements',
+    )
+    inventory_cost = models.ForeignKey(
+        InventoryCost, on_delete=models.CASCADE, related_name='movements',
+    )
+    quantity_before = models.DecimalField(max_digits=14, decimal_places=3, null=True, blank=True)
+    quantity_received = models.DecimalField(max_digits=14, decimal_places=3, null=True, blank=True)
+    unit_cost_received = models.DecimalField(max_digits=14, decimal_places=4, null=True, blank=True)
+    avg_cost_before = models.DecimalField(max_digits=14, decimal_places=4)
+    avg_cost_after = models.DecimalField(max_digits=14, decimal_places=4)
+
+    source_document_type = models.CharField(max_length=80, blank=True, default='')
+    source_document_id = models.BigIntegerField(null=True, blank=True)
+    actor_user = models.ForeignKey(
+        'accounts.User', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='inventory_cost_movements',
+    )
+    note = models.CharField(max_length=200, blank=True, default='')
+
+    occurred_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-occurred_at', '-id']
+
+    def __str__(self):
+        return (
+            f'InventoryCostMovement product={self.product_id} '
+            f'{self.avg_cost_before}->{self.avg_cost_after}'
+        )
+
+
 # ── Payments ─────────────────────────────────────────────────────────────────
 
 class Payment(models.Model):
