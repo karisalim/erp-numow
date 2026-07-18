@@ -1333,6 +1333,92 @@ assertion test suite, not just a comment.
 - **Next:** Batch 5 — backend regression + documentation checkpoint, then
   Batch 6 — frontend surfacing of everything Sprint 3 shipped.
 
+### Batch 5 — regression + documentation checkpoint
+
+Branch: `s3/batch-5-regression-checkpoint` (off `s3/batch-4-cogs-reporting`).
+Mirrors the mandatory checkpoint Sprint 2 used between its backend batches
+and its frontend batch. Preceded by a full read-only architecture review
+("Pre-Batch-5 Architecture Review", plan file, benchmarked against SAP B1/
+Business Central/NetSuite/Odoo/ERPNext/Lightspeed/KORONA/Toast) — its
+findings and this checkpoint's actions are summarized here.
+
+**The review surfaced one live, P0 regression, fixed separately and first:**
+`superpos/src/components/products/ProductFormModal.tsx`'s `buildPayload()`
+unconditionally sent `cost` in every edit-save `PATCH`. Batch 3 made `cost`
+reject any write on `PATCH /products/{id}/` for an *existing* product — so
+every "Edit Product" save in the deployed app had been 400ing since Batch 3
+landed, even when only an unrelated field (e.g. name) changed, and nothing
+in the automated suite caught it because there is no frontend-integration
+test exercising the real deployed payload shape. Fixed on its own branch,
+`s3/hotfix-product-cost-edit-lockdown` (commit `1d057e2`): `buildPayload()`
+now omits `cost` when editing (still sends it on create, as the opening
+cost); the Cost input is disabled during edit so the omission is visible,
+not a silent drop. **Verified with a real end-to-end click-through** (not
+just a unit test) — logged in as the seeded Owner user, opened the products
+admin UI in a real Chromium instance, edited a product's name via the row
+action menu, confirmed the `PATCH` returned `200` (not `400`), the name
+change persisted, and `cost` stayed at its prior value in the response.
+This fix should land (or be cherry-picked) before/alongside this checkpoint
+— the acceptance gate below could not have honestly passed without it.
+
+**Checklist (per the Sprint 3 plan's Batch 5 section):**
+- **Full backend test suite green:** 625/625 (624 baseline through Batch 4
+  + 1 new regression test this batch, see below). `manage.py check` clean.
+  `manage.py makemigrations --check --dry-run` clean.
+- **Manual migration review:** Sprint 3 added exactly one migration —
+  `pos/migrations/0027_inventory_cost.py` (Batch 1) — confirmed by
+  inspection to contain only two `CreateModel` operations (`InventoryCost`,
+  `InventoryCostMovement`). Zero `AlterField`/`RemoveField`/`RunPython` on
+  any pre-existing table. Batches 2-4 added no migrations at all (verified
+  clean at each batch's own checkpoint already).
+- **`Product.cost` / `SaleItem.unit_cost` / `Product.margin` wire-shape
+  compatibility for callers that haven't opted into the new endpoints:**
+  read shapes are unchanged everywhere (Batch 4 only *added* fields —
+  `line_cogs`, new `kpis` keys — never removed or renamed one). The one
+  **write**-side compatibility break (`Product.cost` on `PATCH`, Batch 3)
+  is the P0 finding above — grepped every frontend call site that PATCHes
+  `/products/{id}/` (`ProductFormModal.tsx`, `ScalePage.tsx` ×2, plus
+  `api/erp.ts`'s `productUnitsApi.update` which targets a different
+  sub-resource) and confirmed `ProductFormModal.tsx` was the *only* one
+  sending `cost`, now fixed. With that fix in place, this gate holds.
+- **Explicit scope check** (grep, this session): zero matches for `COGS`
+  anywhere in `accounts/models.py` or the rest of the `accounts` app; zero
+  `Recipe`/`BOM`/`ProductionOrder` model anywhere in `pos/models.py` or
+  `accounts/models.py`. Confirms Batch 4 stayed inside its stated
+  read/reporting-only boundary.
+- **New regression test** (closing a real gap the architecture review
+  named): `CostingServiceTests.test_multi_step_negative_stock_recovery` in
+  `pos/test_costing.py` — the existing negative-stock test only proved the
+  single-step fallback formula; this walks oversell → purchase (still
+  net-negative, fallback fires) → oversell again → a bigger purchase that
+  pulls stock back positive (a **real** weighted blend netting a negative
+  pre-purchase stock against a positive purchase quantity, not the
+  fallback) → confirms the average lands on the mathematically correct
+  value (`225.0000`, hand-verified) at the end, not an intermediate
+  fallback value, with the audit trail correctly recording both steps.
+- **Backlog items identified, deliberately not actioned this batch** (per
+  the review's own recommendation — low-urgency, no reason to bundle into
+  a regression checkpoint): a composite `(tenant, product, -occurred_at)`
+  index for `InventoryCostMovement` (currently relies on Django's
+  automatic single-column FK indexes only); the pre-existing
+  `payment_methods` N-queries-in-a-loop pattern in `dashboard_summary`
+  (predates Sprint 3, untouched by Batch 4). Neither is urgent at current
+  data volume.
+- **Explicitly not attempted, per the review's recommendation:** Purchase
+  Returns, Sales Returns, a pure cost-correction/revaluation tool, Recipe/
+  BOM, GL wiring — every one stays correctly gated behind its own future
+  decision, forcing any into this checkpoint would repeat exactly the
+  scope creep this project's governance has consistently avoided.
+- **Tests executed:** full suite 625/625 green. `manage.py check` and
+  `makemigrations --check` both clean.
+- **Not touched this batch:** any model/migration (checkpoint-only, plus
+  one new test), `accounts/models.py`, any GL-adjacent code.
+- **Next:** Batch 6 — frontend surfacing of Sprint 3's cost/margin/COGS
+  data (the P0 hotfix already covers the one urgent frontend compatibility
+  fix; Batch 6 is the deliberate, designed frontend work — new dashboard
+  tiles, a cost-history drawer, `PurchaseDetailPage` before/after cost
+  display — not a second hotfix pass).
+
 
 ---
 

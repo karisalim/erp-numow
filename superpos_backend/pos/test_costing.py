@@ -315,6 +315,77 @@ class CostingServiceTests(TestCase):
         self.assertEqual(mv.source_document_id, 42)
         self.assertEqual(mv.note, 'Found 5 extra units during a physical count')
 
+    def test_multi_step_negative_stock_recovery(self):
+        """Pre-Batch-5 architecture review coverage gap: the existing
+        negative-stock regression only proves the SINGLE-step fallback
+        formula. This walks a realistic multi-step sequence — oversell,
+        purchase (still net-negative, fallback triggers), oversell again,
+        then a purchase large enough to pull stock back positive (real
+        blend, not the fallback) — and confirms the average lands on the
+        mathematically correct value at each step, not just after the
+        first fallback."""
+        product = Product.objects.create(
+            tenant=self.tenant, category=self.category,
+            name='Negative Stock Widget', barcode='CSVC-NEG-1', sku='SKU-CSVC-NEG-1',
+            price=Decimal('300.00'), cost=Decimal('0.00'),
+            tax_rate=Decimal('0.00'), stock=Decimal('0'),
+        )
+        InventoryCost.objects.create(
+            tenant=self.tenant, product=product, avg_unit_cost=Decimal('0.0000'),
+        )
+
+        # Step 1: oversold to -5 with no purchase history yet (simulates a
+        # sale posting elsewhere — costing.py never touches Product.stock
+        # itself, so the test applies the stock effect directly, same as
+        # every other test in this file).
+        product.stock = Decimal('-5')
+        product.save(update_fields=['stock'])
+        self.assertEqual(costing_svc.get_cost_for_sale(product), Decimal('0.0000'))
+
+        # Step 2: a purchase arrives, but -5 + 3 = -2 is still <= 0 — the
+        # fallback fires (average becomes the purchase's own unit_cost).
+        costing_svc.apply_purchase_receipt(
+            product=product, qty=Decimal('3'), unit_cost=Decimal('100'),
+            source_document_type='purchase_invoice', source_document_id=1,
+        )
+        inv = InventoryCost.objects.get(product=product)
+        self.assertEqual(inv.avg_unit_cost, Decimal('100.0000'))
+        product.stock = Decimal('-2')  # -5 + 3
+        product.save(update_fields=['stock'])
+
+        # Step 3: oversold further to -6 — average must stay untouched by
+        # this pure-consumption event.
+        product.stock = Decimal('-6')
+        product.save(update_fields=['stock'])
+        self.assertEqual(costing_svc.get_cost_for_sale(product), Decimal('100.0000'))
+
+        # Step 4: a bigger purchase finally pulls stock positive again:
+        # -6 + 10 = 4 > 0 — this is a REAL weighted blend now, not the
+        # fallback, and it must correctly net the negative pre-purchase
+        # stock against the positive purchase quantity:
+        #   (-6 * 100 + 10 * 150) / 4 = (-600 + 1500) / 4 = 225.0000
+        costing_svc.apply_purchase_receipt(
+            product=product, qty=Decimal('10'), unit_cost=Decimal('150'),
+            source_document_type='purchase_invoice', source_document_id=2,
+        )
+        inv.refresh_from_db()
+        self.assertEqual(inv.avg_unit_cost, Decimal('225.0000'))
+        product.stock = Decimal('4')  # -6 + 10
+        product.save(update_fields=['stock'])
+
+        # Step 5: a normal sale now reads the recovered, correctly-blended
+        # average — not the intermediate fallback value from Step 2.
+        self.assertEqual(costing_svc.get_cost_for_sale(product), Decimal('225.0000'))
+
+        # The audit trail recorded both purchases distinctly, in order,
+        # with the correct before/after pair at each step.
+        movements = list(InventoryCostMovement.objects.filter(product=product).order_by('id'))
+        self.assertEqual(len(movements), 2)
+        self.assertEqual(movements[0].avg_cost_before, Decimal('0.0000'))
+        self.assertEqual(movements[0].avg_cost_after, Decimal('100.0000'))
+        self.assertEqual(movements[1].avg_cost_before, Decimal('100.0000'))
+        self.assertEqual(movements[1].avg_cost_after, Decimal('225.0000'))
+
     def test_update_cost_from_adjustment_rejects_non_positive_qty(self):
         """A negative/shrinkage adjustment has no cost to blend in — it must
         consume the current average via get_cost_for_sale, never call this
