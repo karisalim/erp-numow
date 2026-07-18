@@ -128,7 +128,7 @@ function formFromProduct(p: Product): FormState {
 }
 
 /** Convert form → payload, applying Quick Add defaults for hidden fields. */
-function buildPayload(form: FormState, tab: Tab) {
+function buildPayload(form: FormState, tab: Tab, isEdit: boolean) {
   const sku = form.sku.trim() || form.barcode.trim();
   // PLU is only meaningful for weighted items (the scale prints `21<PLU><wt>`),
   // but we still send '' explicitly so editing a non-weighted product clears
@@ -140,11 +140,15 @@ function buildPayload(form: FormState, tab: Tab) {
     sku,
     plu,
     price:    form.price,
-    cost:     form.cost || '0',
     stock:    form.stock || '0',
     unit:     form.unit,
     pack_qty: form.pack_qty || '1',
   };
+  // `cost` is AVCO-derived once a product exists (Sprint 3 Batch 3) — the
+  // backend rejects it on PATCH. Only a create sends it, as the opening
+  // cost; the Cost field itself is disabled during edit (see the input
+  // below) so this omission never silently drops an in-progress edit.
+  if (!isEdit) payload.cost = form.cost || '0';
   if (form.category) payload.category = Number(form.category);
 
   if (tab === 'quick') {
@@ -275,7 +279,7 @@ export const ProductFormModal: React.FC<Props> = ({
 
     setSaving(true);
     try {
-      const payload = buildPayload(form, tab);
+      const payload = buildPayload(form, tab, isEdit);
       const resp = isEdit && initialProduct
         ? await apiClient.patch<Product>(`/products/${initialProduct.id}/`, payload)
         : await apiClient.post<Product>('/products/', payload);
@@ -353,9 +357,9 @@ export const ProductFormModal: React.FC<Props> = ({
           <Field label="Cost" error={fieldErrors.cost}>
             <input
               type="number" step="0.01" min="0"
-              value={form.cost} disabled={isView || saving}
+              value={form.cost} disabled={isView || isEdit || saving}
               onChange={(e) => set('cost', e.target.value)}
-              className={inputCls(!!fieldErrors.cost, isView)}
+              className={inputCls(!!fieldErrors.cost, isView || isEdit)}
             />
           </Field>
 
