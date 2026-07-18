@@ -54,7 +54,7 @@ from .serializers import (
     WarehouseSerializer,
     WarehouseStockSerializer,
 )
-from .services import barcode_resolution, idempotency
+from .services import barcode_resolution, costing, idempotency
 from .services.standard_units import StandardUnitCode
 
 
@@ -342,13 +342,26 @@ def _import_row(tenant, row, category_cache):
 
     existing = Product.objects.filter(tenant=tenant, barcode=barcode).first()
     if existing:
+        # Sprint 3 Batch 3: `cost` is no longer a direct field write on an
+        # existing product (see ProductSerializer.update()). A CSV row that
+        # raises `stock` is treated the same as a positive physical count —
+        # its `cost` column blends into the average via the same audited
+        # path stock_adjustment uses. A row that doesn't raise stock (or
+        # lowers it) carries no quantity basis to blend against, so its
+        # `cost` column is ignored — the average stays whatever AVCO already
+        # computed, matching the golden rule (no arbitrary cost override).
+        stock_diff = stock - existing.stock
+        if stock_diff > 0:
+            costing.update_cost_from_adjustment(
+                product=existing, qty=Decimal(stock_diff), adjustment_cost=cost,
+                source_document_type='csv_import', note='CSV import upsert',
+            )
         existing.price = price
-        existing.cost  = cost
         existing.stock = stock
-        existing.save(update_fields=['price', 'cost', 'stock', 'updated_at'])
+        existing.save(update_fields=['price', 'stock', 'updated_at'])
         return 'updated'
 
-    Product.objects.create(
+    new_product = Product.objects.create(
         tenant   = tenant,
         barcode  = barcode,
         sku      = sku or barcode,
@@ -359,6 +372,7 @@ def _import_row(tenant, row, category_cache):
         reorder  = reorder,
         category = category,
     )
+    costing.initialize_inventory_cost(product=new_product, opening_cost=cost)
     return 'created'
 
 
@@ -702,19 +716,34 @@ def stock_adjustment(request):
     product        = d['product']
     actual_qty     = d['actual_qty']
     reason         = d['reason']
+    unit_cost      = d.get('unit_cost')
     previous_stock = product.stock
     diff           = actual_qty - previous_stock
 
-    Product.objects.filter(pk=product.pk).update(stock=actual_qty)
-    product.refresh_from_db(fields=['stock'])
+    with transaction.atomic():
+        # A positive count with a known cost blends into the average exactly
+        # like a purchase receipt (the golden rule's second AVCO-updating
+        # event) — computed here, BEFORE Product.stock moves, so the blend
+        # uses previous_stock. Shrinkage/unchanged counts, or a positive
+        # count with no unit_cost given, never touch the average — they
+        # consume it as-is.
+        if diff > 0 and unit_cost is not None:
+            costing.update_cost_from_adjustment(
+                product=product, qty=diff, adjustment_cost=unit_cost,
+                source_document_type='stock_adjustment', actor_user=request.user,
+                note=reason,
+            )
 
-    StockMovement.objects.create(
-        tenant        = tenant,
-        product       = product,
-        qty           = diff,
-        movement_type = StockMovement.MovementType.ADJUSTMENT,
-        note          = reason,
-    )
+        Product.objects.filter(pk=product.pk).update(stock=actual_qty)
+        product.refresh_from_db(fields=['stock', 'cost'])
+
+        StockMovement.objects.create(
+            tenant        = tenant,
+            product       = product,
+            qty           = diff,
+            movement_type = StockMovement.MovementType.ADJUSTMENT,
+            note          = reason,
+        )
 
     return Response({
         'product_id':     product.pk,
@@ -722,6 +751,7 @@ def stock_adjustment(request):
         'previous_stock': previous_stock,
         'new_stock':      product.stock,
         'difference':     diff,
+        'unit_cost':      str(unit_cost) if unit_cost is not None else None,
     })
 
 

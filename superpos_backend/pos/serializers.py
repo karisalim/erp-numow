@@ -162,6 +162,28 @@ class ProductSerializer(serializers.ModelSerializer):
             self.fields['inventory_category'].queryset = \
                 InventoryCategory.objects.filter(tenant=tenant)
 
+    def update(self, instance, validated_data):
+        # Sprint 3 Batch 3: `cost` is AVCO-derived once a product exists —
+        # it may only move through pos.services.costing (purchase receipt or
+        # a positive stock-adjustment count), never a direct field write, so
+        # every change stays in the InventoryCostMovement audit trail.
+        if 'cost' in validated_data:
+            raise serializers.ValidationError({
+                'cost': (
+                    "cost cannot be edited directly once a product exists — "
+                    "it is derived from the average-cost engine. Post a "
+                    "purchase invoice, or use POST /inventory/adjust/ with "
+                    "unit_cost on a positive count, instead."
+                ),
+            })
+        return super().update(instance, validated_data)
+
+    def create(self, validated_data):
+        from pos.services import costing as costing_svc
+        product = super().create(validated_data)
+        costing_svc.initialize_inventory_cost(product=product, opening_cost=product.cost)
+        return product
+
 
 class ProductStockUpdateSerializer(serializers.ModelSerializer):
     class Meta:
@@ -406,9 +428,25 @@ class StockMovementSerializer(serializers.ModelSerializer):
 
 
 class StockAdjustmentSerializer(serializers.Serializer):
+    """A physical count sets `actual_qty` as the new absolute stock level.
+
+    `unit_cost` is optional and only meaningful when the count finds MORE
+    stock than the books show (`actual_qty > previous stock`) — that is the
+    one other AVCO-updating event besides a purchase receipt (D-07/D-09/
+    D-13/D-35, confirmed 2026-07-16). When provided on a positive count, the
+    view blends it into the average via `costing.update_cost_from_adjustment`
+    exactly like a purchase. Omitted (or the count is a decrease/unchanged —
+    shrinkage/correction), the average is left untouched; the found/missing
+    stock is simply consumed at the current average, per the golden rule.
+    """
+
     product    = serializers.PrimaryKeyRelatedField(queryset=Product.objects.none())
     actual_qty = serializers.DecimalField(max_digits=10, decimal_places=3, min_value=Decimal('0'))
     reason     = serializers.CharField(max_length=200)
+    unit_cost  = serializers.DecimalField(
+        max_digits=14, decimal_places=4, required=False, allow_null=True, default=None,
+        min_value=Decimal('0.0001'),
+    )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

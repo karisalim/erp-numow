@@ -1118,6 +1118,110 @@ sits next to).
   CSV-import cost changes route through the same audited path), close the
   three previously-uncoordinated `Product.cost` write paths down to one.
 
+### Batch 3 — close the three uncoordinated `Product.cost` write paths
+
+Branch: `s3/batch-3-manual-cost-adjustment` (off `s3/batch-2-costing-service`).
+
+**Design note — deviates from the Batch 2 "Next" preview above.** That
+preview envisioned a dedicated new `POST /products/{id}/cost-adjustment/`
+endpoint taking an arbitrary `new_cost` + `reason`. Implementing that would
+have reintroduced exactly the thing Batch 2's confirmed golden rule
+forbids: an arbitrary cost override with no quantity basis is not one of
+the two events allowed to move the average (purchase receipt, positive
+inventory count). So Batch 3 does **not** add a third write path — it
+routes the "manual cost adjustment" through the *existing*
+`POST /inventory/adjust/` (`stock_adjustment`) endpoint instead, which
+already models a physical count. No new URL was added.
+
+- **Files changed:**
+  - `superpos_backend/pos/serializers.py`:
+    - `StockAdjustmentSerializer` — added optional `unit_cost`
+      (`Decimal(14,4)`, `min_value=0.0001`). Only meaningful when the count
+      is an *increase* (`actual_qty > previous stock`); documented in the
+      class docstring as the second AVCO-updating event.
+    - `ProductSerializer.update()` — raises `ValidationError` if `'cost' in
+      validated_data`, pointing the caller at a purchase invoice or the
+      adjustment endpoint. `ProductSerializer.create()` now calls
+      `costing.initialize_inventory_cost(product=product,
+      opening_cost=product.cost)` after `super().create()` — CREATE keeps
+      `cost` freely editable as the opening value (unchanged behavior);
+      only UPDATE is locked.
+  - `superpos_backend/pos/views.py`:
+    - Added a top-level `costing` import alongside `barcode_resolution`/
+      `idempotency`.
+    - `stock_adjustment` — now wrapped in `transaction.atomic()`. When
+      `diff > 0` (a positive count) **and** `unit_cost` was given, calls
+      `costing.update_cost_from_adjustment(product=product, qty=diff,
+      adjustment_cost=unit_cost, source_document_type='stock_adjustment',
+      actor_user=request.user, note=reason)` — computed *before*
+      `Product.stock` is overwritten, so the blend correctly uses the
+      pre-count stock (same ordering discipline `apply_purchase_receipt`
+      already established in Batch 2). Shrinkage, an unchanged count, or a
+      positive count with no `unit_cost` given never touch the average —
+      they consume it as-is, per the golden rule. Response gained a
+      `unit_cost` echo field (`null` when not applicable).
+    - `_import_row` (CSV import) — the **update** branch no longer writes
+      `existing.cost` directly. It computes `stock_diff = stock -
+      existing.stock`; if positive, calls
+      `costing.update_cost_from_adjustment(product=existing,
+      qty=Decimal(stock_diff), adjustment_cost=cost,
+      source_document_type='csv_import', note='CSV import upsert')` before
+      saving the new `stock` value — the row's `cost` column is honored
+      only when it comes with a stock increase (a purchase-shaped event);
+      an update row that doesn't raise stock has no quantity basis to
+      blend against, so its `cost` column is now silently ignored instead
+      of overwriting the AVCO-derived average (a deliberate behavior
+      change, consistent with the golden rule — flagged here since no
+      test previously covered this path either way). The **create** branch
+      now calls `costing.initialize_inventory_cost(product=new_product,
+      opening_cost=cost)` after `Product.objects.create(...)` (it bypasses
+      `ProductSerializer.create()` entirely, so needed its own call).
+  - `superpos_backend/pos/services/costing.py` — docstrings updated (module
+    header + `update_cost_from_adjustment`) to record the two call sites
+    now wired up; no logic change.
+  - `superpos_backend/pos/test_costing.py` — +10 tests:
+    `ProductCostLockdownApiTests` (PATCH `cost` on an existing product →
+    400 with the field unchanged; PATCH of other fields still succeeds;
+    POST create with `cost` → `InventoryCost` initialized, zero movement
+    rows), `StockAdjustmentCostApiTests` (positive count + `unit_cost` →
+    blends exactly like Batch 2's `update_cost_from_adjustment` unit test,
+    now through the real endpoint; positive count without `unit_cost` →
+    average untouched, zero movement rows; shrinkage ignores `unit_cost`
+    even if sent; non-Manager caller → 403), `CsvImportCostRoutingApiTests`
+    (update row raising stock → cost blends, one `csv_import` movement row;
+    update row not raising stock → `cost` column ignored, average
+    unchanged; create row → `InventoryCost` initialized, zero movement
+    rows — all three assert `resp.json()['errors'] == []` so a swallowed
+    per-row exception can't masquerade as a pass).
+- **Migration number:** none — pure serializer/view wiring, no model
+  change. `makemigrations --check` clean before and after.
+- **API changes:** `StockAdjustmentSerializer` gained one optional field
+  (`unit_cost`) and the response gained one echo field (`unit_cost`) — both
+  additive, existing callers unaffected. `PATCH`/`PUT /products/{id}/` now
+  rejects a `cost` key with 400 for an **existing** product only — `POST
+  /products/` (create) is unaffected. No new URL route.
+- **Tests executed:** `pos.test_costing` (33/33 green) + full suite
+  (608/608 green — 598 baseline + 10 new). `manage.py check` and
+  `makemigrations --check` both clean.
+- **Pre-existing coverage gap noted, not regressed:** neither
+  `stock_adjustment` nor `products_import` had *any* test before this
+  batch (confirmed via repo-wide grep) — every assertion in the three new
+  test classes above is net-new coverage, not a preserved regression
+  check, since there was nothing to preserve.
+- **Risks:** the CSV-import behavior change (cost column ignored on a
+  same/decreased-stock update row) is a real, deliberate behavior change
+  from the pre-Batch-3 CSV import, which always overwrote `cost`
+  unconditionally. No CSV import documentation/UI currently advertises a
+  "correct cost without changing stock" workflow, and no test existed for
+  the old behavior either, so this is assessed as low-risk — flagged here
+  for visibility rather than silently changed.
+- **Not touched this batch:** any model/migration, `PurchaseInvoiceLine`
+  costing (Batch 2's territory, unchanged), COGS/GL/dashboard reporting
+  (Batch 4's job), frontend.
+- **Next:** Batch 4 — COGS / gross profit / margin reporting, wiring the
+  now-fully-audited `Product.cost`/`InventoryCost.avg_unit_cost` into
+  `dashboard_summary` and a new per-product cost-movement read endpoint.
+
 ---
 
 *(Later sprints get their own sections here after their pre-sprint audits.)*

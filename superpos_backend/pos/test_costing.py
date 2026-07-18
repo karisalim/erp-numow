@@ -1,18 +1,27 @@
-"""Sprint 3 Batch 1/2 — InventoryCost / InventoryCostMovement / costing.py.
+"""Sprint 3 Batch 1/2/3 — InventoryCost / InventoryCostMovement / costing.py.
 
 Batch 1 shipped the data model dark (model tests + seed command tests
 below). Batch 2 extracts the AVCO math into `pos/services/costing.py` and
 wires it into purchase posting — tests for the service itself live here;
 the end-to-end purchase-posting integration test lives in
 `pos/tests.py::PurchaseInvoicePostingTests` (reuses that class's existing
-fixtures instead of duplicating them).
+fixtures instead of duplicating them). Batch 3 closes the two remaining
+uncoordinated cost-write paths (`ProductSerializer` direct writes, CSV
+import) and wires `update_cost_from_adjustment` into `stock_adjustment` —
+API-level tests for all three live in `ProductCostLockdownApiTests`,
+`StockAdjustmentCostApiTests`, and `CsvImportCostRoutingApiTests` below.
 """
 
 from decimal import Decimal
+from io import StringIO
 
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.db import IntegrityError, transaction
+from django.urls import reverse
 from django.test import TestCase
+from rest_framework import status
+from rest_framework.test import APITestCase
 
 from accounts.models import Tenant, User
 from pos.models import Category, InventoryCost, InventoryCostMovement, Product
@@ -348,4 +357,168 @@ class CostingServiceTests(TestCase):
         self.assertFalse(InventoryCost.objects.filter(product=bare_product).exists())
         cost = costing_svc.get_cost_for_sale(bare_product)
         self.assertEqual(cost, Decimal('30.0000'))
-        self.assertTrue(InventoryCost.objects.filter(product=bare_product).exists())
+
+
+# ── Batch 3: close the uncoordinated cost-write paths (API level) ──────────
+
+class _CostingApiTestBase(APITestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.tenant = Tenant.objects.create(name='Batch3 Tenant')
+        cls.manager = User.objects.create_user(
+            username='b3mgr', password='pw', role=User.Role.MANAGER, tenant=cls.tenant,
+        )
+        cls.cashier = User.objects.create_user(
+            username='b3cash', password='pw', role=User.Role.CASHIER, tenant=cls.tenant,
+        )
+        cls.category = Category.objects.create(tenant=cls.tenant, name='Grocery')
+        cls.coffee = Product.objects.create(
+            tenant=cls.tenant, category=cls.category,
+            name='Coffee', barcode='B3-1', sku='SKU-B3-1',
+            price=Decimal('700.00'), cost=Decimal('500.00'),
+            tax_rate=Decimal('0.00'), stock=Decimal('10'),
+        )
+        InventoryCost.objects.create(
+            tenant=cls.tenant, product=cls.coffee, avg_unit_cost=Decimal('500.0000'),
+        )
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.manager)
+
+
+class ProductCostLockdownApiTests(_CostingApiTestBase):
+    """`cost` is derived once a product exists — only create() may set it
+    freely (opening value); update() must reject it."""
+
+    def test_patch_cost_on_existing_product_rejected(self):
+        resp = self.client.patch(
+            reverse('product-detail', args=[self.coffee.pk]),
+            {'cost': '999.00'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
+        self.assertIn('cost', resp.json())
+        self.coffee.refresh_from_db()
+        self.assertEqual(self.coffee.cost, Decimal('500.00'), 'cost must be unchanged')
+
+    def test_patch_other_fields_still_succeeds(self):
+        resp = self.client.patch(
+            reverse('product-detail', args=[self.coffee.pk]),
+            {'name': 'Coffee Deluxe'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+        self.coffee.refresh_from_db()
+        self.assertEqual(self.coffee.name, 'Coffee Deluxe')
+
+    def test_create_product_with_cost_initializes_inventory_cost(self):
+        resp = self.client.post(reverse('product-list'), {
+            'name': 'Tea', 'barcode': 'B3-NEW-1', 'sku': 'SKU-B3-NEW-1',
+            'price': '80.00', 'cost': '45.00', 'tax_rate': '0.00',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        product_id = resp.json()['id']
+        inv = InventoryCost.objects.get(product_id=product_id)
+        self.assertEqual(inv.avg_unit_cost, Decimal('45.0000'))
+        self.assertEqual(
+            InventoryCostMovement.objects.filter(product_id=product_id).count(), 0,
+            'opening value at create time is not a movement',
+        )
+
+
+class StockAdjustmentCostApiTests(_CostingApiTestBase):
+    """POST /inventory/adjust/ — the second AVCO-updating event (a positive
+    count with a known cost)."""
+
+    def test_positive_count_with_unit_cost_blends_average(self):
+        resp = self.client.post(reverse('inventory-adjust'), {
+            'product': self.coffee.pk, 'actual_qty': '15', 'reason': 'Found extra stock',
+            'unit_cost': '800',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+        # (10*500 + 5*800) / 15 = 600.0000
+        inv = InventoryCost.objects.get(product=self.coffee)
+        self.assertEqual(inv.avg_unit_cost, Decimal('600.0000'))
+        self.coffee.refresh_from_db()
+        self.assertEqual(self.coffee.stock, Decimal('15'))
+        self.assertEqual(self.coffee.cost, Decimal('600.00'))
+
+        mv = InventoryCostMovement.objects.get(source_document_type='stock_adjustment')
+        self.assertEqual(mv.note, 'Found extra stock')
+
+    def test_positive_count_without_unit_cost_leaves_average_untouched(self):
+        resp = self.client.post(reverse('inventory-adjust'), {
+            'product': self.coffee.pk, 'actual_qty': '15', 'reason': 'Found extra, cost unknown',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+        inv = InventoryCost.objects.get(product=self.coffee)
+        self.assertEqual(inv.avg_unit_cost, Decimal('500.0000'), 'no unit_cost given — average unchanged')
+        self.assertEqual(
+            InventoryCostMovement.objects.filter(source_document_type='stock_adjustment').count(), 0,
+        )
+
+    def test_shrinkage_ignores_unit_cost_even_if_given(self):
+        resp = self.client.post(reverse('inventory-adjust'), {
+            'product': self.coffee.pk, 'actual_qty': '4', 'reason': 'Shrinkage',
+            'unit_cost': '800',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+        inv = InventoryCost.objects.get(product=self.coffee)
+        self.assertEqual(inv.avg_unit_cost, Decimal('500.0000'), 'shrinkage must never change the average')
+        self.coffee.refresh_from_db()
+        self.assertEqual(self.coffee.stock, Decimal('4'))
+
+    def test_cashier_forbidden(self):
+        self.client.force_authenticate(user=self.cashier)
+        resp = self.client.post(reverse('inventory-adjust'), {
+            'product': self.coffee.pk, 'actual_qty': '15', 'reason': 'x',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class CsvImportCostRoutingApiTests(_CostingApiTestBase):
+    """POST /products/import/ — the third uncoordinated write path,
+    now routed through the same audited mechanism as a physical count."""
+
+    CSV_HEADER = 'name,barcode,sku,price,cost,stock,reorder,category_name\n'
+
+    def _import(self, csv_body):
+        upload = SimpleUploadedFile(
+            'products.csv', (self.CSV_HEADER + csv_body).encode('utf-8'),
+            content_type='text/csv',
+        )
+        return self.client.post(reverse('product-import'), {'file': upload}, format='multipart')
+
+    def test_update_row_raising_stock_blends_cost(self):
+        # existing: stock=10 @ avg 500. Row raises stock to 15 @ cost 800.
+        resp = self._import(f'Coffee,{self.coffee.barcode},SKU-B3-1,700,800,15,10,\n')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+        self.assertEqual(resp.json()['errors'], [], 'row must not silently fail')
+        inv = InventoryCost.objects.get(product=self.coffee)
+        self.assertEqual(inv.avg_unit_cost, Decimal('600.0000'))
+        self.coffee.refresh_from_db()
+        self.assertEqual(self.coffee.stock, 15)
+        self.assertEqual(self.coffee.cost, Decimal('600.00'))
+        self.assertEqual(
+            InventoryCostMovement.objects.filter(source_document_type='csv_import').count(), 1,
+        )
+
+    def test_update_row_not_raising_stock_ignores_cost_column(self):
+        # stock column equal to current stock (10) — no quantity basis to blend.
+        resp = self._import(f'Coffee,{self.coffee.barcode},SKU-B3-1,700,999,10,10,\n')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+        self.assertEqual(resp.json()['errors'], [], 'row must not silently fail')
+        inv = InventoryCost.objects.get(product=self.coffee)
+        self.assertEqual(inv.avg_unit_cost, Decimal('500.0000'), 'unchanged stock — cost column ignored')
+        self.coffee.refresh_from_db()
+        self.assertEqual(self.coffee.cost, Decimal('500.00'))
+
+    def test_create_row_initializes_inventory_cost(self):
+        resp = self._import('New Import Item,B3-CSV-NEW,SKU-CSV-NEW,90,55,20,10,\n')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+        self.assertEqual(resp.json()['errors'], [], 'row must not silently fail')
+        product = Product.objects.get(tenant=self.tenant, barcode='B3-CSV-NEW')
+        inv = InventoryCost.objects.get(product=product)
+        self.assertEqual(inv.avg_unit_cost, Decimal('55.0000'))
+        self.assertEqual(
+            InventoryCostMovement.objects.filter(product=product).count(), 0,
+            'opening value at create time is not a movement',
+        )

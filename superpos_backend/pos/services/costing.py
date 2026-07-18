@@ -21,10 +21,15 @@ SAP/Oracle/Odoo — confirmed with the Business Owner 2026-07-16), matching
     through `get_cost_for_sale` / `get_cost_for_return` (both pure reads —
     neither ever writes `InventoryCost`).
 
-`update_cost_from_adjustment` exists as a function in this module as of
-Batch 2, but is not yet called by any view — wiring it into the stock
-adjustment endpoint is Batch 3's job, alongside the manual cost-override
-flow it will sit next to.
+`update_cost_from_adjustment` was added in Batch 2 and wired into two call
+sites in Batch 3: `views.stock_adjustment` (a positive physical count with
+`unit_cost` given) and `views._import_row`'s CSV-update branch (a row that
+raises `stock`, using its `cost` column as the found-quantity's cost).
+Batch 3 also closed the two other uncoordinated write paths — `Product.cost`
+is no longer a writable field on `ProductSerializer.update()` for an
+existing product; only `initialize_inventory_cost` (on create) and the two
+functions below (via those two call sites, or a purchase receipt) may move
+it, so every change stays in the `InventoryCostMovement` audit trail.
 """
 
 from __future__ import annotations
@@ -160,7 +165,9 @@ def update_cost_from_adjustment(
     `qty` must be > 0 — a negative/shrinkage adjustment has no cost to
     blend in and must not call this function at all.
 
-    Not yet wired to any endpoint (Batch 3).
+    Wired to two call sites as of Batch 3: `views.stock_adjustment` (a
+    positive count with `unit_cost` given) and `views._import_row`'s
+    CSV-update branch (a row that raises `stock`).
     """
     qty = Decimal(str(qty))
     if qty <= 0:
