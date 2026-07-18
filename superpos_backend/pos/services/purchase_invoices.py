@@ -200,14 +200,6 @@ def post_purchase_invoice(
                 raise PurchaseInvoiceError(str(exc))
 
             line_subtotal = (entered_qty * unit_cost).quantize(_CENTS, rounding=ROUND_HALF_UP)
-            # Cost per BASE unit for the moving-average formula below — the
-            # real total money paid for this line divided by the real base
-            # quantity received (standard weighted-average COGS math), never
-            # a price scaled by `conversion_to_base`.
-            moving_avg_unit_cost = (
-                (line_subtotal / qty).quantize(_CENTS, rounding=ROUND_HALF_UP)
-                if qty > 0 else unit_cost
-            )
         else:
             if raw.get('qty') is None:
                 raise PurchaseInvoiceError('qty must be > 0')
@@ -215,7 +207,23 @@ def post_purchase_invoice(
             if qty <= 0:
                 raise PurchaseInvoiceError('qty must be > 0')
             line_subtotal = (qty * unit_cost).quantize(_CENTS, rounding=ROUND_HALF_UP)
-            moving_avg_unit_cost = unit_cost
+
+        # Cost per BASE unit for the moving-average formula — the real
+        # ACQUISITION value divided by the real base quantity received
+        # (standard weighted-average COGS math), never a price scaled by
+        # `conversion_to_base`. Acquisition value nets out the supplier
+        # discount (inventory is valued at what was actually paid for it,
+        # matching the same net figure the AP/accounting posting below
+        # uses for this line) — but never includes `tax`: this system does
+        # not model VAT recovery (no purchase-tax ledger account exists —
+        # see `pos/models.py`'s PurchaseInvoiceLine note on tax_amount/
+        # tax_total), so tax already wasn't part of the cost basis before
+        # this fix and stays that way; only the discount term is new here.
+        net_line_value = line_subtotal - discount
+        moving_avg_unit_cost = (
+            (net_line_value / qty).quantize(_CENTS, rounding=ROUND_HALF_UP)
+            if qty > 0 else unit_cost
+        )
 
         line_total = line_subtotal - discount + tax
 

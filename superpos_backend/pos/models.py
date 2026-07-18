@@ -339,11 +339,23 @@ class SaleItem(models.Model):
 
 class StockMovement(models.Model):
     class MovementType(models.TextChoices):
-        SALE_OUT    = 'sale_out',    'Sale Out'
-        PURCHASE_IN = 'purchase_in', 'Purchase In'
-        RECEIVE_IN  = 'receive_in',  'Receive In'
-        RETURN_IN   = 'return_in',   'Return In'
-        ADJUSTMENT  = 'adjustment',  'Adjustment'
+        SALE_OUT       = 'sale_out',       'Sale Out'
+        PURCHASE_IN    = 'purchase_in',    'Purchase In'
+        RECEIVE_IN     = 'receive_in',     'Receive In'
+        RETURN_IN      = 'return_in',      'Return In'
+        # Legacy — a single value used for both directions, disambiguated
+        # only by the sign of `qty`. Kept for historical rows (never
+        # written by new code as of the Hotfix Pack); read-side balance/
+        # statement logic still classifies it as an outflow, matching its
+        # pre-hotfix behavior exactly, since which historical rows were
+        # really an increase can no longer be recovered reliably across
+        # every write path that used to create this value.
+        ADJUSTMENT     = 'adjustment',      'Adjustment (legacy)'
+        # Hotfix Pack — explicit direction, always unambiguous. Every new
+        # adjustment write (POST /inventory/adjust/, POST /stock-movements/
+        # with movement_type='adjustment') uses one of these two instead.
+        ADJUSTMENT_IN  = 'adjustment_in',  'Adjustment In'
+        ADJUSTMENT_OUT = 'adjustment_out', 'Adjustment Out'
 
     tenant        = models.ForeignKey(
         'accounts.Tenant', on_delete=models.CASCADE,

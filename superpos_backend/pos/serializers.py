@@ -277,18 +277,21 @@ class StockMovementSerializer(serializers.ModelSerializer):
     OUTFLOW_TYPES = {StockMovement.MovementType.SALE_OUT}
 
     # Direction-classification used to derive `quantity_in` / `quantity_out`
-    # at read time. Kept in sync with `pos.services.stock_movements` —
-    # ADJUSTMENT lives in both because the legacy schema collapses both
-    # adjustment directions into one enum value.
+    # at read time. Kept in sync with `pos.services.stock_movements`.
+    # Legacy `ADJUSTMENT` lives in both sets unchanged (pre-hotfix
+    # behavior, see the model docstring); `ADJUSTMENT_IN`/`ADJUSTMENT_OUT`
+    # (Hotfix Pack) are each in exactly one set.
     _IN_TYPES  = {
         StockMovement.MovementType.PURCHASE_IN,
         StockMovement.MovementType.RECEIVE_IN,
         StockMovement.MovementType.RETURN_IN,
         StockMovement.MovementType.ADJUSTMENT,
+        StockMovement.MovementType.ADJUSTMENT_IN,
     }
     _OUT_TYPES = {
         StockMovement.MovementType.SALE_OUT,
         StockMovement.MovementType.ADJUSTMENT,
+        StockMovement.MovementType.ADJUSTMENT_OUT,
     }
 
     def get_quantity_in(self, obj):
@@ -358,12 +361,17 @@ class StockMovementSerializer(serializers.ModelSerializer):
 
             PURCHASE_IN / RECEIVE_IN / RETURN_IN  → record_stock_in
             SALE_OUT                              → record_stock_out
-            ADJUSTMENT, qty >= 0                  → record_stock_in
-            ADJUSTMENT, qty <  0                  → record_stock_out (abs)
+            ADJUSTMENT, qty >= 0                  → record_stock_in,  STORED as ADJUSTMENT_IN
+            ADJUSTMENT, qty <  0                  → record_stock_out (abs), STORED as ADJUSTMENT_OUT
 
-        The legacy serializer accepted a signed qty for ADJUSTMENT and
-        let `Product.stock` go up or down accordingly; we preserve that
-        signal here by inspecting the sign before calling the service.
+        The legacy serializer accepted a signed qty for ADJUSTMENT and let
+        `Product.stock` go up or down accordingly — a client sending the
+        legacy 'adjustment' string keeps that exact accept-signed-qty
+        input behavior. Hotfix Pack: the row this writes now always uses
+        the unambiguous ADJUSTMENT_IN/ADJUSTMENT_OUT value instead of the
+        dual-purpose legacy one, so `quantity_in`/`quantity_out` and every
+        balance/statement reader classify it correctly with no sign
+        inspection needed at read time.
 
         Any service-layer rule violation (cross-tenant branch, zero qty
         sneaking past, …) surfaces as a 400 — wrapped here so DRF
@@ -396,8 +404,17 @@ class StockMovementSerializer(serializers.ModelSerializer):
         if movement_type == StockMovement.MovementType.SALE_OUT:
             recorder = svc.record_stock_out
         elif movement_type == StockMovement.MovementType.ADJUSTMENT:
-            # Signed-qty contract: negative qty → decrease stock.
-            recorder = svc.record_stock_out if signed_qty < 0 else svc.record_stock_in
+            # Signed-qty contract: negative qty → decrease stock. Hotfix
+            # Pack: the STORED row uses the unambiguous ADJUSTMENT_IN/
+            # ADJUSTMENT_OUT value instead of the legacy dual-purpose one —
+            # a client that still sends the legacy 'adjustment' string gets
+            # the same accept-signed-qty behavior, just recorded precisely.
+            if signed_qty < 0:
+                recorder = svc.record_stock_out
+                movement_type = StockMovement.MovementType.ADJUSTMENT_OUT
+            else:
+                recorder = svc.record_stock_in
+                movement_type = StockMovement.MovementType.ADJUSTMENT_IN
         else:
             # PURCHASE_IN / RECEIVE_IN / RETURN_IN
             recorder = svc.record_stock_in

@@ -282,6 +282,7 @@ class PurchaseInvoiceUnitAwareTests(_PosIntegrationTestBase):
         self.client.force_authenticate(user=self.manager)
 
     def _post(self, **line_over):
+        import uuid
         line = {
             'product': self.fresh.pk, 'warehouse': self.warehouse.pk,
             'product_unit': self.fresh_carton_pu.pk, 'entered_qty': '2',
@@ -291,7 +292,7 @@ class PurchaseInvoiceUnitAwareTests(_PosIntegrationTestBase):
         return self.client.post(reverse('purchase-invoice-list'), {
             'branch': self.branch.pk, 'supplier': self.supplier.pk,
             'lines': [line],
-        }, format='json')
+        }, format='json', HTTP_IDEMPOTENCY_KEY=str(uuid.uuid4()))
 
     def test_unit_aware_line_converts_qty_and_updates_moving_average(self):
         resp = self._post()
@@ -326,7 +327,7 @@ class PurchaseInvoiceUnitAwareTests(_PosIntegrationTestBase):
                 'product': self.fresh.pk, 'warehouse': self.warehouse.pk,
                 'qty': '50.000', 'unit_cost': '0.15',
             }],
-        }, format='json')
+        }, format='json', HTTP_IDEMPOTENCY_KEY='legacy-line-shape-unaffected')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
         line = resp.json()['lines'][0]
         self.assertEqual(line['qty'], '50.000')

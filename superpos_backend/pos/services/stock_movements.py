@@ -52,17 +52,21 @@ class StockMovementError(Exception):
 
 # Direction routing. Lets callers pass a friendly `direction='in'/'out'`
 # but the real classification is the movement_type the row carries.
-# ADJUSTMENT lives in both sets — callers pick direction by choosing
-# `record_stock_in` vs `record_stock_out`.
+# Legacy `ADJUSTMENT` lives in both sets (unchanged, pre-hotfix behavior —
+# see the model docstring for why it isn't retroactively reclassified).
+# `ADJUSTMENT_IN`/`ADJUSTMENT_OUT` (Hotfix Pack) are each in exactly one
+# set — no ambiguity for anything written going forward.
 _IN_TYPES  = {
     StockMovement.MovementType.PURCHASE_IN,
     StockMovement.MovementType.RECEIVE_IN,
     StockMovement.MovementType.RETURN_IN,
     StockMovement.MovementType.ADJUSTMENT,
+    StockMovement.MovementType.ADJUSTMENT_IN,
 }
 _OUT_TYPES = {
     StockMovement.MovementType.SALE_OUT,
     StockMovement.MovementType.ADJUSTMENT,
+    StockMovement.MovementType.ADJUSTMENT_OUT,
 }
 
 

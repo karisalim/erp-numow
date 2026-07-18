@@ -714,43 +714,68 @@ def stock_adjustment(request):
     s.is_valid(raise_exception=True)
     d = s.validated_data
 
-    product        = d['product']
-    actual_qty     = d['actual_qty']
-    reason         = d['reason']
-    unit_cost      = d.get('unit_cost')
-    previous_stock = product.stock
-    diff           = actual_qty - previous_stock
+    product_ref = d['product']
+    actual_qty  = d['actual_qty']
+    reason      = d['reason']
+    unit_cost   = d.get('unit_cost')
 
     with transaction.atomic():
+        # Hotfix Pack: lock BEFORE reading current stock. Reading
+        # `previous_stock` off the unlocked reference the serializer
+        # resolved (as this view used to) left a lost-update race — two
+        # concurrent adjustments on the same product could both read the
+        # same stale value, compute their own `diff` against it, and the
+        # second writer's blind `.update(stock=actual_qty)` would silently
+        # clobber whatever the first one had just written. Locking first
+        # closes that window: the second request blocks here until the
+        # first commits, then reads the real post-first-adjustment stock.
+        locked = Product.objects.select_for_update().get(pk=product_ref.pk)
+        previous_stock = locked.stock
+        diff           = actual_qty - previous_stock
+
         # A positive count with a known cost blends into the average exactly
         # like a purchase receipt (the golden rule's second AVCO-updating
         # event) — computed here, BEFORE Product.stock moves, so the blend
-        # uses previous_stock. Shrinkage/unchanged counts, or a positive
-        # count with no unit_cost given, never touch the average — they
-        # consume it as-is.
+        # uses previous_stock (now guaranteed fresh, not stale). Shrinkage/
+        # unchanged counts, or a positive count with no unit_cost given,
+        # never touch the average — they consume it as-is.
         if diff > 0 and unit_cost is not None:
             costing.update_cost_from_adjustment(
-                product=product, qty=diff, adjustment_cost=unit_cost,
+                product=locked, qty=diff, adjustment_cost=unit_cost,
                 source_document_type='stock_adjustment', actor_user=request.user,
                 note=reason,
             )
 
-        Product.objects.filter(pk=product.pk).update(stock=actual_qty)
-        product.refresh_from_db(fields=['stock', 'cost'])
+        Product.objects.filter(pk=locked.pk).update(stock=actual_qty)
+        locked.refresh_from_db(fields=['stock', 'cost'])
 
+        # Hotfix Pack: explicit direction instead of the ambiguous legacy
+        # `ADJUSTMENT` value (see MovementType docstring) — every reader
+        # (quantity_in/out, get_product_stock_balance, statement
+        # summaries) now classifies this row correctly with no guessing.
+        # quantity_before/after are populated too, matching the hardened-
+        # ledger convention every other write path in this module follows
+        # (this endpoint used to be the one exception, leaving these NULL).
+        movement_type = (
+            StockMovement.MovementType.ADJUSTMENT_IN if diff >= 0
+            else StockMovement.MovementType.ADJUSTMENT_OUT
+        )
         StockMovement.objects.create(
-            tenant        = tenant,
-            product       = product,
-            qty           = diff,
-            movement_type = StockMovement.MovementType.ADJUSTMENT,
-            note          = reason,
+            tenant           = tenant,
+            product          = locked,
+            qty              = diff,
+            movement_type    = movement_type,
+            quantity_before  = previous_stock,
+            quantity_after   = locked.stock,
+            actor_user       = request.user,
+            note             = reason,
         )
 
     return Response({
-        'product_id':     product.pk,
-        'product_name':   product.name,
+        'product_id':     locked.pk,
+        'product_name':   locked.name,
         'previous_stock': previous_stock,
-        'new_stock':      product.stock,
+        'new_stock':      locked.stock,
         'difference':     diff,
         'unit_cost':      str(unit_cost) if unit_cost is not None else None,
     })
@@ -2065,9 +2090,10 @@ class PurchaseInvoiceListCreateView(TenantMixin, generics.ListCreateAPIView):
     """GET list + POST create-and-post a stock-item purchase invoice.
 
     POST runs the full atomic posting (stock + moving-avg cost + finance/AP)
-    via the serializer → `pos.services.purchase_invoices`. Supports an
-    optional `Idempotency-Key` header so a retried POST replays the original
-    response instead of double-posting.
+    via the serializer → `pos.services.purchase_invoices`. Requires an
+    `Idempotency-Key` header (Hotfix Pack — was previously optional, which
+    let a bare retry double-post stock/cost/AP/cash) so a retried POST
+    replays the original response instead of double-posting.
     """
 
     queryset = (
@@ -2093,6 +2119,15 @@ class PurchaseInvoiceListCreateView(TenantMixin, generics.ListCreateAPIView):
         tenant = self._tenant()
         key = (request.headers.get('Idempotency-Key') or '').strip()
 
+        if not key:
+            return Response(
+                {'error': {
+                    'code': 'IDEMPOTENCY_KEY_REQUIRED',
+                    'detail': 'Posting a purchase invoice requires an Idempotency-Key header.',
+                }},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         look = idempotency.lookup(
             tenant=tenant, key=key, payload=request.data,
             method=request.method, path=request.path, user=request.user,
@@ -2107,6 +2142,29 @@ class PurchaseInvoiceListCreateView(TenantMixin, generics.ListCreateAPIView):
                 }},
                 status=status.HTTP_409_CONFLICT,
             )
+
+        # Business-uniqueness safety net: if the client supplied the
+        # supplier's own invoice number, a repeat of (tenant, supplier,
+        # reference) is almost certainly the same real-world document —
+        # catches the case an Idempotency-Key retry can't, where a buggy
+        # client mints a *fresh* key on every retry. Only fires when a
+        # reference is actually provided; the overwhelming majority of
+        # invoices that omit it are completely unaffected.
+        reference   = (request.data.get('reference') or '').strip()
+        supplier_id = request.data.get('supplier')
+        if reference and supplier_id and tenant is not None:
+            if PurchaseInvoice.objects.filter(
+                    tenant=tenant, supplier_id=supplier_id, reference=reference).exists():
+                return Response(
+                    {'error': {
+                        'code': 'SUPPLIER_REFERENCE_DUPLICATE',
+                        'detail': (
+                            f'A purchase invoice with reference {reference!r} already '
+                            f'exists for this supplier.'
+                        ),
+                    }},
+                    status=status.HTTP_409_CONFLICT,
+                )
 
         response = super().create(request, *args, **kwargs)
 

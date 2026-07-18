@@ -705,7 +705,7 @@ class PurchaseInvoicePostingTests(_PurchaseInvoiceTestBase):
             paid_amount='450.00', source_account=self.cashbox.id,
             payment_method=self.cash_method.id,
         )
-        resp = self.client.post(reverse('purchase-invoice-list'), body, format='json')
+        resp = self.client.post(reverse('purchase-invoice-list'), body, format='json', HTTP_IDEMPOTENCY_KEY='pit-cash-purchase')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
         data = resp.json()
         self.assertEqual(data['payment_status'], 'paid')
@@ -757,7 +757,7 @@ class PurchaseInvoicePostingTests(_PurchaseInvoiceTestBase):
             'product': self.product.id, 'warehouse': self.warehouse.id,
             'qty': '10.000', 'unit_cost': '500.00',
         }])
-        resp1 = self.client.post(reverse('purchase-invoice-list'), body1, format='json')
+        resp1 = self.client.post(reverse('purchase-invoice-list'), body1, format='json', HTTP_IDEMPOTENCY_KEY='pit-worked-example-1')
         self.assertEqual(resp1.status_code, status.HTTP_201_CREATED, resp1.content)
         self.product.refresh_from_db()
         self.assertEqual(self.product.stock, Decimal('10.000'))
@@ -767,7 +767,7 @@ class PurchaseInvoicePostingTests(_PurchaseInvoiceTestBase):
             'product': self.product.id, 'warehouse': self.warehouse.id,
             'qty': '10.000', 'unit_cost': '600.00',
         }])
-        resp2 = self.client.post(reverse('purchase-invoice-list'), body2, format='json')
+        resp2 = self.client.post(reverse('purchase-invoice-list'), body2, format='json', HTTP_IDEMPOTENCY_KEY='pit-worked-example-2')
         self.assertEqual(resp2.status_code, status.HTTP_201_CREATED, resp2.content)
         self.product.refresh_from_db()
         self.assertEqual(self.product.stock, Decimal('20.000'))
@@ -791,7 +791,7 @@ class PurchaseInvoicePostingTests(_PurchaseInvoiceTestBase):
 
     def test_credit_purchase_increases_stock_and_supplier_ap(self):
         body = self._body()  # paid_amount defaults to 0 → fully on credit
-        resp = self.client.post(reverse('purchase-invoice-list'), body, format='json')
+        resp = self.client.post(reverse('purchase-invoice-list'), body, format='json', HTTP_IDEMPOTENCY_KEY='pit-credit-purchase')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
         data = resp.json()
         self.assertEqual(data['payment_status'], 'unpaid')
@@ -813,7 +813,7 @@ class PurchaseInvoicePostingTests(_PurchaseInvoiceTestBase):
 
     def test_partial_purchase_creates_finance_and_ap_effects(self):
         body = self._body(paid_amount='200.00', source_account=self.cashbox.id)
-        resp = self.client.post(reverse('purchase-invoice-list'), body, format='json')
+        resp = self.client.post(reverse('purchase-invoice-list'), body, format='json', HTTP_IDEMPOTENCY_KEY='pit-partial-purchase')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
         data = resp.json()
         self.assertEqual(data['payment_status'], 'partially_paid')
@@ -835,7 +835,7 @@ class PurchaseInvoicePostingTests(_PurchaseInvoiceTestBase):
         body = self._body(lines=[{
             'product': self.product.id, 'qty': '10.000', 'unit_cost': '5.00',
         }])
-        resp = self.client.post(reverse('purchase-invoice-list'), body, format='json')
+        resp = self.client.post(reverse('purchase-invoice-list'), body, format='json', HTTP_IDEMPOTENCY_KEY='pit-default-wh')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
         line = PurchaseInvoiceLine.objects.get(purchase_invoice_id=resp.json()['id'])
         self.assertEqual(line.warehouse_id, self.warehouse.id)
@@ -851,7 +851,7 @@ class PurchaseInvoicePostingTests(_PurchaseInvoiceTestBase):
             'product': self.product.id, 'warehouse': other.id,
             'qty': '5.000', 'unit_cost': '5.00',
         }])
-        resp = self.client.post(reverse('purchase-invoice-list'), body, format='json')
+        resp = self.client.post(reverse('purchase-invoice-list'), body, format='json', HTTP_IDEMPOTENCY_KEY='pit-explicit-wh')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
         line = PurchaseInvoiceLine.objects.get(purchase_invoice_id=resp.json()['id'])
         self.assertEqual(line.warehouse_id, other.id)
@@ -862,7 +862,7 @@ class PurchaseInvoicePostingTests(_PurchaseInvoiceTestBase):
             'qty': '10.000', 'unit_cost': '10.00',
             'discount_amount': '5.00', 'tax_amount': '14.00',
         }])
-        resp = self.client.post(reverse('purchase-invoice-list'), body, format='json')
+        resp = self.client.post(reverse('purchase-invoice-list'), body, format='json', HTTP_IDEMPOTENCY_KEY='pit-tax-discount')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
         data = resp.json()
         self.assertEqual(data['subtotal'], '100.00')
@@ -871,17 +871,63 @@ class PurchaseInvoicePostingTests(_PurchaseInvoiceTestBase):
         # total = subtotal - discount + tax = 100 - 5 + 14 = 109
         self.assertEqual(data['total_amount'], '109.00')
 
+    def test_purchase_discount_nets_out_of_moving_average_cost(self):
+        """Hotfix pack (post-Sprint-3 review) — inventory valuation must
+        follow the actual acquisition cost, not the gross purchase price.
+        1000 gross, 100 supplier discount → the average cost blended into
+        InventoryCost must be (1000-100)/10 = 90.00/unit, not 100.00/unit;
+        inventory value must reconcile with the AP liability actually
+        posted for the same line (both derived from the same net figure)."""
+        from pos.models import InventoryCost
+
+        self.product.stock = Decimal('0')
+        self.product.cost = Decimal('0.00')
+        self.product.save(update_fields=['stock', 'cost'])
+        InventoryCost.objects.filter(product=self.product).delete()
+
+        body = self._body(lines=[{
+            'product': self.product.id, 'warehouse': self.warehouse.id,
+            'qty': '10.000', 'unit_cost': '100.00',
+            'discount_amount': '100.00',
+        }])
+        resp = self.client.post(reverse('purchase-invoice-list'), body, format='json', HTTP_IDEMPOTENCY_KEY='pit-discount-avco')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        data = resp.json()
+        self.assertEqual(data['subtotal'], '1000.00')
+        self.assertEqual(data['discount_total'], '100.00')
+        # total = subtotal - discount + tax = 1000 - 100 + 0 = 900 — the AP
+        # liability (fully on credit, paid_amount defaults to 0).
+        self.assertEqual(data['total_amount'], '900.00')
+        self.assertEqual(data['credit_amount'], '900.00')
+
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, Decimal('10.000'))
+        # (1000 - 100) / 10 = 90.00 — NOT 100.00 (the pre-fix gross-price bug).
+        self.assertEqual(self.product.cost, Decimal('90.00'))
+        inv_cost = InventoryCost.objects.get(product=self.product)
+        self.assertEqual(inv_cost.avg_unit_cost, Decimal('90.0000'))
+
+        # Reconciliation: inventory value added (10 * 90.00 = 900.00) must
+        # equal the AP liability actually posted for this purchase (900.00)
+        # — both are the same net acquisition value, per the hotfix policy.
+        inventory_value_added = self.product.stock * self.product.cost
+        self.assertEqual(inventory_value_added, Decimal('900.00'))
+        self.assertEqual(
+            supplier_ap_service.get_supplier_balance(self.supplier),
+            Decimal('900.00'),
+        )
+
     def test_non_stock_line_type_rejected(self):
         body = self._body(lines=[{
             'product': self.product.id, 'warehouse': self.warehouse.id,
             'qty': '1.000', 'unit_cost': '5.00', 'line_type': 'expense',
         }])
-        resp = self.client.post(reverse('purchase-invoice-list'), body, format='json')
+        resp = self.client.post(reverse('purchase-invoice-list'), body, format='json', HTTP_IDEMPOTENCY_KEY='pit-non-stock-rejected')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_paid_amount_over_total_rejected(self):
         body = self._body(paid_amount='500.00', source_account=self.cashbox.id)
-        resp = self.client.post(reverse('purchase-invoice-list'), body, format='json')
+        resp = self.client.post(reverse('purchase-invoice-list'), body, format='json', HTTP_IDEMPOTENCY_KEY='pit-paid-over-total')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_zero_and_negative_qty_rejected(self):
@@ -890,7 +936,7 @@ class PurchaseInvoicePostingTests(_PurchaseInvoiceTestBase):
                 'product': self.product.id, 'warehouse': self.warehouse.id,
                 'qty': bad, 'unit_cost': '5.00',
             }])
-            resp = self.client.post(reverse('purchase-invoice-list'), body, format='json')
+            resp = self.client.post(reverse('purchase-invoice-list'), body, format='json', HTTP_IDEMPOTENCY_KEY='pit-zero-neg-qty')
             self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, bad)
 
     def test_cross_tenant_refs_rejected(self):
@@ -900,7 +946,7 @@ class PurchaseInvoicePostingTests(_PurchaseInvoiceTestBase):
         ]:
             body = self._body(paid_amount='10.00', source_account=self.cashbox.id)
             body[field] = value
-            resp = self.client.post(reverse('purchase-invoice-list'), body, format='json')
+            resp = self.client.post(reverse('purchase-invoice-list'), body, format='json', HTTP_IDEMPOTENCY_KEY='pit-cross-tenant')
             self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, field)
 
         # Cross-tenant warehouse on a line.
@@ -908,13 +954,14 @@ class PurchaseInvoicePostingTests(_PurchaseInvoiceTestBase):
             'product': self.product.id, 'warehouse': self.warehouse_b.id,
             'qty': '1.000', 'unit_cost': '5.00',
         }])
-        resp = self.client.post(reverse('purchase-invoice-list'), body, format='json')
+        resp = self.client.post(reverse('purchase-invoice-list'), body, format='json', HTTP_IDEMPOTENCY_KEY='pit-cross-tenant-wh')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_cashier_cannot_post(self):
         self.client.force_authenticate(user=self.cashier)
         resp = self.client.post(reverse('purchase-invoice-list'),
-                                self._body(), format='json')
+                                self._body(), format='json',
+                                HTTP_IDEMPOTENCY_KEY='pit-cashier-forbidden')
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_atomic_rollback_when_ap_posting_fails(self):
@@ -986,7 +1033,8 @@ class PurchaseInvoiceReadScopingTests(_PurchaseInvoiceTestBase):
     def setUp(self):
         self.client.force_authenticate(user=self.manager)
         resp = self.client.post(reverse('purchase-invoice-list'),
-                                self._body(), format='json')
+                                self._body(), format='json',
+                                HTTP_IDEMPOTENCY_KEY='read-scoping-setup')
         self.invoice_id = resp.json()['id']
 
     def test_list_and_detail_are_tenant_scoped(self):
@@ -1569,7 +1617,8 @@ class WarehouseStockPurchaseTests(_PurchaseInvoiceTestBase):
         self.client.force_authenticate(user=self.manager)
 
     def test_purchase_invoice_increments_receiving_warehouse_stock(self):
-        resp = self.client.post(reverse('purchase-invoice-list'), self._body(), format='json')
+        resp = self.client.post(reverse('purchase-invoice-list'), self._body(), format='json',
+                                 HTTP_IDEMPOTENCY_KEY='pit-warehouse-stock-increment')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
         ws = WarehouseStock.objects.get(product=self.product, warehouse=self.warehouse)
         self.assertEqual(ws.quantity, Decimal('50.000'))

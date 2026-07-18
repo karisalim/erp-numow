@@ -1419,6 +1419,262 @@ This fix should land (or be cherry-picked) before/alongside this checkpoint
   tiles, a cost-history drawer, `PurchaseDetailPage` before/after cost
   display — not a second hotfix pass).
 
+---
+
+## Sprint 3 Hotfix Pack — post-review stabilization (no new features)
+
+**Branch:** `s3/hotfix-pack` (off `s3/batch-5-regression-checkpoint`).
+**Scope discipline:** this pack fixes only the 5 verified blocking issues
+named by the business owner's own architecture/adversarial review — no
+Recipe/BOM, no FIFO, no GL postings, no Purchase/Sales Return costing, no
+inventory revaluation, no public-API redesign beyond what each bug fix
+required. Every hotfix below was **verified against the real, current code
+first** — not assumed from the review's problem description — which
+surfaced that one "bug" (Hotfix 1) was already fixed on a separate branch
+and needed a cherry-pick, not a re-implementation, and that another
+(Hotfix 3) had a deeper root cause than its description implied.
+
+### Hotfix 1 — Product Edit Regression (already fixed, cherry-picked)
+
+**Verification finding:** this exact regression — `ProductFormModal`
+unconditionally sending `cost` on every edit-save `PATCH`, 400ing against
+Batch 3's cost-immutability rule — was already diagnosed and fixed on
+`s3/hotfix-product-cost-edit-lockdown` (commit `1d057e2`, documented under
+Sprint 3 Batch 5 above). Cherry-picked cleanly onto `s3/hotfix-pack`
+instead of re-implementing. No new code, no new tests needed — the
+existing fix (`buildPayload()` omits `cost` on edit; the Cost input is
+disabled during edit) already stands on its own commit.
+
+### Hotfix 2 — Stock Adjustment Race Condition
+
+**Problem confirmed:** `stock_adjustment` (`POST /inventory/adjust/`) read
+`Product.stock` *before* acquiring any row lock, then computed
+`diff = actual_qty - previous_stock` and wrote the new stock and a
+`StockMovement` row from that stale read — a classic lost-update race
+under concurrent adjustments on the same product.
+
+**Fix — `pos/views.py`, `stock_adjustment`:** fully rewritten to a single
+`transaction.atomic()` block that (1) `Product.objects.select_for_update()`
+locks the row first, (2) reads `previous_stock` only *after* the lock is
+held, (3) computes `diff` from that locked read, (4) applies the cost
+blend via `costing.update_cost_from_adjustment()` for positive diffs with
+an explicit `unit_cost`, (5) updates `Product.stock`, (6) writes exactly
+one `StockMovement` row (`quantity_before`/`quantity_after` populated,
+matching the "hardened ledger" convention `record_stock_in`/
+`record_stock_out` already use elsewhere) — all inside the one atomic
+transaction, so `InventoryCostMovement`'s quantity always matches the
+locked `diff`, never a stale one.
+
+**Tests added** (`pos/test_hotfix_pack.py::StockAdjustmentConcurrencyTests`):
+a real two-thread concurrency test using `TransactionTestCase` (the only
+Django test base that runs against the real DB without wrapping the test
+in a rolled-back transaction, required to exercise genuine cross-thread
+row locking) — two real HTTP requests fired from two threads against the
+same product, asserting the two resulting `StockMovement` rows form an
+unbroken `quantity_before`→`quantity_after` chain regardless of which
+thread's lock wins, and that final `Product.stock` matches the
+last-applied movement's `quantity_after`. Verified stable across 3
+consecutive runs (not just a single lucky pass).
+
+### Hotfix 3 — Adjustment Direction Bug
+
+**Verification finding — deeper than the review's own description:** two
+*incompatible* pre-existing conventions were both writing `ADJUSTMENT`
+rows. Path (a), the `stock_adjustment` view, wrote `qty=diff` directly via
+a raw `.create()`, preserving the sign. Path (b), the generic
+`StockMovementSerializer.create()` → `record_stock_in`/`record_stock_out`
+dispatch (used by direct `POST /api/stock-movements/`), always stored
+`qty` as a positive *magnitude* (`_coerce_qty` requires `qty > 0`),
+**losing the sign entirely**. This meant direction could not be recovered
+at read time by inspecting `qty`'s sign for path-(b)-created historical
+rows — a read-side "fix" based on sign inspection would have been silently
+wrong for half of the system's adjustment-creation paths. This confirmed
+the review's own preferred solution (explicit `ADJUSTMENT_IN`/
+`ADJUSTMENT_OUT` values) was correct, not just one option among several.
+
+**Fix:**
+- `pos/models.py` — `StockMovement.MovementType` gained two new values,
+  `ADJUSTMENT_IN`/`ADJUSTMENT_OUT`, alongside the existing `ADJUSTMENT`
+  (kept, relabeled "Adjustment (legacy)", for historical rows already in
+  the DB — never backfilled, per the "no risky data migrations" rule).
+  New additive-only migration `pos/migrations/0028_alter_stockmovement_movement_type.py`
+  (a single `AlterField` on the choices list — confirmed no DB-level CHECK
+  constraint exists on this plain `CharField`, so this is pure Python
+  metadata with zero schema/data risk).
+- `pos/services/stock_movements.py` + `pos/serializers.py` — `_IN_TYPES`/
+  `_OUT_TYPES` sets (both copies) extended with the two new values.
+  `StockMovementSerializer.create()`'s routing block now translates a
+  client-sent legacy `ADJUSTMENT` + a signed `qty` into the correct
+  explicit direction before dispatch (`signed_qty < 0` → `record_stock_out`
+  with `movement_type=ADJUSTMENT_OUT`; else `record_stock_in` with
+  `ADJUSTMENT_IN`) — so path (b) now also produces unambiguous rows going
+  forward.
+- `pos/views.py` — the rewritten `stock_adjustment` (Hotfix 2) writes
+  `ADJUSTMENT_IN` for `diff >= 0`, `ADJUSTMENT_OUT` otherwise, directly
+  (no legacy value ever written by this path anymore).
+
+**Tests added/fixed:**
+- `pos/test_hotfix_pack.py::StockAdjustmentDirectionApiTests` — 3 tests:
+  positive adjustment → `ADJUSTMENT_IN` with correct `quantity_in`/
+  `quantity_out`; negative → `ADJUSTMENT_OUT`; a statement-summary
+  reconciliation check across both directions in sequence.
+- `pos/test_stock_direct_post.py::test_post_adjustment_positive_qty_increases_stock`
+  — this test had previously *asserted the bug as correct behavior*
+  (a positive adjustment mis-storing as an outflow); updated to assert the
+  fix (`movement_type == ADJUSTMENT_IN`, correct `quantity_in`/`_out`).
+- Balance-reconciliation assertions use
+  `get_product_stock_statement_summary(product)['closing_quantity']`, not
+  `get_product_stock_balance()` — the latter is a pure ledger-only sum that
+  does not account for a product's un-ledgered opening `stock` value (a
+  real trap for fixtures created with `Product.objects.create(stock=...)`
+  directly); the former correctly anchors off `Product.stock` when no
+  prior ledger row exists, so it's the correct tool for these assertions.
+
+### Hotfix 4 — Purchase Discount AVCO
+
+**Problem confirmed:** `purchase_invoices.py`'s moving-average computation
+used the gross `line_subtotal` (qty × unit_cost) as the acquisition value
+fed into `moving_average_cost()`, while the same line's accounting/AP
+effect already correctly netted out `discount_amount`. Inventory
+valuation and the supplier liability were being computed from two
+different economic values for the same purchase.
+
+**Fix — `pos/services/purchase_invoices.py`:** the moving-average
+computation was restructured so both the unit-aware and legacy line
+branches feed into one shared calculation:
+`net_line_value = line_subtotal - discount`, then
+`moving_avg_unit_cost = net_line_value / qty` (quantized). Tax is
+deliberately **not** netted out — confirmed by reading the model layer
+that this system has no VAT-recovery ledger account, so tax was never
+part of the cost basis before this fix and the owner's own policy
+("if taxes are non-recoverable, preserve existing behavior") means it
+stays that way; only the discount term is new.
+
+**Test added** (`pos/tests.py::PurchaseInvoicePostingTests::test_purchase_discount_nets_out_of_moving_average_cost`)
+— exactly the pack's own worked example: 1000 gross, 100 supplier
+discount, 10 units → asserts blended cost is `90.00`/unit (not
+`100.00`), `InventoryCost.avg_unit_cost == 90.0000`, inventory value
+added (`stock × cost`) reconciles exactly with the supplier AP balance
+actually posted (`900.00` both sides).
+
+**Regression check:** existing discount=0 tests are mathematically
+unaffected (`net_line_value == line_subtotal` when `discount == 0`),
+confirmed by the full suite staying green.
+
+### Hotfix 5 — Mandatory Idempotency
+
+**Problem confirmed:** `POST /api/purchase-invoices/` accepted an optional
+`Idempotency-Key` header — a retried request with no key, or a dropped-then-
+retried request, could duplicate the posted stock, AP, and cash/bank
+effects. The `idempotency.lookup()`/`.save()` service functions already
+existed and were already correct (their own docstring is explicit that a
+missing key is the *caller's* responsibility to reject, not the service's),
+they just weren't being enforced at the view layer for this endpoint.
+
+**Fix — `pos/views.py`, `PurchaseInvoiceListCreateView.create()`:** now
+requires a non-blank `Idempotency-Key` header (400
+`IDEMPOTENCY_KEY_REQUIRED` if missing), replays the original response on a
+key reuse with an identical payload (`idempotency.lookup()`), returns 409
+`IDEMPOTENCY_CONFLICT` on a key reused with a *different* payload, and
+additionally rejects (409 `SUPPLIER_REFERENCE_DUPLICATE`) a fresh request
+whose `(tenant, supplier, reference)` triple already exists — the
+"business uniqueness" requirement, guarding the case where a client
+retries with a *new* idempotency key but the same real-world supplier
+invoice number.
+
+**Tests added** (`pos/test_hotfix_pack.py::PurchaseInvoiceIdempotencyRequiredApiTests`,
+7 tests): missing key rejected, blank key rejected, an exact retry
+produces zero duplicate `PurchaseInvoice`/`StockMovement`/
+`InventoryCostMovement`/AP-balance effects and returns the original
+response, a different key legitimately creates a second invoice, same key
+with a different payload → 409 conflict, a duplicate supplier reference is
+rejected even with a fresh idempotency key, a blank reference never
+triggers the uniqueness guard, and the same reference under two different
+suppliers is allowed.
+
+**Fallout — every existing test that POSTs to `purchase-invoice-list` now
+needs a real key:** systematically fixed ~20 call sites across
+`pos/tests.py`, `pos/test_pos_integration.py`, each given a genuinely
+unique key (not a shared/repeated one, which would trigger unintended
+replay instead of the intended fresh create). Kept keys even on tests
+expecting a 400 for an *unrelated* validation reason (e.g. non-stock line
+type, over-paid amount, zero/negative qty, cross-tenant refs) — those
+would have "accidentally" still passed with a 400 from the new
+`IDEMPOTENCY_KEY_REQUIRED` check for the wrong reason, silently no longer
+testing what they claim to test. One `ERROR` (not `FAIL`) was uncovered
+this way: `PurchaseInvoiceReadScopingTests.setUp()` called
+`resp.json()['id']` on what had become a 400 body, raising `KeyError` —
+fixed by adding the header to `setUp()`'s own POST call.
+
+### Test Coverage Summary
+
+| Area | File | Count |
+|---|---|---|
+| Product edit (Hotfix 1, pre-existing fix, no new tests this pack) | — | — |
+| Concurrent stock adjustment | `test_hotfix_pack.py::StockAdjustmentConcurrencyTests` | 1 |
+| Adjustment direction (in/out) | `test_hotfix_pack.py::StockAdjustmentDirectionApiTests` + `test_stock_direct_post.py` fix | 4 |
+| Product edit field coverage (name/barcode/price/category/units, cost untouched) | `test_hotfix_pack.py::ProductEditFieldCoverageApiTests` | 5 |
+| Purchase discount AVCO | `tests.py::PurchaseInvoicePostingTests` | 1 |
+| Idempotent purchase retries + business-uniqueness | `test_hotfix_pack.py::PurchaseInvoiceIdempotencyRequiredApiTests` | 7 |
+| **New tests, this pack** | `pos/test_hotfix_pack.py` (new file) + 1 in `tests.py` | **18** |
+
+### Before / After Behavior
+
+| Scenario | Before | After |
+|---|---|---|
+| Edit product name only | 400 (rejected `cost`) | 200, `cost` untouched |
+| Two concurrent adjustments on same product | lost update possible (stale-read race) | serialized via row lock, unbroken quantity chain |
+| Positive stock adjustment | stored ambiguously as `ADJUSTMENT`, misread as outflow by some readers | stored as `ADJUSTMENT_IN`, unambiguous everywhere |
+| Negative stock adjustment | stored ambiguously as `ADJUSTMENT` | stored as `ADJUSTMENT_OUT`, unambiguous |
+| Purchase with a supplier discount | moving-average cost computed from gross price | computed from `subtotal - discount` (tax still excluded, unchanged policy) |
+| Retried purchase POST (network retry, double-click) | could duplicate stock/AP/cash effects | replays the original response, zero duplication |
+| Two purchases with the same supplier reference | allowed (silent duplicate risk) | second one rejected with `SUPPLIER_REFERENCE_DUPLICATE` |
+
+### Architectural Decisions Made
+
+1. **Hotfix 3 solved via new enum values, not a read-side sign-inspection
+   fix** — the only correct option once the two incompatible historical
+   write conventions were discovered; matches the pack's own stated
+   preferred solution.
+2. **Legacy `ADJUSTMENT` value kept, not removed** — historical rows using
+   it are never backfilled (no `RunPython` data migration), consistent
+   with this project's established R-F discipline (additive-only
+   migrations, no risky data mutation). `_IN_TYPES` still recognizes it so
+   old rows continue to read correctly under the pre-existing (ambiguous
+   for that value only) convention; only *new* rows get the unambiguous
+   direction.
+3. **Idempotency business-uniqueness scoped to `(tenant, supplier,
+   reference)`, only enforced when `reference` is non-blank** — matches
+   the pack's own instruction ("without breaking existing behavior");
+   invoices with no supplier reference supplied are unaffected.
+4. **Tax intentionally excluded from Hotfix 4's discount netting** — this
+   system has no VAT-recovery ledger account, so including tax in the cost
+   basis would misstate inventory value; explicitly preserved per the
+   pack's own stated policy.
+
+### Final Verification
+
+- `python3 manage.py test` — **643/643 passed**, 0 failures, 0 errors
+  (baseline 625 from the Sprint 3 Batch 5 checkpoint + 18 new tests this
+  pack). All pre-existing tests remain green, including every test touched
+  only to add an `Idempotency-Key` header (their original assertions are
+  unchanged).
+- `StockAdjustmentConcurrencyTests` (the one genuine multi-threaded test)
+  re-run 3 additional times in isolation to confirm it isn't flaky — all 4
+  runs (this run + 3 extra) passed.
+- `python3 manage.py check` — clean (1 pre-existing silenced warning,
+  unrelated to this pack).
+- `python3 manage.py makemigrations --check --dry-run` — clean, no pending
+  migrations. Exactly one new migration this pack
+  (`0028_alter_stockmovement_movement_type.py`), confirmed additive-only
+  (`AlterField` on choices metadata, no `RemoveField`, no `RunPython`, no
+  DB-level constraint affected).
+- No remaining HIGH severity issue from the review is open: all 5 named
+  hotfixes are implemented and covered by regression tests; Hotfix 1 was
+  confirmed already fixed rather than re-implemented.
+- Confirmed out of scope, untouched: Recipe/BOM, FIFO, GL postings,
+  Purchase/Sales Return costing, inventory revaluation — zero references
+  to any of these added by this pack (grep-confirmed against the diff).
 
 ---
 

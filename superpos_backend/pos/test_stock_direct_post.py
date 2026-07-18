@@ -174,8 +174,14 @@ class DirectPostRoutingTests(_Fixture, APITestCase):
         body = resp.json()
         self.assertEqual(body['quantity_before'], '0.000')
         self.assertEqual(body['quantity_after'],  '4.000')
-        self.assertEqual(body['quantity_in'],     '0.000')  # ADJUSTMENT classified as OUT by reader
-        self.assertEqual(body['quantity_out'],    '4.000')  # same — see serializer docstring
+        # Hotfix Pack: the stored row now uses the unambiguous
+        # ADJUSTMENT_IN value (translated from the legacy 'adjustment'
+        # input the client sent), so a positive adjustment finally reads
+        # as an inflow — this used to be misreported as an outflow (see
+        # git history for the pre-hotfix assertion this replaces).
+        self.assertEqual(body['movement_type'], StockMovement.MovementType.ADJUSTMENT_IN)
+        self.assertEqual(body['quantity_in'],     '4.000')
+        self.assertEqual(body['quantity_out'],    '0.000')
 
     def test_post_adjustment_negative_qty_decreases_stock(self):
         # Seed inventory.
