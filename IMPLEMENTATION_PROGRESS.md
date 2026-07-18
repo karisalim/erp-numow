@@ -1222,6 +1222,118 @@ already models a physical count. No new URL was added.
   now-fully-audited `Product.cost`/`InventoryCost.avg_unit_cost` into
   `dashboard_summary` and a new per-product cost-movement read endpoint.
 
+### Batch 4 — COGS / Gross Profit / Margin / Dashboard / Reports (backend-only)
+
+Branch: `s3/batch-4-cogs-reporting` (off `s3/batch-3-manual-cost-adjustment`).
+Backend-only, matching every prior Sprint 3 batch — frontend surfacing of
+these new fields is deferred to Batch 6.
+
+Consumes `SaleItem.unit_cost` (written on every sale since Batch 5a, read
+by nothing in production code until now) for read/reporting-only COGS and
+gross-profit figures. Zero GL posting: `FinancialAccountMovement
+.MovementType` gains no new value, enforced by a dedicated negative-
+assertion test suite, not just a comment.
+
+**Formulas used (verified against the live models, not GL-derived):**
+- `net_revenue = Sale.total − Sale.tax_amount`. `Sale` has no stored
+  `discount_amount` field — only `subtotal`/`tax_amount`/`total`
+  (`total = subtotal + tax_amount − discount_amount`) — so this
+  algebraically recovers `subtotal − discount_amount` (tax-exclusive,
+  discount-inclusive revenue) without a new field. Matches
+  `TARGET_BOUNDARIES.md`'s "net revenue" convention (menu price net of
+  VAT; glossary `:436-439`).
+- `cogs = Σ(SaleItem.unit_cost × SaleItem.qty)` over the window's
+  `SaleItem` rows (both already base-unit-denominated regardless of which
+  unit a line was sold in — no `ProductUnit` join needed; no Recipe model
+  exists yet, so a directly-sold product's own cost snapshot *is* its
+  "recipe COGS").
+- `gross_profit = net_revenue − cogs`. `gross_margin_pct = gross_profit ÷
+  net_revenue × 100` (0 when `net_revenue <= 0`).
+- Per-`top_products[i]` row: denominated against `line_total` (confirmed
+  pre-tax at `pos/serializers.py:1476`, same tax basis as `net_revenue`).
+  Known, pre-existing limitation carried forward unchanged: invoice-level
+  discount isn't allocated back across individual lines — already true of
+  `top_products.revenue` before this batch, not introduced by it.
+- **R-L naming discipline:** `cogs` / `gross_profit` / `gross_margin_pct` /
+  `net_revenue` only — never `net_profit`/`profit` (reserved for a future
+  GL-level figure after operating expenses).
+
+- **Files changed:**
+  - `superpos_backend/pos/views.py`:
+    - `dashboard_summary` — merged `tax_total=Sum('tax_amount')` into the
+      existing top-level `agg` aggregate (zero extra queries); hoisted
+      `window_items` above the `items_sold` computation and merged a COGS
+      `Sum(ExpressionWrapper(F('unit_cost')*F('qty'), ...))` into that same
+      call via a `_cogs_sum()` helper (a **fresh** expression per call —
+      reusing one `ExpressionWrapper` instance across two aggregate calls,
+      or naming an aggregate output alias `qty` in the same call as an
+      expression that references the `qty` field, both raise a spurious
+      `FieldError: 'qty' is an aggregate`; hit both while implementing,
+      fixed by a factory function and renaming the alias to `total_qty`).
+      Added four additive `kpis` keys (`net_revenue`, `cogs`,
+      `gross_profit`, `gross_margin_pct`) — **`kpis['revenue']` is
+      completely unchanged** (still `Sum('total')`, tax-inclusive; a
+      regression test asserts this explicitly so it's never confused with
+      the new `net_revenue`). `top_products` gained `cogs`/`gross_profit`/
+      `gross_margin_pct` per row from the same `window_items` queryset
+      (still one query family, no N+1).
+    - New `ProductCostMovementListView(TenantMixin, generics.ListAPIView)`
+      — mirrors `ProductWarehouseStockView` (a plain tenant+product-scoped
+      `ListAPIView`), **not** `ProductStockMovementListView` (a much
+      heavier hand-rolled statement-summary `APIView` — overkill for a
+      pure audit-ledger read). Relies on `InventoryCostMovement.Meta
+      .ordering` for newest-first; global `StandardPageNumberPagination`
+      applies automatically. Returns an empty list (not 404) for a
+      cross-tenant or nonexistent product id, matching that same
+      precedent.
+  - `superpos_backend/pos/serializers.py`:
+    - New `InventoryCostMovementSerializer` (`read_only_fields = fields`
+      — every row is written exclusively by `pos.services.costing`).
+    - `SaleItemSerializer` gained `line_cogs`
+      (`SerializerMethodField`, `quantize_money(unit_cost * qty)`,
+      returned as a string to match `unit_cost`/`price_each`'s DRF
+      `DecimalField` string-serialization convention). Inherently
+      read-only — not listed in `read_only_fields` (DRF raises an
+      `AssertionError` if a non-model field is listed there).
+  - `superpos_backend/pos/urls.py` — one new route:
+    `products/<int:pk>/cost-movements/` → `product-cost-movements`.
+  - `superpos_backend/pos/test_costing.py` — +16 tests:
+    `DashboardCogsGrossProfitTests` (hand-computed `kpis` correctness
+    against the owner-style worked example; `kpis['revenue']` unchanged
+    regression guard; zero-sales-in-window → all-zeros not a crash;
+    per-product `top_products` cost fields; a `line_total == 0` edge case
+    guarding the divide-by-zero fallback; a voided sale excluded from both
+    `cogs` and `top_products`), `ProductCostMovementsApiTests` (tenant
+    isolation → empty list not leaked data; newest-first ordering;
+    pagination beyond `PAGE_SIZE=20`; write verbs → 405; Cashier → 403),
+    `SaleItemLineCogsApiTests` (correct value on read; `unit_cost=0`
+    legacy row → `'0.00'`, no crash), `Batch4NoGlPostingTests` (zero new
+    `FinancialAccountMovement` rows from `dashboard_summary`, the new
+    cost-movements endpoint, and a `SaleItemSerializer` read; a static
+    assertion that `MovementType.values` grew no COGS-shaped member).
+- **Migration number:** none — reuses `InventoryCostMovement` (Batch 1),
+  `SaleItem.unit_cost`/`qty` (Batch 5a), `Sale.total`/`tax_amount`
+  (pre-existing). `makemigrations --check` clean before and after.
+- **API changes (additive only):** `GET /api/dashboard/summary/` gains
+  `kpis.net_revenue`/`cogs`/`gross_profit`/`gross_margin_pct` +
+  per-`top_products[i]` `cogs`/`gross_profit`/`gross_margin_pct`; new
+  `GET /api/products/{pk}/cost-movements/` (Manager+, paginated,
+  tenant-scoped); `SaleItemSerializer` (used by `GET /api/sales/` and
+  `/api/sales/{id}/`) gains read-only `line_cogs`. No existing key removed
+  or renamed.
+- **Tests executed:** `pos.test_costing` (49/49 green) + full suite
+  (624/624 green — 608 baseline + 16 new). `manage.py check` and
+  `makemigrations --check` both clean.
+- **Risks:** the `top_products[i].gross_margin_pct` discount-allocation
+  caveat above (documented, pre-existing, not new). No other risk
+  identified — this batch touches zero existing write paths.
+- **Not touched this batch:** any model/migration, `accounts/models.py`,
+  any GL-adjacent code, `SaleSerializer.create()`'s stock-deduction flow,
+  frontend.
+- **Next:** Batch 5 — backend regression + documentation checkpoint, then
+  Batch 6 — frontend surfacing of everything Sprint 3 shipped.
+
+
 ---
 
 *(Later sprints get their own sections here after their pre-sprint audits.)*

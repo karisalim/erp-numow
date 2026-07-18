@@ -1,4 +1,4 @@
-"""Sprint 3 Batch 1/2/3 — InventoryCost / InventoryCostMovement / costing.py.
+"""Sprint 3 Batch 1/2/3/4 — InventoryCost / InventoryCostMovement / costing.py.
 
 Batch 1 shipped the data model dark (model tests + seed command tests
 below). Batch 2 extracts the AVCO math into `pos/services/costing.py` and
@@ -10,6 +10,11 @@ uncoordinated cost-write paths (`ProductSerializer` direct writes, CSV
 import) and wires `update_cost_from_adjustment` into `stock_adjustment` —
 API-level tests for all three live in `ProductCostLockdownApiTests`,
 `StockAdjustmentCostApiTests`, and `CsvImportCostRoutingApiTests` below.
+Batch 4 is read/reporting-only — COGS/gross-profit/margin wired into
+`dashboard_summary`, a new `products/{pk}/cost-movements/` audit-trail
+endpoint, and `SaleItemSerializer.line_cogs` — tests live in
+`DashboardCogsGrossProfitTests`, `ProductCostMovementsApiTests`,
+`SaleItemLineCogsApiTests`, and `Batch4NoGlPostingTests` below.
 """
 
 from decimal import Decimal
@@ -23,8 +28,10 @@ from django.test import TestCase
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from accounts.models import Tenant, User
-from pos.models import Category, InventoryCost, InventoryCostMovement, Product
+from accounts.models import Branch, FinancialAccountMovement, Tenant, User
+from pos.models import (
+    Category, InventoryCost, InventoryCostMovement, Product, Sale, SaleItem,
+)
 from pos.services import costing as costing_svc
 
 
@@ -522,3 +529,262 @@ class CsvImportCostRoutingApiTests(_CostingApiTestBase):
             InventoryCostMovement.objects.filter(product=product).count(), 0,
             'opening value at create time is not a movement',
         )
+
+
+# ── Batch 4: COGS / gross profit / margin reporting (API level) ────────────
+
+class _Batch4ApiTestBase(APITestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.tenant = Tenant.objects.create(name='Batch4 Tenant')
+        cls.branch = Branch.objects.create(tenant=cls.tenant, name='Main')
+        cls.manager = User.objects.create_user(
+            username='b4mgr', password='pw', role=User.Role.MANAGER, tenant=cls.tenant,
+        )
+        cls.cashier = User.objects.create_user(
+            username='b4cash', password='pw', role=User.Role.CASHIER, tenant=cls.tenant,
+        )
+        cls.category = Category.objects.create(tenant=cls.tenant, name='Grocery')
+        cls.coffee = Product.objects.create(
+            tenant=cls.tenant, category=cls.category,
+            name='Coffee', barcode='B4-1', sku='SKU-B4-1',
+            price=Decimal('700.00'), cost=Decimal('500.00'),
+            tax_rate=Decimal('0.00'), stock=Decimal('100'),
+        )
+        InventoryCost.objects.create(
+            tenant=cls.tenant, product=cls.coffee, avg_unit_cost=Decimal('500.0000'),
+        )
+        cls.tea = Product.objects.create(
+            tenant=cls.tenant, category=cls.category,
+            name='Tea', barcode='B4-2', sku='SKU-B4-2',
+            price=Decimal('200.00'), cost=Decimal('80.00'),
+            tax_rate=Decimal('0.00'), stock=Decimal('100'),
+        )
+        InventoryCost.objects.create(
+            tenant=cls.tenant, product=cls.tea, avg_unit_cost=Decimal('80.0000'),
+        )
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.manager)
+
+    def _make_sale(self, items, *, tax_amount=Decimal('0'), sale_status=Sale.Status.COMPLETED):
+        """`items`: list of (product, qty, price_each, unit_cost) tuples."""
+        subtotal = sum((qty * price_each for _, qty, price_each, _ in items), Decimal('0'))
+        total = subtotal + tax_amount
+        sale = Sale.objects.create(
+            tenant=self.tenant, branch=self.branch, cashier=self.manager,
+            subtotal=subtotal, tax_amount=tax_amount, total=total,
+            method=Sale.Method.CASH, paid=total, change=Decimal('0'), status=sale_status,
+        )
+        for product, qty, price_each, unit_cost in items:
+            SaleItem.objects.create(
+                sale=sale, product=product, product_name=product.name,
+                barcode=product.barcode or '', qty=qty, price_each=price_each,
+                line_total=qty * price_each, unit_cost=unit_cost,
+            )
+        return sale
+
+
+class DashboardCogsGrossProfitTests(_Batch4ApiTestBase):
+    def test_kpis_cogs_net_revenue_gross_profit_margin(self):
+        # Coffee: 10 @ 700 (cost 500). Tea: 5 @ 200 (cost 80). tax=90.
+        self._make_sale(
+            [(self.coffee, Decimal('10'), Decimal('700.00'), Decimal('500.00')),
+             (self.tea,    Decimal('5'),  Decimal('200.00'), Decimal('80.00'))],
+            tax_amount=Decimal('90.00'),
+        )
+        resp = self.client.get(reverse('dashboard-summary'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+        kpis = resp.json()['kpis']
+
+        # subtotal = 10*700 + 5*200 = 8000; total = 8090.
+        self.assertEqual(kpis['revenue'], 8090.0, 'existing tax-inclusive revenue key must stay unchanged')
+        # net_revenue = total - tax_amount = 8090 - 90 = 8000.
+        self.assertEqual(kpis['net_revenue'], 8000.0)
+        # cogs = 10*500 + 5*80 = 5000 + 400 = 5400.
+        self.assertEqual(kpis['cogs'], 5400.0)
+        # gross_profit = 8000 - 5400 = 2600.
+        self.assertEqual(kpis['gross_profit'], 2600.0)
+        # gross_margin_pct = 2600 / 8000 * 100 = 32.5.
+        self.assertEqual(kpis['gross_margin_pct'], 32.5)
+
+    def test_zero_sales_in_window_returns_zeros_not_a_crash(self):
+        self._make_sale([(self.coffee, Decimal('1'), Decimal('700.00'), Decimal('500.00'))])
+        resp = self.client.get(
+            reverse('dashboard-summary'),
+            {'start_date': '2020-01-01', 'end_date': '2020-01-02'},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+        kpis = resp.json()['kpis']
+        self.assertEqual(kpis['net_revenue'], 0.0)
+        self.assertEqual(kpis['cogs'], 0.0)
+        self.assertEqual(kpis['gross_profit'], 0.0)
+        self.assertEqual(kpis['gross_margin_pct'], 0.0)
+
+    def test_top_products_per_row_cost_fields(self):
+        self._make_sale([
+            (self.coffee, Decimal('10'), Decimal('700.00'), Decimal('500.00')),
+            (self.tea,    Decimal('5'),  Decimal('200.00'), Decimal('80.00')),
+        ])
+        resp = self.client.get(reverse('dashboard-summary'))
+        rows = {row['name']: row for row in resp.json()['top_products']}
+
+        coffee_row = rows['Coffee']
+        self.assertEqual(coffee_row['revenue'], 7000.0)
+        self.assertEqual(coffee_row['cogs'], 5000.0)
+        self.assertEqual(coffee_row['gross_profit'], 2000.0)
+        self.assertAlmostEqual(coffee_row['gross_margin_pct'], 28.6, places=1)
+
+        tea_row = rows['Tea']
+        self.assertEqual(tea_row['revenue'], 1000.0)
+        self.assertEqual(tea_row['cogs'], 400.0)
+        self.assertEqual(tea_row['gross_profit'], 600.0)
+        self.assertEqual(tea_row['gross_margin_pct'], 60.0)
+
+    def test_top_products_zero_revenue_line_does_not_crash(self):
+        """A fully-discounted/free line (line_total == 0) must not raise a
+        ZeroDivisionError — gross_margin_pct falls back to 0.0."""
+        self._make_sale([(self.coffee, Decimal('1'), Decimal('0.00'), Decimal('500.00'))])
+        resp = self.client.get(reverse('dashboard-summary'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+        row = resp.json()['top_products'][0]
+        self.assertEqual(row['revenue'], 0.0)
+        self.assertEqual(row['cogs'], 500.0)
+        self.assertEqual(row['gross_margin_pct'], 0.0)
+
+    def test_voided_sale_excluded_from_cogs_and_top_products(self):
+        self._make_sale(
+            [(self.coffee, Decimal('10'), Decimal('700.00'), Decimal('500.00'))],
+        )
+        self._make_sale(
+            [(self.tea, Decimal('5'), Decimal('200.00'), Decimal('80.00'))],
+            sale_status=Sale.Status.VOIDED,
+        )
+        resp = self.client.get(reverse('dashboard-summary'))
+        kpis = resp.json()['kpis']
+        # Only the completed Coffee sale should count.
+        self.assertEqual(kpis['cogs'], 5000.0)
+        self.assertEqual(kpis['net_revenue'], 7000.0)
+        names = {row['name'] for row in resp.json()['top_products']}
+        self.assertNotIn('Tea', names)
+
+
+class ProductCostMovementsApiTests(_Batch4ApiTestBase):
+    def test_tenant_isolation_returns_empty_not_leaked_data(self):
+        other_tenant = Tenant.objects.create(name='Batch4 Other Tenant')
+        other_category = Category.objects.create(tenant=other_tenant, name='Grocery')
+        other_product = Product.objects.create(
+            tenant=other_tenant, category=other_category,
+            name='Other Coffee', barcode='B4-OTHER-1', sku='SKU-B4-OTHER-1',
+            price=Decimal('700.00'), cost=Decimal('500.00'),
+            tax_rate=Decimal('0.00'), stock=Decimal('0'),
+        )
+        other_inv = InventoryCost.objects.create(
+            tenant=other_tenant, product=other_product, avg_unit_cost=Decimal('500.0000'),
+        )
+        InventoryCostMovement.objects.create(
+            tenant=other_tenant, product=other_product, inventory_cost=other_inv,
+            avg_cost_before=Decimal('0'), avg_cost_after=Decimal('500'),
+            quantity_received=Decimal('10'), unit_cost_received=Decimal('500'),
+            source_document_type='purchase_invoice',
+        )
+        resp = self.client.get(reverse('product-cost-movements', args=[other_product.id]))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+        self.assertEqual(resp.json()['results'], [])
+
+    def test_ordering_newest_first(self):
+        inv = InventoryCost.objects.get(product=self.coffee)
+        first = InventoryCostMovement.objects.create(
+            tenant=self.tenant, product=self.coffee, inventory_cost=inv,
+            avg_cost_before=Decimal('500'), avg_cost_after=Decimal('550'),
+            quantity_received=Decimal('10'), unit_cost_received=Decimal('600'),
+            source_document_type='purchase_invoice', source_document_id=1,
+        )
+        second = InventoryCostMovement.objects.create(
+            tenant=self.tenant, product=self.coffee, inventory_cost=inv,
+            avg_cost_before=Decimal('550'), avg_cost_after=Decimal('600'),
+            quantity_received=Decimal('10'), unit_cost_received=Decimal('700'),
+            source_document_type='purchase_invoice', source_document_id=2,
+        )
+        resp = self.client.get(reverse('product-cost-movements', args=[self.coffee.id]))
+        ids = [row['id'] for row in resp.json()['results']]
+        self.assertEqual(ids, [second.id, first.id])
+
+    def test_pagination(self):
+        inv = InventoryCost.objects.get(product=self.coffee)
+        for i in range(25):
+            InventoryCostMovement.objects.create(
+                tenant=self.tenant, product=self.coffee, inventory_cost=inv,
+                avg_cost_before=Decimal('500'), avg_cost_after=Decimal('500'),
+                quantity_received=Decimal('1'), unit_cost_received=Decimal('500'),
+                source_document_type='purchase_invoice', source_document_id=i,
+            )
+        resp = self.client.get(reverse('product-cost-movements', args=[self.coffee.id]))
+        body = resp.json()
+        self.assertEqual(body['count'], 25)
+        self.assertEqual(len(body['results']), 20, 'StandardPageNumberPagination default page size')
+        self.assertIsNotNone(body['next'])
+
+    def test_read_only_write_verbs_rejected(self):
+        url = reverse('product-cost-movements', args=[self.coffee.id])
+        for verb in ('post', 'patch', 'delete'):
+            resp = getattr(self.client, verb)(url, {}, format='json')
+            self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED, verb)
+
+    def test_cashier_forbidden(self):
+        self.client.force_authenticate(user=self.cashier)
+        resp = self.client.get(reverse('product-cost-movements', args=[self.coffee.id]))
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class SaleItemLineCogsApiTests(_Batch4ApiTestBase):
+    def test_line_cogs_correct_on_read(self):
+        sale = self._make_sale([
+            (self.coffee, Decimal('3'), Decimal('700.00'), Decimal('500.00')),
+        ])
+        resp = self.client.get(reverse('sale-detail-pk', args=[sale.id]))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+        item = resp.json()['items'][0]
+        self.assertEqual(item['line_cogs'], '1500.00')   # 3 * 500
+
+    def test_line_cogs_zero_when_unit_cost_unset(self):
+        """A legacy SaleItem row with unit_cost still at its default 0 must
+        render '0.00', not crash."""
+        sale = self._make_sale([
+            (self.coffee, Decimal('2'), Decimal('700.00'), Decimal('0')),
+        ])
+        resp = self.client.get(reverse('sale-detail-pk', args=[sale.id]))
+        item = resp.json()['items'][0]
+        self.assertEqual(item['line_cogs'], '0.00')
+
+
+class Batch4NoGlPostingTests(_Batch4ApiTestBase):
+    """Sprint 3 Batch 4 governance guard (R-L): this batch is read/reporting
+    only. Every code path it touches must create ZERO new
+    FinancialAccountMovement rows, and the MovementType enum itself must
+    not have grown a COGS-shaped member."""
+
+    def test_dashboard_summary_creates_no_financial_movements(self):
+        self._make_sale([(self.coffee, Decimal('1'), Decimal('700.00'), Decimal('500.00'))])
+        before = FinancialAccountMovement.objects.count()
+        resp = self.client.get(reverse('dashboard-summary'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(FinancialAccountMovement.objects.count(), before)
+
+    def test_cost_movements_endpoint_creates_no_financial_movements(self):
+        before = FinancialAccountMovement.objects.count()
+        resp = self.client.get(reverse('product-cost-movements', args=[self.coffee.id]))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(FinancialAccountMovement.objects.count(), before)
+
+    def test_sale_item_serializer_read_creates_no_financial_movements(self):
+        sale = self._make_sale([(self.coffee, Decimal('1'), Decimal('700.00'), Decimal('500.00'))])
+        before = FinancialAccountMovement.objects.count()
+        resp = self.client.get(reverse('sale-detail-pk', args=[sale.id]))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn('line_cogs', resp.json()['items'][0])
+        self.assertEqual(FinancialAccountMovement.objects.count(), before)
+
+    def test_no_cogs_shaped_movement_type_added(self):
+        values = set(FinancialAccountMovement.MovementType.values)
+        self.assertFalse(any('cogs' in v for v in values), values)

@@ -4,7 +4,7 @@ from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 
 from django.db import transaction
-from django.db.models import Avg, Count, F, Sum
+from django.db.models import Avg, Count, DecimalField, ExpressionWrapper, F, Sum
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -26,15 +26,16 @@ from .filters import (
 )
 from .models import (
     AuditLog, BranchWarehouse, Category, InventoryBatch, InventoryCategory,
-    PriceTier, Product, ProductBarcodeUnit, ProductUnit, ProductUnitTierPrice,
-    PurchaseInvoice, Sale, SaleItem, SalesCategory, StockMovement, Unit,
-    UnitGroup, Warehouse, WarehouseStock,
+    InventoryCostMovement, PriceTier, Product, ProductBarcodeUnit, ProductUnit,
+    ProductUnitTierPrice, PurchaseInvoice, Sale, SaleItem, SalesCategory,
+    StockMovement, Unit, UnitGroup, Warehouse, WarehouseStock,
 )
 from .serializers import (
     BranchWarehouseSerializer,
     CategorySerializer,
     InventoryBatchSerializer,
     InventoryCategorySerializer,
+    InventoryCostMovementSerializer,
     PriceTierSerializer,
     ProductBarcodeUnitSerializer,
     ProductSerializer,
@@ -1230,25 +1231,63 @@ def dashboard_summary(request):
     # ── Window KPIs ──────────────────────────────────────────────────────────
     agg = window.aggregate(
         revenue=Sum('total'),
+        tax_total=Sum('tax_amount'),
         transactions=Count('id'),
         avg_basket=Avg('total'),
     )
-    items_sold = (
-        SaleItem.objects
-        .filter(sale__in=window)
-        .aggregate(qty=Sum('qty'))['qty']
-        or 0
-    )
+    # `SaleItem.qty`/`unit_cost` are already base-unit/2dp-cost-denominated
+    # regardless of which unit a line was sold in (Sprint 2 Batch 5a
+    # converts server-side at sale time) — no ProductUnit join needed.
+    window_items = SaleItem.objects.filter(sale__in=window)
+
+    def _cogs_sum():
+        # A fresh ExpressionWrapper per call — safe to call this more than
+        # once per queryset chain (see the alias note below for why a
+        # shared instance isn't actually the issue here).
+        return Sum(ExpressionWrapper(
+            F('unit_cost') * F('qty'), output_field=DecimalField(max_digits=16, decimal_places=5),
+        ))
+
+    # NOTE: the aggregate() output alias must NOT be 'qty' — Django adds
+    # every kwarg as an annotation before aggregating, so an alias named
+    # 'qty' shadows the real `SaleItem.qty` field, and cogs's F('qty')
+    # reference then resolves to that annotation (itself a Sum, i.e. an
+    # aggregate) instead of the column — raising "'qty' is an aggregate".
+    item_agg   = window_items.aggregate(total_qty=Sum('qty'), cogs=_cogs_sum())
+    items_sold = float(item_agg['total_qty'] or 0)
+
     revenue      = float(agg['revenue'] or 0)
     transactions = agg['transactions'] or 0
     avg_basket   = round(float(agg['avg_basket'] or 0), 2)
-    items_sold   = float(items_sold)
+
+    # ── COGS / gross profit / margin (Sprint 3 Batch 4) ───────────────────────
+    # net_revenue = tax-exclusive, discount-inclusive revenue. `Sale` has no
+    # stored discount_amount field — `total = subtotal + tax_amount -
+    # discount_amount`, so `total - tax_amount` algebraically recovers
+    # `subtotal - discount_amount` without a new field. Matches
+    # TARGET_BOUNDARIES.md's "net revenue" convention (menu price net of
+    # VAT). R-L: these are "gross profit" figures — never "net profit",
+    # which is reserved for a future GL-level figure after operating
+    # expenses.
+    net_revenue_decimal = costing.quantize_money(
+        (agg['revenue'] or Decimal('0')) - (agg['tax_total'] or Decimal('0')),
+    )
+    cogs_decimal = costing.quantize_money(item_agg['cogs'] or 0)
+    gross_profit_decimal = costing.quantize_money(net_revenue_decimal - cogs_decimal)
+    gross_margin_pct = (
+        round(float(gross_profit_decimal / net_revenue_decimal) * 100, 1)
+        if net_revenue_decimal > 0 else 0.0
+    )
 
     kpis = {
         'revenue':      revenue,
         'transactions': transactions,
         'avg_basket':   avg_basket,
         'items_sold':   items_sold,
+        'net_revenue':       float(net_revenue_decimal),
+        'cogs':              float(cogs_decimal),
+        'gross_profit':      float(gross_profit_decimal),
+        'gross_margin_pct':  gross_margin_pct,
         # Trends require a previous-window comparison — return zeros so the UI
         # can still render the delta line cleanly until that lands.
         'revenue_trend':      0.0,
@@ -1258,20 +1297,26 @@ def dashboard_summary(request):
     }
 
     # ── Top products (by revenue) within the window ──────────────────────────
-    window_items = SaleItem.objects.filter(sale__in=window)
-    top_products = [
-        {
-            'name':       row['product_name'],
-            'units_sold': float(row['units_sold'] or 0),
-            'revenue':    float(row['revenue']    or 0),
-        }
-        for row in (
-            window_items
-            .values('product_name')
-            .annotate(units_sold=Sum('qty'), revenue=Sum('line_total'))
-            .order_by('-revenue')[:10]
-        )
-    ]
+    top_products = []
+    for row in (
+        window_items
+        .values('product_name')
+        .annotate(units_sold=Sum('qty'), revenue=Sum('line_total'), cogs=_cogs_sum())
+        .order_by('-revenue')[:10]
+    ):
+        row_revenue = row['revenue'] or Decimal('0')
+        row_cogs    = costing.quantize_money(row['cogs'] or 0)
+        row_profit  = costing.quantize_money(row_revenue - row_cogs)
+        top_products.append({
+            'name':              row['product_name'],
+            'units_sold':        float(row['units_sold'] or 0),
+            'revenue':           float(row_revenue),
+            'cogs':              float(row_cogs),
+            'gross_profit':      float(row_profit),
+            'gross_margin_pct':  (
+                round(float(row_profit / row_revenue) * 100, 1) if row_revenue > 0 else 0.0
+            ),
+        })
 
     # ── Payment methods within window ───────────────────────────────────────
     payment_methods = {}
@@ -1581,6 +1626,29 @@ class ProductWarehouseStockView(TenantMixin, generics.ListAPIView):
             .select_related('product', 'warehouse')
             .filter(tenant=self._tenant(), product_id=self.kwargs['pk'])
             .order_by('warehouse_id')
+        )
+
+
+class ProductCostMovementListView(TenantMixin, generics.ListAPIView):
+    """GET /api/products/{pk}/cost-movements/ — InventoryCostMovement audit
+    trail for one product, newest-first (Sprint 3 Batch 4).
+
+    Read-only; every row is written exclusively by `pos.services.costing`.
+    A product id that doesn't exist or belongs to another tenant yields an
+    empty list, not a 404 — same precedent as `ProductWarehouseStockView`
+    above, which this view mirrors.
+    """
+
+    serializer_class   = InventoryCostMovementSerializer
+    permission_classes = [IsManagerOrAbove]
+
+    def get_queryset(self):
+        return (
+            InventoryCostMovement.objects
+            .select_related('actor_user')
+            .filter(tenant=self._tenant(), product_id=self.kwargs['pk'])
+            # Meta.ordering = ['-occurred_at', '-id'] on the model already
+            # gives newest-first.
         )
 
 

@@ -11,10 +11,10 @@ from accounts.models import (
 )
 from .models import (
     BranchWarehouse, Category, InsufficientStockError, InventoryBatch,
-    InventoryCategory, Payment, PriceTier, Product, ProductBarcodeUnit,
-    ProductUnit, ProductUnitTierPrice, PurchaseInvoice, PurchaseInvoiceLine,
-    Sale, SaleItem, SalesCategory, StockMovement, Unit, UnitGroup, Warehouse,
-    WarehouseStock,
+    InventoryCategory, InventoryCostMovement, Payment, PriceTier, Product,
+    ProductBarcodeUnit, ProductUnit, ProductUnitTierPrice, PurchaseInvoice,
+    PurchaseInvoiceLine, Sale, SaleItem, SalesCategory, StockMovement, Unit,
+    UnitGroup, Warehouse, WarehouseStock,
 )
 
 logger = logging.getLogger(__name__)
@@ -425,6 +425,25 @@ class StockMovementSerializer(serializers.ModelSerializer):
             movement.save(update_fields=['sale', 'updated_at'])
 
         return movement
+
+
+class InventoryCostMovementSerializer(serializers.ModelSerializer):
+    """Read-only audit trail for `InventoryCost` changes (Sprint 3 Batch 4).
+
+    Every row is written exclusively by `pos.services.costing` — this
+    serializer never accepts a write, same "single authority" discipline
+    the costing service itself documents.
+    """
+
+    class Meta:
+        model  = InventoryCostMovement
+        fields = [
+            'id', 'product', 'quantity_before', 'quantity_received',
+            'unit_cost_received', 'avg_cost_before', 'avg_cost_after',
+            'source_document_type', 'source_document_id', 'actor_user',
+            'note', 'occurred_at',
+        ]
+        read_only_fields = fields
 
 
 class StockAdjustmentSerializer(serializers.Serializer):
@@ -1205,13 +1224,21 @@ class SaleItemSerializer(serializers.ModelSerializer):
     entered_qty = serializers.DecimalField(
         max_digits=14, decimal_places=3, required=False, allow_null=True,
     )
+    # Sprint 3 Batch 4 — read-only, computed from the unit_cost snapshot
+    # already taken at sale time. A SerializerMethodField can't be written
+    # to, so a spoofed value in a create payload is silently dropped.
+    line_cogs = serializers.SerializerMethodField()
+
+    def get_line_cogs(self, obj):
+        from pos.services import costing as costing_svc
+        return str(costing_svc.quantize_money((obj.unit_cost or Decimal('0')) * obj.qty))
 
     class Meta:
         model  = SaleItem
         fields = [
             'id', 'product', 'product_name', 'barcode',
             'product_unit', 'entered_qty',
-            'qty', 'price_each', 'line_total', 'unit_cost', 'warehouse',
+            'qty', 'price_each', 'line_total', 'unit_cost', 'line_cogs', 'warehouse',
         ]
         read_only_fields = ['id', 'product_name', 'barcode', 'line_total', 'unit_cost']
 

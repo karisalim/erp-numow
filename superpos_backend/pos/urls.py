@@ -43,6 +43,8 @@ urlpatterns = [
     path('products/<int:pk>/stock-balance/',   views.ProductStockBalanceView.as_view(),      name='product-stock-balance'),
     # Phase 1.5 Slice J — per-warehouse balances for one product (read-only).
     path('products/<int:pk>/warehouse-stocks/', views.ProductWarehouseStockView.as_view(),    name='product-warehouse-stock'),
+    # Sprint 3 Batch 4 — per-product AVCO audit trail (read-only).
+    path('products/<int:pk>/cost-movements/',   views.ProductCostMovementListView.as_view(),  name='product-cost-movements'),
     # Sprint 2 Batch 1 — per-product unit mappings + per-pack barcodes.
     path('products/<int:product_pk>/units/',          views.ProductUnitListCreateView.as_view(),        name='product-unit-list'),
     path('products/<int:product_pk>/units/<int:pk>/', views.ProductUnitDetailView.as_view(),            name='product-unit-detail'),
