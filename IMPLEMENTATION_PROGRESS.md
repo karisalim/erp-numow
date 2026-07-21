@@ -1923,6 +1923,89 @@ History export to CSV/Excel/PDF), then Batches 5-8 (frontend: chart,
 branch selector, drawer enhancements, drill-down), then Batch 9
 (regression checkpoint).
 
+#### Batch 3 + 4 — Cost-movement date-range filter, CSV/Excel/PDF export
+
+**Scope:** backend-only, additive. Batch 3 wires `?start_date=&end_date=&
+source_document_type=` filtering onto the existing `GET
+/products/{pk}/cost-movements/` list, mirroring `StockMovementFilter`'s
+shape exactly. Batch 4 adds a new export endpoint returning the same
+audit trail as a downloadable CSV, real Excel (`.xlsx`), or PDF file —
+all three formats, per the owner's confirmed choice.
+
+**Files changed:**
+- `superpos_backend/pos/filters.py` — new `InventoryCostMovementFilter`
+  (`start_date`/`end_date` → `occurred_at` range, `source_document_type`
+  exact match), same field-naming convention as `StockMovementFilter`.
+  Cost data has no branch/warehouse dimension (D-09), so no such filter
+  exists here — there's nothing to filter by.
+- `superpos_backend/pos/views.py`:
+  - `ProductCostMovementListView` gets `filterset_class =
+    InventoryCostMovementFilter`.
+  - New `product_cost_movements_export` view (`GET
+    /products/{pk}/cost-movements/export/`, `IsManagerOrAbove`) — reuses
+    `InventoryCostMovementFilter` for the same date/type filtering,
+    streams rows via `.iterator(chunk_size=500)` (same memory-safety
+    pattern as `products_export`/`sales_export`), and renders one of
+    three formats based on `?export_format=csv|xlsx|pdf`:
+    - **CSV**: byte-for-byte the same `csv.writer` + UTF-8 BOM pattern as
+      the existing product/sales exports.
+    - **`.xlsx`**: `openpyxl.Workbook()`, one sheet, bold header row.
+    - **PDF**: `reportlab.platypus.SimpleDocTemplate` + `Table`, landscape
+      letter, bold dark header row — a plain tabular report, no charts
+      embedded (matches what "export cost history" literally asked for).
+    - Cross-tenant/nonexistent product ids yield an empty (but still
+      valid, openable) file rather than a 404 — same "empty list, not
+      404" precedent `ProductCostMovementListView` already established.
+  - **Discovered mid-implementation and corrected:** the export's format
+    selector is named `?export_format=`, not `?format=` — DRF reserves
+    `format` as its own content-negotiation query param
+    (`URL_FORMAT_OVERRIDE`) and raises `Http404` internally when the
+    value doesn't match a registered renderer's format string. The first
+    implementation used `?format=` and every export request 404'd; caught
+    by the new tests, fixed by renaming the param rather than fighting
+    DRF's renderer machinery for one endpoint.
+- `superpos_backend/requirements.txt` — added `openpyxl>=3.1` (real
+  `.xlsx` generation) and `reportlab>=4.0` (PDF generation), the project's
+  first new dependencies since the original `requirements.txt`. Both
+  install as pure-Python wheels with no system-level dependency (part of
+  why `reportlab` was chosen over `weasyprint`, which needs
+  Pango/Cairo/GTK) — confirmed via a clean `pip install`.
+- `superpos_backend/pos/test_reporting.py` — 11 new tests across
+  `CostMovementDateFilterTests` (4: date-range narrowing, source-type
+  filter, no-filter regression, combined with pagination) and
+  `CostHistoryExportTests` (7: each of the 3 formats returns 200 with the
+  correct content type/filename and real content, an empty result still
+  returns a valid file per format rather than crashing, date-range
+  narrows the export, an invalid `export_format` value → 400, Cashier →
+  403).
+
+**Migrations:** none — pure view/filter/dependency additions, confirmed
+via `makemigrations --check --dry-run` (`No changes detected`).
+
+**Tests:** 667 passed (656 baseline + 11 new), 0 failures.
+`manage.py check` clean.
+
+**Architectural decisions:**
+1. `reportlab` over `weasyprint`/`xhtml2pdf` for PDF generation — pure
+   Python, no system-level rendering dependency, sufficient for a plain
+   tabular report (no HTML/CSS layout needed for this use case).
+2. The export endpoint reuses the exact same filter class as the list
+   endpoint rather than duplicating filtering logic — what a user sees on
+   screen (paginated table) and what they download (full filtered set)
+   are governed by identical query semantics.
+3. `?export_format=` instead of `?format=` — a real constraint discovered
+   during implementation (DRF's reserved query param), not a stylistic
+   choice; documented in both the view's docstring and the URL comment so
+   it isn't accidentally "fixed" back to `format` later.
+
+**Not touched:** any model/migration, `InventoryCost`/
+`InventoryCostMovement` (no branch/warehouse field added), frontend.
+
+**Next:** Batches 5-8 (frontend: Margin/COGS trend chart via Recharts,
+Dashboard branch-filter selector, Cost History drawer enhancements
+[date filter + trend chart + export button], Dashboard drill-down into
+the existing drawer), then Batch 9 (regression checkpoint).
+
 ---
 
 *(Later sprints get their own sections here after their pre-sprint audits.)*

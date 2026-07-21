@@ -1,7 +1,7 @@
 import django_filters
 from .models import (
-    BranchWarehouse, InventoryCategory, Product, Sale, SalesCategory,
-    StockMovement, Unit, UnitGroup, Warehouse, WarehouseStock,
+    BranchWarehouse, InventoryCategory, InventoryCostMovement, Product, Sale,
+    SalesCategory, StockMovement, Unit, UnitGroup, Warehouse, WarehouseStock,
 )
 
 
@@ -89,6 +89,23 @@ class StockMovementFilter(django_filters.FilterSet):
     class Meta:
         model  = StockMovement
         fields = ['movement_type', 'product_id', 'warehouse']
+
+
+class InventoryCostMovementFilter(django_filters.FilterSet):
+    """Filters for a product's AVCO audit trail (Sprint 4 Batch 3).
+
+    Mirrors `StockMovementFilter`'s `start_date`/`end_date` range shape
+    exactly. Cost data has no branch/warehouse dimension (D-09 keeps
+    `InventoryCost` tenant-wide), so no branch/warehouse filter exists
+    here — there is nothing to filter by."""
+
+    start_date            = django_filters.DateFilter(field_name='occurred_at', lookup_expr='date__gte')
+    end_date              = django_filters.DateFilter(field_name='occurred_at', lookup_expr='date__lte')
+    source_document_type  = django_filters.CharFilter(field_name='source_document_type')
+
+    class Meta:
+        model  = InventoryCostMovement
+        fields = ['source_document_type']
 
 
 class WarehouseFilter(django_filters.FilterSet):

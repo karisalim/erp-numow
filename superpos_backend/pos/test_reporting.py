@@ -5,7 +5,12 @@ Batch 1: `GET /api/dashboard/trend/` — one row per day across a window
 `?branch_id=` scoping on `dashboard_summary`/`dashboard_top_products`/
 `dashboard_trend`, plus the `top_products` product-id fix (grouping by
 `product` FK instead of only the free-text `product_name` snapshot) so the
-frontend has something to drill down into.
+frontend has something to drill down into. Batch 3: `?start_date=&
+end_date=&source_document_type=` filtering on `GET
+/products/{pk}/cost-movements/`, mirroring `StockMovementFilter`'s shape.
+Batch 4: `GET /products/{pk}/cost-movements/export/?export_format=csv|xlsx|pdf`
+— the same audit trail as a downloadable file. (Named `export_format`, not
+`format` — the latter is reserved by DRF's content negotiation.)
 """
 
 from datetime import date, timedelta
@@ -16,7 +21,9 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from accounts.models import Branch, Tenant, User
-from pos.models import Category, InventoryCost, Product, Sale, SaleItem
+from pos.models import (
+    Category, InventoryCost, InventoryCostMovement, Product, Sale, SaleItem,
+)
 
 
 class _Sprint4ReportingTestBase(APITestCase):
@@ -252,3 +259,173 @@ class TopProductsProductIdTests(_Sprint4ReportingTestBase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
         names = {row['name'] for row in resp.json()['top_products']}
         self.assertEqual(names, {'Coffee'})
+
+
+class CostMovementDateFilterTests(_Sprint4ReportingTestBase):
+    """Sprint 4 Batch 3 — `?start_date=&end_date=&source_document_type=` on
+    `GET /products/{pk}/cost-movements/`. `occurred_at` is auto_now_add,
+    so movements are back-dated via a bulk `.update()` after creation, same
+    technique `_make_sale`'s `on_date` uses for `Sale.created_at`."""
+
+    def _make_movement(self, *, on_date, source_document_type='purchase_invoice',
+                        avg_before=Decimal('500.0000'), avg_after=Decimal('550.0000')):
+        inv_cost, _ = InventoryCost.objects.get_or_create(
+            tenant=self.tenant, product=self.coffee,
+            defaults={'avg_unit_cost': avg_after},
+        )
+        m = InventoryCostMovement.objects.create(
+            tenant=self.tenant, product=self.coffee, inventory_cost=inv_cost,
+            quantity_before=Decimal('10'), quantity_received=Decimal('10'),
+            unit_cost_received=Decimal('600.00'),
+            avg_cost_before=avg_before, avg_cost_after=avg_after,
+            source_document_type=source_document_type, source_document_id=1,
+        )
+        InventoryCostMovement.objects.filter(pk=m.pk).update(
+            occurred_at=timezone_aware(on_date),
+        )
+        m.refresh_from_db()
+        return m
+
+    def test_date_range_narrows_results(self):
+        today = date.today()
+        old, recent = today - timedelta(days=60), today - timedelta(days=1)
+        self._make_movement(on_date=old)
+        self._make_movement(on_date=recent)
+
+        resp = self.client.get(
+            reverse('product-cost-movements', args=[self.coffee.id]),
+            {'start_date': (today - timedelta(days=7)).isoformat(), 'end_date': today.isoformat()},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+        self.assertEqual(resp.json()['count'], 1)
+
+    def test_source_document_type_filter(self):
+        self._make_movement(on_date=date.today(), source_document_type='purchase_invoice')
+        self._make_movement(on_date=date.today(), source_document_type='manual_cost_adjustment')
+
+        resp = self.client.get(
+            reverse('product-cost-movements', args=[self.coffee.id]),
+            {'source_document_type': 'manual_cost_adjustment'},
+        )
+        self.assertEqual(resp.json()['count'], 1)
+        self.assertEqual(resp.json()['results'][0]['source_document_type'], 'manual_cost_adjustment')
+
+    def test_no_filter_params_is_unfiltered_regression(self):
+        self._make_movement(on_date=date.today() - timedelta(days=400))
+        self._make_movement(on_date=date.today())
+        resp = self.client.get(reverse('product-cost-movements', args=[self.coffee.id]))
+        self.assertEqual(resp.json()['count'], 2)
+
+    def test_combined_with_pagination(self):
+        for i in range(3):
+            self._make_movement(on_date=date.today())
+        resp = self.client.get(
+            reverse('product-cost-movements', args=[self.coffee.id]),
+            {'start_date': date.today().isoformat(), 'page_size': 2},
+        )
+        self.assertEqual(resp.json()['count'], 3)
+        self.assertEqual(len(resp.json()['results']), 2)
+
+
+class CostHistoryExportTests(_Sprint4ReportingTestBase):
+    """Sprint 4 Batch 4 — CSV/Excel/PDF export of the AVCO audit trail."""
+
+    def _make_movement(self, *, on_date=None):
+        inv_cost, _ = InventoryCost.objects.get_or_create(
+            tenant=self.tenant, product=self.coffee,
+            defaults={'avg_unit_cost': Decimal('550.0000')},
+        )
+        m = InventoryCostMovement.objects.create(
+            tenant=self.tenant, product=self.coffee, inventory_cost=inv_cost,
+            quantity_before=Decimal('10'), quantity_received=Decimal('10'),
+            unit_cost_received=Decimal('600.00'),
+            avg_cost_before=Decimal('500.0000'), avg_cost_after=Decimal('550.0000'),
+            source_document_type='purchase_invoice', source_document_id=7,
+            note='test movement',
+        )
+        if on_date:
+            InventoryCostMovement.objects.filter(pk=m.pk).update(
+                occurred_at=timezone_aware(on_date),
+            )
+        return m
+
+    def test_csv_export_200_correct_headers_and_content(self):
+        self._make_movement()
+        resp = self.client.get(
+            reverse('product-cost-movements-export', args=[self.coffee.id]),
+            {'export_format': 'csv'},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn('text/csv', resp['Content-Type'])
+        self.assertIn('attachment; filename=', resp['Content-Disposition'])
+        body = resp.content.decode('utf-8-sig')
+        self.assertIn('Date,Source,Qty received', body)
+        self.assertIn('purchase_invoice #7', body)
+        self.assertIn('550.0000', body)
+
+    def test_xlsx_export_200_correct_content_type_and_rows(self):
+        self._make_movement()
+        resp = self.client.get(
+            reverse('product-cost-movements-export', args=[self.coffee.id]),
+            {'export_format': 'xlsx'},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn('spreadsheetml.sheet', resp['Content-Type'])
+        self.assertIn('attachment; filename=', resp['Content-Disposition'])
+
+        from io import BytesIO
+        from openpyxl import load_workbook
+        wb = load_workbook(BytesIO(resp.content))
+        ws = wb.active
+        self.assertEqual(ws['A1'].value, 'Date')
+        self.assertEqual(ws.max_row, 2, 'header row + 1 data row')
+
+    def test_pdf_export_200_correct_content_type(self):
+        self._make_movement()
+        resp = self.client.get(
+            reverse('product-cost-movements-export', args=[self.coffee.id]),
+            {'export_format': 'pdf'},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp['Content-Type'], 'application/pdf')
+        self.assertIn('attachment; filename=', resp['Content-Disposition'])
+        self.assertTrue(resp.content.startswith(b'%PDF'))
+
+    def test_empty_result_still_returns_valid_file_not_500(self):
+        for fmt, expected_ct in (
+            ('csv', 'text/csv'), ('xlsx', 'spreadsheetml.sheet'), ('pdf', 'application/pdf'),
+        ):
+            resp = self.client.get(
+                reverse('product-cost-movements-export', args=[self.coffee.id]),
+                {'export_format': fmt},
+            )
+            self.assertEqual(resp.status_code, status.HTTP_200_OK, f'{fmt} export crashed on empty data')
+            self.assertIn(expected_ct, resp['Content-Type'])
+
+    def test_date_range_narrows_export(self):
+        old, recent = date.today() - timedelta(days=60), date.today()
+        self._make_movement(on_date=old)
+        self._make_movement(on_date=recent)
+        resp = self.client.get(
+            reverse('product-cost-movements-export', args=[self.coffee.id]),
+            {'export_format': 'csv', 'start_date': (date.today() - timedelta(days=7)).isoformat(),
+             'end_date': date.today().isoformat()},
+        )
+        body = resp.content.decode('utf-8-sig')
+        # Header + exactly 1 data row.
+        self.assertEqual(len(body.strip().splitlines()), 2)
+
+    def test_invalid_format_returns_400(self):
+        resp = self.client.get(
+            reverse('product-cost-movements-export', args=[self.coffee.id]),
+            {'export_format': 'txt'},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_cashier_forbidden(self):
+        self.client.force_authenticate(user=self.cashier)
+        resp = self.client.get(
+            reverse('product-cost-movements-export', args=[self.coffee.id]),
+            {'export_format': 'csv'},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)

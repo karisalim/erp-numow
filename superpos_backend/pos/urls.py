@@ -45,6 +45,9 @@ urlpatterns = [
     path('products/<int:pk>/warehouse-stocks/', views.ProductWarehouseStockView.as_view(),    name='product-warehouse-stock'),
     # Sprint 3 Batch 4 — per-product AVCO audit trail (read-only).
     path('products/<int:pk>/cost-movements/',   views.ProductCostMovementListView.as_view(),  name='product-cost-movements'),
+    # Sprint 4 Batch 4 — export the same audit trail as CSV/Excel/PDF
+    # (query param is `export_format`, not `format` — DRF reserves that name).
+    path('products/<int:pk>/cost-movements/export/', views.product_cost_movements_export,      name='product-cost-movements-export'),
     # Sprint 2 Batch 1 — per-product unit mappings + per-pack barcodes.
     path('products/<int:product_pk>/units/',          views.ProductUnitListCreateView.as_view(),        name='product-unit-list'),
     path('products/<int:product_pk>/units/<int:pk>/', views.ProductUnitDetailView.as_view(),            name='product-unit-detail'),

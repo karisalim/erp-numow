@@ -21,9 +21,9 @@ from accounts.permissions import IsCashierOrAbove, IsManagerOrAbove
 from accounts.services import account_movements as fa
 from accounts.services import customer_ar as ar
 from .filters import (
-    BranchWarehouseFilter, InventoryCategoryFilter, ProductFilter, SaleFilter,
-    SalesCategoryFilter, StockMovementFilter, UnitFilter, UnitGroupFilter,
-    WarehouseFilter, WarehouseStockFilter,
+    BranchWarehouseFilter, InventoryCategoryFilter, InventoryCostMovementFilter,
+    ProductFilter, SaleFilter, SalesCategoryFilter, StockMovementFilter,
+    UnitFilter, UnitGroupFilter, WarehouseFilter, WarehouseStockFilter,
 )
 from .models import (
     AuditLog, BranchWarehouse, Category, InventoryBatch, InventoryCategory,
@@ -1796,6 +1796,7 @@ class ProductCostMovementListView(TenantMixin, generics.ListAPIView):
 
     serializer_class   = InventoryCostMovementSerializer
     permission_classes = [IsManagerOrAbove]
+    filterset_class    = InventoryCostMovementFilter
 
     def get_queryset(self):
         return (
@@ -1805,6 +1806,123 @@ class ProductCostMovementListView(TenantMixin, generics.ListAPIView):
             # Meta.ordering = ['-occurred_at', '-id'] on the model already
             # gives newest-first.
         )
+
+
+COST_HISTORY_EXPORT_COLUMNS = [
+    'Date', 'Source', 'Qty received', 'Unit cost received',
+    'Avg cost before', 'Avg cost after', 'Note',
+]
+
+
+def _cost_history_export_rows(pk, tenant, request):
+    """Shared queryset + row-building for all three export formats — same
+    filter (`InventoryCostMovementFilter`) and column set the drawer's own
+    table uses, so what a user sees on screen is exactly what they export.
+    Cross-tenant/nonexistent product ids yield zero rows (still a valid,
+    openable empty file), matching `ProductCostMovementListView`'s own
+    "empty list, not 404" precedent (Sprint 3 Batch 4)."""
+    qs = InventoryCostMovement.objects.filter(tenant=tenant, product_id=pk)
+    qs = InventoryCostMovementFilter(request.query_params, queryset=qs).qs
+    qs = qs.order_by('-occurred_at', '-id')
+    for m in qs.iterator(chunk_size=500):
+        yield [
+            m.occurred_at.strftime('%Y-%m-%d %H:%M'),
+            f'{m.source_document_type}{f" #{m.source_document_id}" if m.source_document_id else ""}' if m.source_document_type else '',
+            m.quantity_received if m.quantity_received is not None else '',
+            m.unit_cost_received if m.unit_cost_received is not None else '',
+            m.avg_cost_before,
+            m.avg_cost_after,
+            m.note,
+        ]
+
+
+@api_view(['GET'])
+@permission_classes([IsManagerOrAbove])
+def product_cost_movements_export(request, pk):
+    """
+    GET /api/products/{pk}/cost-movements/export/?export_format=csv|xlsx|pdf&start_date=&end_date=&source_document_type=
+
+    Sprint 4 Batch 4. Same date-range/source-type filtering as the list
+    endpoint (`InventoryCostMovementFilter`), exported as a plain tabular
+    report in the caller's chosen format — no charts embedded, matching
+    what "export cost history" literally asked for.
+
+    NOTE: the query param is `export_format`, not `format` — DRF reserves
+    `?format=` (`URL_FORMAT_OVERRIDE`) for its own content-negotiation and
+    raises Http404 when the value doesn't match a registered renderer
+    (confirmed the hard way while building this). Using a differently-named
+    param sidesteps that entirely rather than fighting DRF's renderer
+    machinery for a single endpoint.
+    """
+    tenant = getattr(request.user, 'tenant', None)
+    fmt = (request.query_params.get('export_format') or 'csv').lower()
+    if fmt not in ('csv', 'xlsx', 'pdf'):
+        return Response({'detail': "Invalid export_format: expected 'csv', 'xlsx', or 'pdf'."}, status=status.HTTP_400_BAD_REQUEST)
+
+    product_name = (
+        Product.objects.filter(pk=pk, tenant=tenant).values_list('name', flat=True).first()
+        if tenant else Product.objects.filter(pk=pk).values_list('name', flat=True).first()
+    )
+    slug = (product_name or f'product-{pk}').lower().replace(' ', '-')
+    date_tag = ''
+    start_date, end_date = request.query_params.get('start_date'), request.query_params.get('end_date')
+    if start_date and end_date:
+        date_tag = f'-{start_date}_{end_date}'
+    basename = f'cost-history-{slug}{date_tag}'
+
+    rows = list(_cost_history_export_rows(pk, tenant, request))
+
+    if fmt == 'csv':
+        response = HttpResponse(content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = f'attachment; filename="{basename}.csv"'
+        response.write('﻿')  # BOM so Excel opens Arabic/UTF-8 columns correctly
+        writer = csv.writer(response)
+        writer.writerow(COST_HISTORY_EXPORT_COLUMNS)
+        for row in rows:
+            writer.writerow(row)
+        return response
+
+    if fmt == 'xlsx':
+        from openpyxl import Workbook
+        from openpyxl.styles import Font
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = 'Cost History'
+        ws.append(COST_HISTORY_EXPORT_COLUMNS)
+        for cell in ws[1]:
+            cell.font = Font(bold=True)
+        for row in rows:
+            ws.append([str(v) if v != '' else '' for v in row])
+        response = HttpResponse(
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        response['Content-Disposition'] = f'attachment; filename="{basename}.xlsx"'
+        wb.save(response)
+        return response
+
+    # fmt == 'pdf'
+    from io import BytesIO
+
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import landscape, letter
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=landscape(letter))
+    table_data = [COST_HISTORY_EXPORT_COLUMNS] + [[str(v) for v in row] for row in rows]
+    table = Table(table_data, repeatRows=1)
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1f2937')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+        ('FONTSIZE', (0, 0), (-1, -1), 8),
+    ]))
+    doc.build([table])
+    response = HttpResponse(buf.getvalue(), content_type='application/pdf')
+    response['Content-Disposition'] = f'attachment; filename="{basename}.pdf"'
+    return response
 
 
 class WarehouseInventoryView(TenantMixin, generics.ListAPIView):
