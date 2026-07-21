@@ -2186,4 +2186,106 @@ Sprint 4 is complete.
 
 ---
 
+#### Batch 10 — Cost History drawer + Dashboard polish (post-Sprint-4)
+
+The business owner shared a reference mockup of a more elaborate Cost
+History drawer (product-summary header, quick-range presets, real
+document links, area chart with a trend badge, sortable/paginated table)
+and asked for it to be matched. This batch closes the gap on everything
+feasible from existing data; a few mockup elements were explicitly
+descoped with a stated reason rather than faked.
+
+**Backend (`superpos_backend/pos/serializers.py`, additive, no migration):**
+- `InventoryCostMovementSerializer` gained `actor_user_username` (mirrors
+  the existing `LedgerMovementSerializer.actor_user_username` pattern),
+  read via the view's already-existing `select_related('actor_user')` — no
+  extra query. Confirmed sortable-column support (`?ordering=`) was
+  already live with zero backend change: DRF's global `OrderingFilter`
+  defaults to every readable serializer field when a view doesn't set
+  `ordering_fields`, and `ProductCostMovementListView` never did.
+
+**Frontend:**
+- `components/products/ProductCostHistoryDrawer.tsx` — rewritten:
+  - Product-summary header (icon, name, SKU, Current avg cost, Current
+    stock, Last cost update) — fetches the product directly
+    (`GET /products/:id/`) so every caller (Products page, Dashboard
+    drill-down) gets full fidelity regardless of what it had on hand.
+    "Last cost update" reads the latest `InventoryCostMovement` row
+    specifically (unfiltered, page_size=1), not `Product.updated_at` —
+    that field also bumps on unrelated edits (name, category, …) and
+    would misrepresent cost history.
+  - Quick-range chips (All/7D/30D/90D/This Month/This Year/Custom) replace
+    the bare date inputs as the primary interaction; Custom reveals them.
+    "All" was added beyond the owner's literal list to preserve the
+    drawer's existing "full audit ledger, must support full browsing"
+    default rather than silently narrowing it.
+  - Table gained **Movement type** (friendly label of
+    `source_document_type`) and **User** (`actor_user_username`) columns;
+    **Source** is now a live link to `/purchases/:id` when the row is a
+    purchase receipt (React Router `Link`, using the existing route).
+  - Date/Qty received/Avg cost columns are sortable (`?ordering=`, click
+    toggles asc/desc); a page-size selector (10/20/50/100) sits under the
+    table.
+  - Empty state (no date filter active) now offers a "Create purchase"
+    button linking to `/purchases/new`.
+  - Drawer width widened `520px → 1200px` default → to fit the new
+    columns without relying on the table's horizontal scroll at normal
+    screen widths.
+- `components/products/CostTrendChart.tsx` — swapped `LineChart` for a
+  gradient-filled `AreaChart`; added a client-computed
+  "±X% vs start of period" badge (first vs last point in the currently
+  loaded, already-filtered series — not a genuine prior-period comparison,
+  labeled accordingly to stay honest about its basis).
+- `pages/DashboardPage.tsx`:
+  - Gross profit / Gross margin tiles gained client-computed trend badges,
+    since the backend has no real trend math for them (every `*_trend` key
+    it sends elsewhere is hardcoded `0.0`). Computed from the same
+    `/dashboard/trend/` series already driving the chart — anchored on the
+    first and last *non-zero* day rather than strict first/last index, so
+    a range that happens to start or end on a zero-sales day doesn't
+    divide by zero or hide the badge for no reason. Labeled "vs start of
+    period" (not "vs prev") to distinguish it from the 4 other tiles'
+    genuine (if currently zeroed) backend trend concept.
+  - Top-10 products table gained a **COGS** column between Revenue and
+    Gross profit (data already existed server-side since Sprint 3 Batch 4
+    — this was a pure display gap).
+
+**Explicitly descoped, with reason (not silently dropped):**
+- **Warehouse / Supplier columns** on the cost-movements table —
+  `InventoryCostMovement` tracks neither dimension (D-09 keeps cost
+  tenant-wide; supplier would need an extra join per row this drawer
+  doesn't perform). Flagged to the owner rather than fabricated.
+- **Drill-down from a Stock Adjustment row** — purchase-invoice rows link
+  out correctly; adjustment rows have no dedicated page to link to (stock
+  adjustments are posted via an inline modal, not a routed document), so
+  they stay plain text, same as before this batch.
+- **Real "vs previous period" trend badges on the 4 non-costing KPI
+  tiles** (Revenue, Transactions, Avg. basket, Items sold) — no matching
+  daily series exists for these (the trend endpoint only carries
+  net_revenue/cogs/gross_profit/gross_margin_pct), and fabricating one
+  from a different tax basis would misrepresent the number. Left as the
+  backend's own (currently zeroed) `*_trend` keys.
+
+**Tests:** `manage.py test` — 667/667 passed (unchanged from the Sprint 4
+close-out baseline — this batch added a read-only serializer field and
+frontend-only changes, no new backend behavior to test). `manage.py check`
+/ `makemigrations --check --dry-run` clean — zero migrations.
+
+**Verification:** `npm run build` clean. Full real-browser click-through
+via Playwright against the live local stack: product-summary header
+renders correct SKU/avg cost/stock/last-update; all 6 quick-range chips
+and Custom exercised; Date-column sort toggled; page-size changed to 10;
+purchase-invoice Source links confirmed present and navigating to the
+correct `/purchases/:id`; area-chart trend badge rendered correctly for
+both a >2-day range (real percentage) and a single-day range (no badge,
+correctly suppressed); Dashboard Gross profit/Gross margin trend badges
+verified against a real multi-day range (−71.4% / +44.5%); empty state's
+"Create purchase" button verified for a product with zero cost movements.
+
+**Not touched:** any GL/`FinancialAccountMovement` code, D-09 (no
+branch/warehouse dimension added anywhere to `InventoryCost`/
+`InventoryCostMovement`), any new database migration, Recipe/BOM.
+
+---
+
 *(Later sprints get their own sections here after their pre-sprint audits.)*

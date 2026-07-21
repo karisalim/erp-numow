@@ -452,13 +452,15 @@ class InventoryCostMovementSerializer(serializers.ModelSerializer):
     the costing service itself documents.
     """
 
+    actor_user_username = serializers.CharField(source='actor_user.username', read_only=True, default='')
+
     class Meta:
         model  = InventoryCostMovement
         fields = [
             'id', 'product', 'quantity_before', 'quantity_received',
             'unit_cost_received', 'avg_cost_before', 'avg_cost_after',
             'source_document_type', 'source_document_id', 'actor_user',
-            'note', 'occurred_at',
+            'actor_user_username', 'note', 'occurred_at',
         ]
         read_only_fields = fields
 

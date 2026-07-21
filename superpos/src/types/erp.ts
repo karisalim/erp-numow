@@ -575,6 +575,7 @@ export interface InventoryCostMovement {
   source_document_type: string;
   source_document_id: number | null;
   actor_user: number | null;
+  actor_user_username: string;
   note: string;
   occurred_at: string;
 }

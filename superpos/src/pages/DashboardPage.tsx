@@ -122,6 +122,28 @@ export const DashboardPage: React.FC = () => {
   // owner's confirmed choice, not a new /products/:id route).
   const [costHistoryProduct, setCostHistoryProduct] = useState<{ id: number; name: string } | null>(null);
 
+  // Batch 10 — client-computed trend badges for the two costing tiles, since
+  // the backend has no real period-over-period trend math for them (every
+  // *_trend key it does send is hardcoded 0.0). Computed as a plain
+  // first-vs-last comparison across the currently loaded trend series (same
+  // window as the KPI tiles/chart) — not a comparison against a genuinely
+  // separate prior period, so it's labeled "vs start of period" rather than
+  // "vs prev" to stay honest about what it actually measures.
+  const seriesTrendPct = (key: 'gross_profit' | 'gross_margin_pct'): number | undefined => {
+    if (trendDays.length < 2) return undefined;
+    // Anchor on the first and last *non-zero* days rather than strictly
+    // index 0/-1 — a real date range routinely starts or ends on a
+    // zero-sales day, which would otherwise divide by zero or hide the
+    // badge for no real reason.
+    const nonZero = trendDays.filter((d) => d[key] !== 0);
+    if (nonZero.length < 2) return undefined;
+    const first = nonZero[0][key];
+    const last = nonZero[nonZero.length - 1][key];
+    return ((last - first) / Math.abs(first)) * 100;
+  };
+  const grossProfitTrend = seriesTrendPct('gross_profit');
+  const grossMarginTrend = seriesTrendPct('gross_margin_pct');
+
   const kpis = data?.kpis;
   const paymentMethods = useMemo<DashboardPaymentMethodSummary[]>(() => {
     if (!data?.payment_methods) return [];
@@ -139,13 +161,13 @@ export const DashboardPage: React.FC = () => {
   const subtitle = `${fmtRangeLabel(startDate, endDate)}${subtitleBranch ? ` · ${subtitleBranch}` : ''}`;
 
   /* ─── KPI card definitions, fed by live data ─────────────────────────── */
-  // `trend` is deliberately omitted (not zero) on the two costing tiles —
-  // the backend hardcodes every *_trend key to 0.0 today (no real trend
-  // math exists yet for ANY kpi), and it doesn't even send one for
-  // gross_profit/gross_margin_pct at all. Rendering a "0% vs prev" badge
-  // there would assert data that doesn't exist; omitting the badge is the
-  // honest choice until real trend computation lands.
-  const statCards: Array<{ label: string; val: string; trend?: number; color: string; icon: string }> = [
+  // The 4 backend-sourced tiles below use the backend's own *_trend keys,
+  // which are hardcoded 0.0 today (no real trend math exists yet) — a "0%
+  // vs prev" badge is honest there (it says "no change data", not "flat").
+  // Gross profit / Gross margin instead use `seriesTrendPct` above — a
+  // client-computed first-vs-last read of the same trend series driving the
+  // chart, labeled "vs start of period" to stay accurate about its basis.
+  const statCards: Array<{ label: string; val: string; trend?: number; trendSuffix?: string; color: string; icon: string }> = [
     {
       label: 'Revenue',
       val:   money(kpis?.revenue ?? 0),
@@ -177,12 +199,16 @@ export const DashboardPage: React.FC = () => {
     {
       label: 'Gross profit',
       val:   money(kpis?.gross_profit ?? 0),
+      trend: grossProfitTrend,
+      trendSuffix: 'vs start of period',
       color: '#8B5CF6',
       icon:  'chart',
     },
     {
       label: 'Gross margin',
       val:   `${(kpis?.gross_margin_pct ?? 0).toFixed(1)}%`,
+      trend: grossMarginTrend,
+      trendSuffix: 'vs start of period',
       color: '#EC4899',
       icon:  'tag',
     },
@@ -258,7 +284,7 @@ export const DashboardPage: React.FC = () => {
                   {s.trend !== undefined && (
                     <div className={`text-[12.5px] font-semibold mt-1 flex items-center gap-1 ${s.trend >= 0 ? 'text-success-700' : 'text-danger-600'}`}>
                       <Icon name={s.trend >= 0 ? 'arrowUp' : 'arrowDn'} size={12} />
-                      {s.trend === 0 ? '—' : `${s.trend > 0 ? '+' : ''}${s.trend}%`} vs prev
+                      {s.trend === 0 ? '—' : `${s.trend > 0 ? '+' : ''}${s.trend.toFixed(1)}%`} {s.trendSuffix ?? 'vs prev'}
                     </div>
                   )}
                 </div>
@@ -297,6 +323,7 @@ export const DashboardPage: React.FC = () => {
                   <th className="text-start font-semibold">Product</th>
                   <th className="text-end font-semibold">Units</th>
                   <th className="text-end font-semibold">Revenue</th>
+                  <th className="text-end font-semibold">COGS</th>
                   <th className="text-end font-semibold">Gross profit</th>
                   <th className="px-5 text-end font-semibold">Margin %</th>
                 </tr>
@@ -304,7 +331,7 @@ export const DashboardPage: React.FC = () => {
               <tbody>
                 {loading ? (
                   <tr>
-                    <td colSpan={6} className="py-10 text-center text-neutral-500">
+                    <td colSpan={7} className="py-10 text-center text-neutral-500">
                       <span className="inline-flex items-center gap-2">
                         <span className="w-4 h-4 border-2 border-neutral-300 border-t-brand-500 rounded-full spin" />
                         Loading…
@@ -313,7 +340,7 @@ export const DashboardPage: React.FC = () => {
                   </tr>
                 ) : !data || data.top_products.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="py-10 text-center text-neutral-500">No sales in this range.</td>
+                    <td colSpan={7} className="py-10 text-center text-neutral-500">No sales in this range.</td>
                   </tr>
                 ) : (
                   data.top_products.map((p, i) => (
@@ -329,6 +356,7 @@ export const DashboardPage: React.FC = () => {
                       <td className="py-2.5 font-medium">{p.name}</td>
                       <td className="text-end font-mono tabular-nums">{fmtDecimal(p.units_sold)}</td>
                       <td className="text-end font-mono tabular-nums">{money(p.revenue)}</td>
+                      <td className="text-end font-mono tabular-nums text-neutral-500">{money(p.cogs)}</td>
                       <td className="text-end font-mono tabular-nums">{money(p.gross_profit)}</td>
                       <td className="px-5 py-2.5 text-end font-mono tabular-nums">{p.gross_margin_pct.toFixed(1)}%</td>
                     </tr>
