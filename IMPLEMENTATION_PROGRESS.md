@@ -1827,4 +1827,102 @@ existing screen's prior behavior for non-costing data changed.
 
 ---
 
+### Sprint 4 — Advanced Reporting & Analytics
+
+Requested by the business owner as 5 candidate features (charts for
+Margin/COGS, branch/warehouse filtering, Cost History export to
+Excel/PDF, average-cost-over-time comparison, deeper Dashboard
+drill-down), preceded by an explicit full-analysis-before-implementation
+request. Three parallel research passes (backend data model, frontend
+patterns, governance docs) found none of the 5 features gated by any open
+decision — **no Phase 0 governance closure was needed this sprint**,
+unlike Sprint 2/3. The one real constraint is **D-09** (moving-average
+cost is tenant-wide for MVP, upgrade trigger = WarehouseTransfer
+maturity, not yet built) — respected throughout by keeping the branch
+filter scoped to *sales/margin reporting* only, never to cost data
+itself. Three scope decisions were confirmed with the owner before
+coding: export formats = CSV + real Excel (.xlsx) + PDF (all three);
+Dashboard drill-down reuses the existing `ProductCostHistoryDrawer`
+in-place (no new `/products/:id` route); branch filter = branch-only, on
+Dashboard/sales reporting only (no warehouse filter, no cost-side
+filter). Full plan: `/root/.claude/plans/snuggly-sparking-noodle.md`
+(Sprint 4 section).
+
+#### Batch 1 + 2 — Dashboard trend endpoint, branch filter, top-products product-id fix
+
+**Scope:** backend-only, additive. Batch 1 ships a new grouped-by-day
+endpoint (the raw series the future Margin/COGS chart needs). Batch 2
+adds optional branch scoping to the dashboard reporting surface and fixes
+a real gap found during research: `top_products` grouped by the free-text
+`product_name` snapshot only, with no product id at all — meaning
+nothing could be drilled into from a Top-10 row.
+
+**Files changed:**
+- `superpos_backend/pos/views.py`:
+  - New `dashboard_trend` view (`GET /api/dashboard/trend/`,
+    `IsManagerOrAbove`) — same `start_date`/`end_date` window semantics as
+    `dashboard_summary`, but grouped by `TruncDate('created_at')` /
+    `TruncDate('sale__created_at')` into one row per calendar day:
+    `net_revenue`, `cogs`, `gross_profit`, `gross_margin_pct`. Daily
+    granularity only this sprint — no weekly/monthly downsampling
+    (deliberate, not a gap; a year range is 365 points, fine for a line
+    chart).
+  - `dashboard_summary` and `dashboard_trend` both accept an optional
+    `?branch_id=` — tenant-scoped `get_object_or_404(Branch, ...)`
+    validation, then filters the base `Sale` queryset by
+    `branch_id=branch_id`. Cost/COGS math needed zero changes:
+    `SaleItem.unit_cost` is already a per-line snapshot independent of
+    which branch sold it, so filtering `Sale` is sufficient.
+  - `dashboard_summary`'s `top_products` block and the standalone
+    `dashboard_top_products` view both now `.values('product',
+    'product_name')` instead of `.values('product_name')` alone, and
+    return an `id` field per row (the real product pk). Since
+    `SaleItem.product` is `on_delete=SET_NULL`, rows with a since-deleted
+    product are excluded via `.exclude(product__isnull=True)` — a ranking
+    entry with nothing to drill into is simply omitted rather than
+    surfaced with a dead link.
+- `superpos_backend/pos/urls.py` — one new line:
+  `path('dashboard/trend/', views.dashboard_trend, name='dashboard-trend')`.
+- `superpos_backend/pos/test_reporting.py` (new file, matching this
+  repo's per-feature test-file convention) — 13 tests across
+  `DashboardTrendTests`, `DashboardBranchFilterTests`,
+  `TopProductsProductIdTests`: per-day series correctness across 3 days
+  including a zero-sales day (must appear as a zero row, not a gap),
+  voided-sale exclusion, Cashier → 403, invalid date → 400; branch filter
+  narrows `dashboard_summary`/`dashboard_trend` correctly, no-`branch_id`
+  regression (unfiltered exactly as before), invalid/unknown/cross-tenant
+  `branch_id` → 400/404/404; `top_products` now carries the real product
+  id on both endpoints, and a since-deleted product's line is excluded
+  without crashing.
+
+**Migrations:** none — pure view/URL additions, confirmed via
+`makemigrations --check --dry-run` (`No changes detected`).
+
+**Tests:** 656 passed (643 baseline + 13 new), 0 failures.
+`manage.py check` clean.
+
+**Architectural decisions:**
+1. No governance gate touched — D-09 stays exactly as ratified (cost
+   itself never gains a branch dimension); the branch filter only narrows
+   which `Sale` rows are aggregated, matching D-09's own consultation note
+   that "branch profitability must still be reported separately."
+2. Daily-only granularity for the trend endpoint, and no aggregation
+   table — computed live from `Sale`/`SaleItem` per request, same as
+   every other dashboard figure. Explicitly deferred, not missed: no user
+   has asked for weekly/monthly rollups yet.
+3. Excluding (not nulling) deleted-product rows from `top_products` was
+   chosen over showing `id: null` — a ranking entry a user can't click
+   into is worse than one less row.
+
+**Not touched:** any model/migration, `InventoryCost`/
+`InventoryCostMovement` (no branch/warehouse field added to either — a
+deliberate D-09 compliance check), frontend.
+
+**Next:** Batch 3 (cost-movement date-range filter) + Batch 4 (Cost
+History export to CSV/Excel/PDF), then Batches 5-8 (frontend: chart,
+branch selector, drawer enhancements, drill-down), then Batch 9
+(regression checkpoint).
+
+---
+
 *(Later sprints get their own sections here after their pre-sprint audits.)*

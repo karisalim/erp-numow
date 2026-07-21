@@ -99,6 +99,7 @@ urlpatterns = [
 
     # Dashboard
     path('dashboard/summary/',      views.dashboard_summary,      name='dashboard-summary'),
+    path('dashboard/trend/',        views.dashboard_trend,        name='dashboard-trend'),
     path('dashboard/top-products/', views.dashboard_top_products, name='dashboard-top-products'),
     path('dashboard/low-stock/',    views.dashboard_low_stock,    name='dashboard-low-stock'),
     path('dashboard/daily-stats/',  views.dashboard_daily_stats,  name='dashboard-daily-stats'),

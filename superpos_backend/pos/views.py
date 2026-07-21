@@ -5,6 +5,7 @@ from decimal import Decimal, InvalidOperation
 
 from django.db import transaction
 from django.db.models import Avg, Count, DecimalField, ExpressionWrapper, F, Sum
+from django.db.models.functions import TruncDate
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -1251,6 +1252,19 @@ def dashboard_summary(request):
         completed = completed.filter(tenant=tenant)
         products  = products.filter(tenant=tenant)
 
+    # Sprint 4 Batch 2: optional branch scoping. Cost/COGS figures need no
+    # special handling — SaleItem.unit_cost is a per-line snapshot already
+    # independent of which branch sold it (D-09 keeps InventoryCost itself
+    # tenant-wide), so filtering the base Sale queryset by branch is enough.
+    branch_id = request.query_params.get('branch_id')
+    if branch_id:
+        try:
+            branch_id = int(branch_id)
+        except (TypeError, ValueError):
+            return Response({'detail': 'Invalid branch_id: expected an integer.'}, status=status.HTTP_400_BAD_REQUEST)
+        get_object_or_404(Branch, pk=branch_id, tenant=tenant) if tenant else get_object_or_404(Branch, pk=branch_id)
+        completed = completed.filter(branch_id=branch_id)
+
     window = completed.filter(created_at__date__range=(start, end))
 
     # ── Window KPIs ──────────────────────────────────────────────────────────
@@ -1322,10 +1336,16 @@ def dashboard_summary(request):
     }
 
     # ── Top products (by revenue) within the window ──────────────────────────
+    # Sprint 4 Batch 2: group by `product` id (not just the free-text
+    # `product_name` snapshot) so the frontend can drill down to a real
+    # product. SaleItem.product is SET_NULL — a since-deleted product has no
+    # page to link to anyway, so it's excluded here rather than surfaced
+    # with a dead link.
     top_products = []
     for row in (
         window_items
-        .values('product_name')
+        .exclude(product__isnull=True)
+        .values('product', 'product_name')
         .annotate(units_sold=Sum('qty'), revenue=Sum('line_total'), cogs=_cogs_sum())
         .order_by('-revenue')[:10]
     ):
@@ -1333,6 +1353,7 @@ def dashboard_summary(request):
         row_cogs    = costing.quantize_money(row['cogs'] or 0)
         row_profit  = costing.quantize_money(row_revenue - row_cogs)
         top_products.append({
+            'id':                row['product'],
             'name':              row['product_name'],
             'units_sold':        float(row['units_sold'] or 0),
             'revenue':           float(row_revenue),
@@ -1404,6 +1425,110 @@ def dashboard_summary(request):
 
 @api_view(['GET'])
 @permission_classes([IsManagerOrAbove])
+def dashboard_trend(request):
+    """
+    GET /api/dashboard/trend/?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD&branch_id=
+
+    Sprint 4 Batch 1: one row per calendar day across the window, for the
+    Margin/COGS chart. Same window/branch semantics as `dashboard_summary`
+    (required date range defaulting to today; optional tenant-scoped
+    `branch_id`) but grouped by day instead of collapsed to one aggregate.
+    Daily granularity only — no weekly/monthly downsampling this sprint; a
+    year-long range is 365 points, acceptable for a line chart.
+    """
+    import datetime
+
+    tenant = getattr(request.user, 'tenant', None)
+    today  = timezone.localdate()
+
+    def _parse(name, value, fallback):
+        if not value:
+            return fallback
+        try:
+            return datetime.date.fromisoformat(value)
+        except ValueError:
+            raise ValueError(f'Invalid {name}: expected YYYY-MM-DD.')
+
+    try:
+        start = _parse('start_date', request.query_params.get('start_date'), today)
+        end   = _parse('end_date',   request.query_params.get('end_date'),   today)
+    except ValueError as exc:
+        return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    if start > end:
+        start, end = end, start
+
+    completed = Sale.objects.filter(status=Sale.Status.COMPLETED)
+    if tenant:
+        completed = completed.filter(tenant=tenant)
+
+    branch_id = request.query_params.get('branch_id')
+    if branch_id:
+        try:
+            branch_id = int(branch_id)
+        except (TypeError, ValueError):
+            return Response({'detail': 'Invalid branch_id: expected an integer.'}, status=status.HTTP_400_BAD_REQUEST)
+        get_object_or_404(Branch, pk=branch_id, tenant=tenant) if tenant else get_object_or_404(Branch, pk=branch_id)
+        completed = completed.filter(branch_id=branch_id)
+
+    window = completed.filter(created_at__date__range=(start, end))
+
+    # Per-day revenue/tax, keyed by date.
+    by_day_sale = {
+        row['day']: row
+        for row in (
+            window
+            .annotate(day=TruncDate('created_at'))
+            .values('day')
+            .annotate(revenue=Sum('total'), tax_total=Sum('tax_amount'))
+        )
+    }
+    # Per-day COGS, keyed by date — a separate query since it groups
+    # SaleItem (via its sale FK), not Sale itself (same two-query shape
+    # `dashboard_summary` already uses for its single-aggregate case).
+    by_day_cogs = {
+        row['day']: row['cogs'] or 0
+        for row in (
+            SaleItem.objects.filter(sale__in=window)
+            .annotate(day=TruncDate('sale__created_at'))
+            .values('day')
+            .annotate(cogs=Sum(ExpressionWrapper(
+                F('unit_cost') * F('qty'), output_field=DecimalField(max_digits=16, decimal_places=5),
+            )))
+        )
+    }
+
+    days = []
+    cur = start
+    one_day = datetime.timedelta(days=1)
+    while cur <= end:
+        row = by_day_sale.get(cur)
+        net_revenue_decimal = costing.quantize_money(
+            (row['revenue'] if row else Decimal('0')) - (row['tax_total'] if row else Decimal('0')),
+        )
+        cogs_decimal = costing.quantize_money(by_day_cogs.get(cur, 0))
+        gross_profit_decimal = costing.quantize_money(net_revenue_decimal - cogs_decimal)
+        gross_margin_pct = (
+            round(float(gross_profit_decimal / net_revenue_decimal) * 100, 1)
+            if net_revenue_decimal > 0 else 0.0
+        )
+        days.append({
+            'date':              cur.isoformat(),
+            'net_revenue':       float(net_revenue_decimal),
+            'cogs':              float(cogs_decimal),
+            'gross_profit':      float(gross_profit_decimal),
+            'gross_margin_pct':  gross_margin_pct,
+        })
+        cur += one_day
+
+    return Response({
+        'range': {'start_date': start.isoformat(), 'end_date': end.isoformat()},
+        'days':  days,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsManagerOrAbove])
 def dashboard_top_products(request):
     tenant = getattr(request.user, 'tenant', None)
     today  = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -1415,12 +1540,17 @@ def dashboard_top_products(request):
     if tenant:
         qs = qs.filter(sale__tenant=tenant)
 
+    # Sprint 4 Batch 2: same product-id fix as dashboard_summary's
+    # top_products block — exclude SET_NULL'd deleted products rather than
+    # surface a row with nothing to drill into.
     top = list(
-        qs.values('product_name')
+        qs.exclude(product__isnull=True)
+        .values('product', 'product_name')
         .annotate(qty_sold=Sum('qty'), revenue=Sum('line_total'))
         .order_by('-qty_sold')[:10]
     )
     for item in top:
+        item['id']       = item.pop('product')
         item['qty_sold'] = float(item['qty_sold'])
         item['revenue']  = float(item['revenue'])
 
