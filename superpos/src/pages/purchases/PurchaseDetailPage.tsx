@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Header } from '../../components/layout/Header';
 import { Button } from '../../components/ui/Button';
@@ -7,10 +7,11 @@ import { Card, CardHeader, CardBody } from '../../components/ui/Card';
 import { LoadingState, QueryErrorState, AlertBanner } from '../../components/ui/states';
 import { DocumentStatusHeader } from '../../components/erp/DocumentStatusHeader';
 import { MovementEffectsCard, type MovementEffect } from '../../components/erp/MovementEffectsCard';
-import { purchasesApi } from '../../api/erp';
+import { purchasesApi, inventoryCostApi } from '../../api/erp';
 import { useQuery } from '../../hooks/useQuery';
 import { useMoney } from '../../utils/money';
 import { fmtDecimal } from '../../utils/format';
+import type { InventoryCostMovement } from '../../types/erp';
 
 /* ─────────────────────────────────────────────────────────────────────────────
  * Purchase invoice detail. Posted invoices are READ-ONLY by contract —
@@ -25,15 +26,68 @@ export const PurchaseDetailPage: React.FC = () => {
   const q = useQuery(() => purchasesApi.get(Number(id)), [id]);
   const inv = q.data;
 
+  // Purchase invoice lines never carry before/after avg cost themselves
+  // (that's an InventoryCostMovement concern, not a PurchaseInvoiceLine
+  // field) — look it up separately per distinct stock-item product on the
+  // invoice. This is a targeted, page-1-only lookup (not a full browse —
+  // see ProductCostHistoryDrawer for that), so a very old/buried movement
+  // for a high-volume product could in principle not surface here; the
+  // generic sentence below is the graceful fallback for that case.
+  const productIds = useMemo(() => {
+    if (!inv) return [];
+    const ids = new Set<number>();
+    inv.lines.forEach((l) => { if (l.line_type === 'stock_item' && l.product) ids.add(l.product); });
+    return Array.from(ids);
+  }, [inv]);
+
+  const movementsQ = useQuery(
+    () => productIds.length === 0
+      ? Promise.resolve<InventoryCostMovement[]>([])
+      : Promise.all(productIds.map((pid) => inventoryCostApi.listMovements(pid).then((p) => p.results))).then((lists) => lists.flat()),
+    [inv?.id],
+  );
+
+  const productNameById = useMemo(() => {
+    const map = new Map<number, string>();
+    inv?.lines.forEach((l) => { if (l.product) map.set(l.product, l.product_name); });
+    return map;
+  }, [inv]);
+
+  const costMatches = useMemo(() => {
+    if (!inv || !movementsQ.data) return [];
+    const matches = movementsQ.data.filter(
+      (m) => m.source_document_type === 'purchase_invoice' && m.source_document_id === inv.id,
+    );
+    const byProduct = new Map<number, InventoryCostMovement>();
+    matches.forEach((m) => { if (!byProduct.has(m.product)) byProduct.set(m.product, m); });
+    return Array.from(byProduct.values());
+  }, [inv, movementsQ.data]);
+
   const effects: MovementEffect[] = [];
   if (inv && inv.posting_status === 'posted') {
     const stockLines = inv.lines.filter((l) => l.line_type === 'stock_item');
     if (stockLines.length > 0) {
-      effects.push({
-        badge: 'Stock',
-        badgeKind: 'brand',
-        text: <>PURCHASE_IN for {stockLines.length} line(s) — quantities received and moving-average cost updated.</>,
-      });
+      if (costMatches.length > 0) {
+        costMatches.forEach((m) => {
+          const name = productNameById.get(m.product) ?? `product #${m.product}`;
+          effects.push({
+            badge: 'Stock',
+            badgeKind: 'brand',
+            text: (
+              <>
+                AVCO cost for <b>{name}</b> moved {money(m.avg_cost_before)} → {money(m.avg_cost_after)}
+                {m.quantity_received != null && <> (received {fmtDecimal(m.quantity_received)})</>}.
+              </>
+            ),
+          });
+        });
+      } else {
+        effects.push({
+          badge: 'Stock',
+          badgeKind: 'brand',
+          text: <>PURCHASE_IN for {stockLines.length} line(s) — quantities received and moving-average cost updated.</>,
+        });
+      }
     }
     if (Number(inv.paid_amount) > 0) {
       effects.push({

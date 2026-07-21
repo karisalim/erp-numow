@@ -15,6 +15,7 @@ import { ProductActionsMenu, type RowAction } from '../components/products/Produ
 import { StockMovementsModal } from '../components/products/StockMovementsModal';
 import { ReceiveStockModal } from '../components/products/ReceiveStockModal';
 import { ProductUnitsDrawer } from './products/ProductUnitsDrawer';
+import { ProductCostHistoryDrawer } from '../components/products/ProductCostHistoryDrawer';
 import type { Product } from '../types';
 import { productVisual } from '../utils/categoryVisual';
 
@@ -74,6 +75,7 @@ export const ProductsPage: React.FC = () => {
   const [historyProduct, setHistoryProduct] = useState<Product | null>(null);
   const [receiveProduct, setReceiveProduct] = useState<Product | null>(null);
   const [unitsProduct, setUnitsProduct] = useState<Product | null>(null);
+  const [costHistoryProduct, setCostHistoryProduct] = useState<Product | null>(null);
 
   const refetch = () => setRefreshKey((k) => k + 1);
 
@@ -157,6 +159,7 @@ export const ProductsPage: React.FC = () => {
     if (action === 'view')    setFormModal({ mode: 'view', product: p });
     if (action === 'edit')    setFormModal({ mode: 'edit', product: p });
     if (action === 'history') setHistoryProduct(p);
+    if (action === 'costHistory') setCostHistoryProduct(p);
     if (action === 'receive') setReceiveProduct(p);
     if (action === 'units')   setUnitsProduct(p);
     if (action === 'delete')  setConfirmDelete(p);
@@ -435,6 +438,14 @@ export const ProductsPage: React.FC = () => {
         <ProductUnitsDrawer
           product={unitsProduct}
           onClose={() => setUnitsProduct(null)}
+        />
+      )}
+
+      {/* Cost history */}
+      {costHistoryProduct && (
+        <ProductCostHistoryDrawer
+          product={costHistoryProduct}
+          onClose={() => setCostHistoryProduct(null)}
         />
       )}
 

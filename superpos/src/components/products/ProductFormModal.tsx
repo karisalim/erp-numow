@@ -7,6 +7,7 @@ import { Icon } from '../ui/Icon';
 import { Badge } from '../ui/Badge';
 import { categoriesApi, asResults } from '../../api/erp';
 import { flattenTree } from '../../utils/tree';
+import { ProductCostHistoryDrawer } from './ProductCostHistoryDrawer';
 import type { Product, ProductUnit } from '../../types';
 import type { CategoryTreeNode, ProductTypeValue } from '../../types/erp';
 
@@ -226,6 +227,7 @@ export const ProductFormModal: React.FC<Props> = ({
 
   const [salesCategories, setSalesCategories] = useState<CategoryTreeNode[]>([]);
   const [inventoryCategories, setInventoryCategories] = useState<CategoryTreeNode[]>([]);
+  const [showCostHistory, setShowCostHistory] = useState(false);
 
   // Keep state in sync if the parent swaps the product mid-flight (e.g. View → Edit).
   useEffect(() => {
@@ -299,6 +301,7 @@ export const ProductFormModal: React.FC<Props> = ({
                         'New product';
 
   return (
+    <>
     <Modal title={title} onClose={onClose} maxWidth="max-w-[640px]">
       <form onSubmit={submit} className="flex flex-col">
         {/* Tab switcher — hidden in view mode */}
@@ -354,7 +357,24 @@ export const ProductFormModal: React.FC<Props> = ({
             />
           </Field>
 
-          <Field label="Cost" error={fieldErrors.cost}>
+          <Field
+            label="Cost"
+            error={fieldErrors.cost}
+            hint={
+              (isEdit || isView) && initialProduct ? (
+                <>
+                  Calculated automatically (moving-average) from purchases and stock counts.{' '}
+                  <button
+                    type="button"
+                    onClick={() => setShowCostHistory(true)}
+                    className="text-brand-600 hover:underline font-semibold"
+                  >
+                    View cost history
+                  </button>
+                </>
+              ) : undefined
+            }
+          >
             <input
               type="number" step="0.01" min="0"
               value={form.cost} disabled={isView || isEdit || saving}
@@ -575,6 +595,10 @@ export const ProductFormModal: React.FC<Props> = ({
         </div>
       </form>
     </Modal>
+    {showCostHistory && initialProduct && (
+      <ProductCostHistoryDrawer product={initialProduct} onClose={() => setShowCostHistory(false)} />
+    )}
+    </>
   );
 };
 
@@ -594,7 +618,7 @@ const TabButton: React.FC<React.PropsWithChildren<{
 );
 
 const Field: React.FC<React.PropsWithChildren<{
-  label: string; required?: boolean; error?: string; hint?: string; className?: string;
+  label: string; required?: boolean; error?: string; hint?: React.ReactNode; className?: string;
 }>> = ({ label, required, error, hint, className = '', children }) => (
   <label className={`flex flex-col gap-1 text-[12.5px] font-semibold text-neutral-700 ${className}`}>
     <span>

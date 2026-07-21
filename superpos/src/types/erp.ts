@@ -559,3 +559,75 @@ export interface ProductTypeBehavior {
   requires_cost: boolean;
   can_have_recipe: boolean;
 }
+
+/* ── Inventory costing (AVCO audit trail — read-only) ─────────────────────
+ * Mirrors `InventoryCostMovement`/`InventoryCostMovementSerializer` on the
+ * backend exactly: every field is server-computed, nothing here is ever
+ * written from the frontend. */
+export interface InventoryCostMovement {
+  id: number;
+  product: number;
+  quantity_before: string | null;
+  quantity_received: string | null;
+  unit_cost_received: string | null;
+  avg_cost_before: string;
+  avg_cost_after: string;
+  source_document_type: string;
+  source_document_id: number | null;
+  actor_user: number | null;
+  note: string;
+  occurred_at: string;
+}
+
+/* ── Dashboard summary (/api/dashboard/summary/) ──────────────────────────
+ * `*_trend` keys are always present but currently hardcoded to 0.0 by the
+ * backend for every KPI (no real trend math exists yet) — callers should
+ * treat a present-but-zero trend as "no trend data", not "flat". */
+export interface DashboardKPIs {
+  revenue: number;
+  transactions: number;
+  avg_basket: number;
+  items_sold: number;
+  net_revenue: number;
+  cogs: number;
+  gross_profit: number;
+  gross_margin_pct: number;
+  revenue_trend?: number;
+  transactions_trend?: number;
+  avg_basket_trend?: number;
+  items_sold_trend?: number;
+}
+
+export interface DashboardTopProduct {
+  name: string;
+  units_sold: number;
+  revenue: number;
+  cogs: number;
+  gross_profit: number;
+  gross_margin_pct: number;
+}
+
+export interface DashboardPaymentMethodSummary {
+  label: string;
+  count: number;
+  total: number;
+  pct: number;
+}
+
+export interface DashboardLowStockEntry {
+  id: number;
+  name: string;
+  color: string;
+  stock: number;
+  reorder_point: number;
+  unit: string;
+}
+
+export interface DashboardSummaryResponse {
+  range: { start_date: string; end_date: string };
+  kpis: DashboardKPIs;
+  top_products: DashboardTopProduct[];
+  payment_methods: Record<string, DashboardPaymentMethodSummary>;
+  low_stock: DashboardLowStockEntry[];
+  low_stock_count: number;
+}

@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { AxiosError } from 'axios';
-import apiClient from '../api/client';
+import { dashboardApi } from '../api/erp';
 import { useAuthStore } from '../store/authStore';
 import { fmtDecimal } from '../utils/format';
 import type { BadgeKind } from '../types';
+import type { DashboardPaymentMethodSummary, DashboardSummaryResponse } from '../types/erp';
 
 /** Alert-widget specific badge: every row is at or below reorder, so
  *  "In stock" is never appropriate here. */
@@ -18,49 +19,6 @@ import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 import { Badge } from '../components/ui/Badge';
 import { Icon } from '../components/ui/Icon';
-
-/* ─── Types matching /api/dashboard/summary/ ─────────────────────────────── */
-interface KPIs {
-  revenue: number;
-  transactions: number;
-  avg_basket: number;
-  items_sold: number;
-  revenue_trend?: number;
-  transactions_trend?: number;
-  avg_basket_trend?: number;
-  items_sold_trend?: number;
-}
-
-interface TopProduct {
-  name: string;
-  units_sold: number;
-  revenue: number;
-}
-
-interface PaymentMethodSummary {
-  label: string;
-  count: number;
-  total: number;
-  pct: number;
-}
-
-interface LowStockEntry {
-  id: number;
-  name: string;
-  color: string;
-  stock: number;
-  reorder_point: number;
-  unit: string;
-}
-
-interface DashboardResponse {
-  range: { start_date: string; end_date: string };
-  kpis: KPIs;
-  top_products: TopProduct[];
-  payment_methods: Record<string, PaymentMethodSummary>;
-  low_stock: LowStockEntry[];
-  low_stock_count: number;
-}
 
 const PAYMENT_COLORS: Record<string, string> = {
   cash:   '#10B981',
@@ -104,7 +62,7 @@ export const DashboardPage: React.FC = () => {
     if (next && startDate && next < startDate) setStartDate(next);
   };
 
-  const [data,    setData]    = useState<DashboardResponse | null>(null);
+  const [data,    setData]    = useState<DashboardSummaryResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState<string | null>(null);
 
@@ -113,11 +71,9 @@ export const DashboardPage: React.FC = () => {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    apiClient
-      .get<DashboardResponse>('/dashboard/summary/', {
-        params: { start_date: startDate, end_date: endDate },
-      })
-      .then((res) => { if (!cancelled) setData(res.data); })
+    dashboardApi
+      .summary({ start_date: startDate, end_date: endDate })
+      .then((d) => { if (!cancelled) setData(d); })
       .catch((err: unknown) => {
         if (cancelled) return;
         let msg = 'Failed to load dashboard.';
@@ -133,10 +89,10 @@ export const DashboardPage: React.FC = () => {
   }, [startDate, endDate]);
 
   const kpis = data?.kpis;
-  const paymentMethods = useMemo<PaymentMethodSummary[]>(() => {
+  const paymentMethods = useMemo<DashboardPaymentMethodSummary[]>(() => {
     if (!data?.payment_methods) return [];
     return Object.entries(data.payment_methods)
-      .map(([key, v]) => ({ ...v, key } as PaymentMethodSummary & { key: string }))
+      .map(([key, v]) => ({ ...v, key } as DashboardPaymentMethodSummary & { key: string }))
       .filter((m) => m.total > 0 || m.count > 0)
       .sort((a, b) => b.total - a.total);
   }, [data]);
@@ -144,7 +100,13 @@ export const DashboardPage: React.FC = () => {
   const subtitle = `${fmtRangeLabel(startDate, endDate)}${branchName ? ` · ${branchName}` : ''}`;
 
   /* ─── KPI card definitions, fed by live data ─────────────────────────── */
-  const statCards = [
+  // `trend` is deliberately omitted (not zero) on the two costing tiles —
+  // the backend hardcodes every *_trend key to 0.0 today (no real trend
+  // math exists yet for ANY kpi), and it doesn't even send one for
+  // gross_profit/gross_margin_pct at all. Rendering a "0% vs prev" badge
+  // there would assert data that doesn't exist; omitting the badge is the
+  // honest choice until real trend computation lands.
+  const statCards: Array<{ label: string; val: string; trend?: number; color: string; icon: string }> = [
     {
       label: 'Revenue',
       val:   money(kpis?.revenue ?? 0),
@@ -172,6 +134,18 @@ export const DashboardPage: React.FC = () => {
       trend: kpis?.items_sold_trend ?? 0,
       color: '#06B6D4',
       icon:  'box',
+    },
+    {
+      label: 'Gross profit',
+      val:   money(kpis?.gross_profit ?? 0),
+      color: '#8B5CF6',
+      icon:  'chart',
+    },
+    {
+      label: 'Gross margin',
+      val:   `${(kpis?.gross_margin_pct ?? 0).toFixed(1)}%`,
+      color: '#EC4899',
+      icon:  'tag',
     },
   ];
 
@@ -220,7 +194,7 @@ export const DashboardPage: React.FC = () => {
         )}
 
         {/* KPI stats */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
           {statCards.map((s) => (
             <Card key={s.label} className="p-5">
               <div className="flex items-start justify-between gap-3">
@@ -229,10 +203,12 @@ export const DashboardPage: React.FC = () => {
                   <div className="text-[24px] font-bold tabular-nums mt-1.5 font-mono truncate">
                     {loading ? '…' : s.val}
                   </div>
-                  <div className={`text-[12.5px] font-semibold mt-1 flex items-center gap-1 ${s.trend >= 0 ? 'text-success-700' : 'text-danger-600'}`}>
-                    <Icon name={s.trend >= 0 ? 'arrowUp' : 'arrowDn'} size={12} />
-                    {s.trend === 0 ? '—' : `${s.trend > 0 ? '+' : ''}${s.trend}%`} vs prev
-                  </div>
+                  {s.trend !== undefined && (
+                    <div className={`text-[12.5px] font-semibold mt-1 flex items-center gap-1 ${s.trend >= 0 ? 'text-success-700' : 'text-danger-600'}`}>
+                      <Icon name={s.trend >= 0 ? 'arrowUp' : 'arrowDn'} size={12} />
+                      {s.trend === 0 ? '—' : `${s.trend > 0 ? '+' : ''}${s.trend}%`} vs prev
+                    </div>
+                  )}
                 </div>
                 <div className="w-9 h-9 rounded-md grid place-items-center shrink-0" style={{ background: `${s.color}1a`, color: s.color }}>
                   <Icon name={s.icon} size={18} />
@@ -255,13 +231,15 @@ export const DashboardPage: React.FC = () => {
                   <th className="px-5 py-2.5 text-start font-semibold">#</th>
                   <th className="text-start font-semibold">Product</th>
                   <th className="text-end font-semibold">Units</th>
-                  <th className="px-5 text-end font-semibold">Revenue</th>
+                  <th className="text-end font-semibold">Revenue</th>
+                  <th className="text-end font-semibold">Gross profit</th>
+                  <th className="px-5 text-end font-semibold">Margin %</th>
                 </tr>
               </thead>
               <tbody>
                 {loading ? (
                   <tr>
-                    <td colSpan={4} className="py-10 text-center text-neutral-500">
+                    <td colSpan={6} className="py-10 text-center text-neutral-500">
                       <span className="inline-flex items-center gap-2">
                         <span className="w-4 h-4 border-2 border-neutral-300 border-t-brand-500 rounded-full spin" />
                         Loading…
@@ -270,7 +248,7 @@ export const DashboardPage: React.FC = () => {
                   </tr>
                 ) : !data || data.top_products.length === 0 ? (
                   <tr>
-                    <td colSpan={4} className="py-10 text-center text-neutral-500">No sales in this range.</td>
+                    <td colSpan={6} className="py-10 text-center text-neutral-500">No sales in this range.</td>
                   </tr>
                 ) : (
                   data.top_products.map((p, i) => (
@@ -278,7 +256,9 @@ export const DashboardPage: React.FC = () => {
                       <td className="px-5 py-2.5 text-neutral-400 font-mono w-10">{i + 1}</td>
                       <td className="py-2.5 font-medium">{p.name}</td>
                       <td className="text-end font-mono tabular-nums">{fmtDecimal(p.units_sold)}</td>
-                      <td className="px-5 py-2.5 text-end font-mono tabular-nums">{money(p.revenue)}</td>
+                      <td className="text-end font-mono tabular-nums">{money(p.revenue)}</td>
+                      <td className="text-end font-mono tabular-nums">{money(p.gross_profit)}</td>
+                      <td className="px-5 py-2.5 text-end font-mono tabular-nums">{p.gross_margin_pct.toFixed(1)}%</td>
                     </tr>
                   ))
                 )}
@@ -338,7 +318,7 @@ export const DashboardPage: React.FC = () => {
               <div className="py-6 text-center text-neutral-500 text-[13px]">No payments in this range.</div>
             ) : (
               paymentMethods.map((m) => {
-                const key = (m as PaymentMethodSummary & { key: string }).key;
+                const key = (m as DashboardPaymentMethodSummary & { key: string }).key;
                 const color = PAYMENT_COLORS[key] || '#6B7280';
                 return (
                   <div key={key} className="mb-3 last:mb-0">

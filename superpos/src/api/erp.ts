@@ -21,9 +21,11 @@ import type {
   CustomerPayload,
   CustomerReceipt,
   CustomerReceiptPayload,
+  DashboardSummaryResponse,
   FinancialAccount,
   FinancialAccountMovement,
   FinancialAccountPayload,
+  InventoryCostMovement,
   Paginated,
   PartyBalance,
   PaymentMethodPayload,
@@ -183,6 +185,22 @@ export const warehousesApi = {
     apiClient.get<WarehouseStockRow[] | Paginated<WarehouseStockRow>>(`/products/${productId}/warehouse-stocks/`).then(r => r.data),
   branchLinks: (params?: ListParams) =>
     apiClient.get<Paginated<BranchWarehouseLink>>('/inventory/branch-warehouses/', { params }).then(r => r.data),
+};
+
+/* ── Inventory costing (AVCO audit trail, read-only) ─────────────────────── */
+
+export const inventoryCostApi = {
+  listMovements: (productId: number, params?: ListParams) =>
+    apiClient
+      .get<Paginated<InventoryCostMovement>>(`/products/${productId}/cost-movements/`, { params })
+      .then(r => r.data),
+};
+
+/* ── Dashboard ──────────────────────────────────────────────────────────── */
+
+export const dashboardApi = {
+  summary: (params?: ListParams) =>
+    apiClient.get<DashboardSummaryResponse>('/dashboard/summary/', { params }).then(r => r.data),
 };
 
 /* ── Branches (legacy list shape used by Users page) ────────────────────── */

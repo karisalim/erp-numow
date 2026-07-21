@@ -1678,4 +1678,153 @@ fixed by adding the header to `setUp()`'s own POST call.
 
 ---
 
+### Batch 6 — Frontend: cost/margin/COGS visibility (Sprint 3 Costing UI)
+
+**Scope discipline:** 100% frontend, zero backend files touched (verified
+via `git diff --stat` scoped to `superpos_backend/` returning empty).
+Preceded by a full pre-implementation analysis: three parallel research
+passes (frontend current-state audit, backend contract verification,
+governance/conventions audit) plus a design pass, spot-verified against
+the real files before any code was written. Two design questions were put
+to the business owner and resolved before implementation: Top-10 table
+gets 2 new columns (Gross Profit + Margin %, not a 3rd COGS column); the
+Cost History drawer uses full real server-side pagination (not a
+first-page-only cap), matching how SAP B1/Odoo/Dynamics treat cost
+history as a proper audit ledger.
+
+**Files changed:**
+- `superpos/src/types/erp.ts` — new `InventoryCostMovement` interface
+  (mirrors `InventoryCostMovementSerializer` exactly). Moved
+  `DashboardPage.tsx`'s page-local `KPIs`/`TopProduct`/etc. interfaces
+  here as `DashboardKPIs`/`DashboardTopProduct`/`DashboardPaymentMethodSummary`/
+  `DashboardLowStockEntry`/`DashboardSummaryResponse`, extended with
+  `net_revenue, cogs, gross_profit, gross_margin_pct` (KPIs) and
+  `cogs, gross_profit, gross_margin_pct` (top-product rows) — needed so
+  the new typed API wrapper isn't forced to import from a page.
+- `superpos/src/api/erp.ts` — new `inventoryCostApi.listMovements(productId, params?)`
+  → `GET /products/<id>/cost-movements/`; new `dashboardApi.summary(params?)`
+  → `GET /dashboard/summary/`, replacing `DashboardPage.tsx`'s previous
+  inline `apiClient.get(...)` call (pure refactor, same behavior, brings
+  Dashboard in line with every sibling page's typed-wrapper convention).
+- `superpos/src/components/products/ProductCostHistoryDrawer.tsx` (new)
+  — `Drawer` (`max-w-[920px]`, widened from an initial 760px after manual
+  testing showed the 6-column table needed more room) + `DataTable<InventoryCostMovement>`
+  + `useQuery`, real server-side pagination (20/page). Columns: Date,
+  Source (`source_document_type` + `#id`), Qty received, Unit cost
+  received, Avg cost before → after (colored delta — amber when cost
+  rose, green when it fell), Note. Empty state explains cost only moves
+  on purchase receipts or positive stock-count adjustments with a unit
+  cost entered.
+- `superpos/src/components/products/ProductActionsMenu.tsx` +
+  `superpos/src/pages/ProductsPage.tsx` — new `'costHistory'` row action
+  (grouped directly after "Stock movements"), `costHistoryProduct` state,
+  drawer render — mirrors the existing `unitsProduct`/`ProductUnitsDrawer`
+  wiring already in that file.
+- `superpos/src/components/products/ProductFormModal.tsx` — the local
+  `Field` component's `hint` prop widened from `string` to `React.ReactNode`;
+  when the Cost field is disabled (edit/view mode), it now shows an inline
+  hint explaining cost is AVCO-derived plus a "View cost history" button
+  opening the same drawer, closing a real UX gap (the field was
+  previously just silently greyed out with zero explanation). Zero
+  payload/submit-logic change — the P0 hotfix already omits `cost` from
+  edit PATCHes; this batch only adds presentation + one `useState`.
+- `superpos/src/pages/purchases/PurchaseDetailPage.tsx` — after the
+  invoice loads, fetches cost-movements (page 1 only — a targeted lookup,
+  not a browse) for the distinct stock-item product ids on the invoice,
+  filters client-side for `source_document_type === 'purchase_invoice' && source_document_id === invoice.id`.
+  When a match exists, the `MovementEffectsCard`'s previously-hardcoded
+  "quantities received and moving-average cost updated" sentence is
+  replaced with the real per-product `avg_cost_before → avg_cost_after`
+  numbers; when no match (still loading, error, or a genuinely old/buried
+  movement beyond page 1), it falls back to the generic sentence — this
+  falls out naturally from the `useMemo` derivation with no explicit
+  error-handling code needed.
+- `superpos/src/pages/DashboardPage.tsx` — two new KPI tiles added to the
+  existing `statCards` array: **Gross profit** (`#8B5CF6`/`chart` icon)
+  and **Gross margin** (`#EC4899`/`tag` icon). Both deliberately render
+  **no trend badge** — every `*_trend` key the backend sends is hardcoded
+  `0.0` (no real trend math exists for any KPI, old or new), so a fake
+  "0% vs prev" badge would assert data that doesn't exist; `trend` was
+  widened to optional on the stat-card type and the trend row is now
+  conditionally rendered. Top-10 products table gained two columns
+  (Gross profit, Margin %) using the per-row fields the backend already
+  returns; `colSpan` adjusted 4→6 on the loading/empty rows. KPI grid
+  widened from `xl:grid-cols-4` to `xl:grid-cols-3` (2 rows of 3) to
+  accommodate the 4→6 tile count cleanly.
+
+**Why each change was required:** Sprint 3's AVCO engine (Batches 1-5,
+backend-only) had zero frontend consumer anywhere — a full grep across
+`superpos/src/` for every costing term returned zero matches before this
+batch. The Dashboard showed no COGS/margin data despite the backend
+computing it since Batch 4; a purchase invoice's detail page said "cost
+updated" with no numbers despite `InventoryCostMovement` existing since
+Batch 1; nobody could see why a product's cost changed at all. This batch
+closes exactly that visibility gap — surfacing already-built,
+already-tested backend capability, nothing more.
+
+**Tests added:** none (frontend automated tests remain unconfigured
+project-wide — governance rule R-I tracks this as a separate, not-yet-
+started initiative, consistent with every prior frontend batch).
+Verification was `npm run build` (clean `tsc` + `vite build`) plus a real
+end-to-end browser click-through (Playwright + headless Chromium) against
+the actual local stack (Django + Postgres + Vite dev server) logged in as
+the seeded Owner user, exercising real existing data (2 products, 2
+posted purchase invoices, 2 `InventoryCostMovement` rows):
+- Dashboard: 6 tiles render (4 original + Gross profit + Gross margin),
+  the two new tiles show no trend badge, Top-10 table shows the two new
+  columns.
+- Products page → row menu → "Cost history" → drawer opens showing both
+  real cost movements for "Apple 1kg (verified)" with correct
+  before→after values and colored deltas.
+- Products page → row menu → "Edit" → Cost field is disabled/greyed with
+  the new hint text and a working "View cost history" link that opens the
+  same drawer.
+- Purchases → an existing posted invoice (`PUR-2`) → detail page shows
+  "AVCO cost for Apple 1kg (verified) moved EGP 9.50 → EGP 10.43 (received 10)"
+  in place of the old generic sentence.
+- Zero console errors introduced (3 pre-existing 404s unrelated to this
+  batch, confirmed present before these changes too).
+
+**Before/after behavior:** see the click-through results above — every
+change is additive (new tiles, new columns, new drawer, new hint); no
+existing screen's prior behavior for non-costing data changed.
+
+**Architectural decisions made:**
+1. No "adjust cost" button/flow was built — there is categorically no
+   backend mechanism to correct a wrong average cost without also
+   increasing recorded stock (confirmed during the pre-implementation
+   research), so a UI for it would need new backend work first.
+2. `ProductsPage.tsx`'s client-side margin recompute (`(price-cost)/price*100`)
+   was left untouched — mathematically identical to the backend's
+   `Product.margin` now that cost is AVCO-locked (Batch 3), zero benefit
+   to swapping.
+3. No i18n keys were added — every sibling admin/detail page shipped this
+   sprint (`UnitsPage.tsx`, `PriceTiersPage.tsx`, `CategoriesPage.tsx`,
+   `ProductUnitsDrawer.tsx`) is 100% hardcoded English with zero `t()`
+   calls; adding translation for only this one feature would be
+   inconsistent, not more complete.
+4. Cost History drawer placed in `components/products/` (not
+   `pages/products/` alongside `ProductUnitsDrawer.tsx`) so that
+   `ProductFormModal.tsx` — itself a `components/` file — can import it
+   without reaching into `pages/`; matches where `StockMovementsModal.tsx`/
+   `ReceiveStockModal.tsx` already live.
+5. The `PurchaseDetailPage` cost-movement lookup intentionally uses only
+   page 1 of the endpoint's results (a targeted "does this invoice show
+   up" search), while the drawer uses full real pagination (a deliberate
+   full-history browse) — different tools for different jobs, both
+   confirmed with the business owner before implementation.
+
+**Final verification:**
+- `npm run build` (in `superpos/`) — clean, both before and after the
+  drawer-width adjustment discovered during manual testing.
+- `git diff --stat` scoped to `superpos_backend/` — empty, confirming zero
+  backend files changed.
+- Manual end-to-end browser verification (see Tests added above) against
+  the real local stack with real existing data — not a mock, not a dry
+  run.
+- Not touched: `PurchaseCreatePage.tsx` (already correct from 5b-4), any
+  recipe/BOM/GL-adjacent code, any backend file.
+
+---
+
 *(Later sprints get their own sections here after their pre-sprint audits.)*
