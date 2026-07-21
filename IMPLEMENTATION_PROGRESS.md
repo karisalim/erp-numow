@@ -2127,6 +2127,63 @@ filter stays Dashboard-only this sprint, per the owner's confirmed scope).
 **Next:** Batch 9 — regression + documentation checkpoint (full suite +
 build green across the whole sprint, then this section's final closeout).
 
+#### Batch 9 — Regression + documentation checkpoint (Sprint 4 close-out)
+
+**Checklist (mirrors Sprint 2/3's own closing-batch format):**
+- [x] `manage.py check` clean.
+- [x] `manage.py makemigrations --check --dry-run` clean — `No changes
+  detected`. **Zero migrations across the entire sprint**, confirmed by
+  the migrations directory itself still ending at `0028_alter_stockmovement
+  _movement_type.py` (the last Sprint 3 Hotfix Pack migration) —
+  everything in Sprint 4 was new endpoints, filters, dependencies, and
+  frontend UI on top of already-shipped schema.
+- [x] `manage.py test` — **667/667 passed**, 0 failures (baseline 643 +
+  24 new Sprint 4 tests: 13 in Batch 1+2, 4 in Batch 3, 7 in Batch 4).
+- [x] `npm run build` clean for the full accumulated frontend diff
+  (Batches 5-8 combined).
+- [x] Manual, real-browser, end-to-end verification of all 5 features
+  together (not just per-batch) against a live local stack — see the
+  Batch 5-8 entry above for the full walkthrough (chart tooltip values
+  cross-checked, branch filter narrowing, both drill-down paths, all 3
+  export formats downloading real files).
+- [x] Drift check: `InventoryCost`/`InventoryCostMovement` gained no
+  branch/warehouse field anywhere in this sprint — grepped both files,
+  confirmed unchanged since Sprint 3. D-09 stays exactly as ratified.
+
+**Sprint 4 summary — all 5 originally-requested features shipped:**
+
+| # | Feature (as requested) | Delivered as |
+|---|---|---|
+| 1 | Charts/graphs for Margin and COGS | `MarginCogsChart` on the Dashboard (net revenue/COGS bars + margin line), fed by the new `/dashboard/trend/` endpoint |
+| 2 | Filter by Branch or Warehouse | Branch filter on Dashboard reporting (`?branch_id=`), scoped to sales/margin — cost stays tenant-wide per D-09; warehouse filter explicitly descoped by the owner this sprint |
+| 3 | Export Cost History to Excel/PDF | CSV + real `.xlsx` (openpyxl) + PDF (reportlab), all three, from the Cost History drawer |
+| 4 | Compare average cost change over time | `CostTrendChart` inside the Cost History drawer, plus the new date-range filter on the movements endpoint |
+| 5 | Deeper drill-down from Dashboard to related documents | Top-10 products and low-stock rows now open the Cost History drawer; `InventoryCostMovement.source_document_type/id` remains the generic pointer for any future document-level drill-down |
+
+**No governance gate was reopened this entire sprint** — every feature
+read/presented data whose owning decisions (D-07, D-09, D-12, D-13, D-31,
+D-35) were already closed in Sprint 3's Phase 0. This is the first sprint
+in the project's history that needed no Phase 0 of its own.
+
+**New backend dependencies introduced:** `openpyxl>=3.1`, `reportlab>=4.0`
+— both pure-Python wheels, no system-level rendering dependency, confirmed
+via a clean install.
+
+**New frontend dependency introduced:** `recharts` — the project's first
+charting library, used by both `MarginCogsChart` and `CostTrendChart`.
+
+**Branches (all local, not yet pushed as of this checkpoint):**
+`s4/batch-1-dashboard-trend-endpoint` → `s4/batch-3-cost-movement-date-filter`
+→ `s4/batch-4-cost-history-export` → `s4/batch-5-margin-cogs-chart`
+(carries Batches 5-8's combined frontend commit) →
+`s4/batch-9-regression-checkpoint` (this checkpoint).
+
+**Not touched:** any GL/`FinancialAccountMovement` code, Recipe/BOM,
+warehouse-level filtering (descoped by the owner), any new database
+migration.
+
+Sprint 4 is complete.
+
 ---
 
 *(Later sprints get their own sections here after their pre-sprint audits.)*
