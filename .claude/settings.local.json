@@ -15,7 +15,9 @@
       "Bash(python manage.py shell -c \"import sys; print\\(sys.executable\\)\")",
       "Bash(powershell *)",
       "Bash(python *)",
-      "Bash(xxd)"
+      "Bash(xxd)",
+      "Bash(node *)",
+      "PowerShell(npx skills add https://github.com/vercel-labs/agent-skills --skill web-design-guidelines)"
     ]
   }
 }
