@@ -22,6 +22,7 @@ import type {
   CustomerReceipt,
   CustomerReceiptPayload,
   DashboardSummaryResponse,
+  DashboardTrendResponse,
   FinancialAccount,
   FinancialAccountMovement,
   FinancialAccountPayload,
@@ -194,6 +195,15 @@ export const inventoryCostApi = {
     apiClient
       .get<Paginated<InventoryCostMovement>>(`/products/${productId}/cost-movements/`, { params })
       .then(r => r.data),
+  /* Sprint 4 Batch 4 — CSV/Excel/PDF export of the same audit trail. Param
+   * is `export_format`, not `format` — the backend reserves the latter for
+   * DRF's own content negotiation. Returns the raw blob response so the
+   * caller can trigger a download (same pattern as SalesPage's CSV export). */
+  exportMovements: (productId: number, exportFormat: 'csv' | 'xlsx' | 'pdf', params?: ListParams) =>
+    apiClient.get(`/products/${productId}/cost-movements/export/`, {
+      params: { ...params, export_format: exportFormat },
+      responseType: 'blob',
+    }),
 };
 
 /* ── Dashboard ──────────────────────────────────────────────────────────── */
@@ -201,6 +211,10 @@ export const inventoryCostApi = {
 export const dashboardApi = {
   summary: (params?: ListParams) =>
     apiClient.get<DashboardSummaryResponse>('/dashboard/summary/', { params }).then(r => r.data),
+  /* Sprint 4 Batch 1 — one row per day (net_revenue/cogs/gross_profit/
+   * gross_margin_pct), for the Margin/COGS trend chart. */
+  trend: (params?: ListParams) =>
+    apiClient.get<DashboardTrendResponse>('/dashboard/trend/', { params }).then(r => r.data),
 };
 
 /* ── Branches (legacy list shape used by Users page) ────────────────────── */

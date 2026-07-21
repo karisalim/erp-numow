@@ -1,10 +1,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { AxiosError } from 'axios';
-import { dashboardApi } from '../api/erp';
+import { dashboardApi, branchesApi, asResults } from '../api/erp';
 import { useAuthStore } from '../store/authStore';
 import { fmtDecimal } from '../utils/format';
 import type { BadgeKind } from '../types';
-import type { DashboardPaymentMethodSummary, DashboardSummaryResponse } from '../types/erp';
+import type {
+  BranchLite, DashboardPaymentMethodSummary, DashboardSummaryResponse, DashboardTrendDay,
+} from '../types/erp';
+import { MarginCogsChart } from '../components/dashboard/MarginCogsChart';
+import { ProductCostHistoryDrawer } from '../components/products/ProductCostHistoryDrawer';
 
 /** Alert-widget specific badge: every row is at or below reorder, so
  *  "In stock" is never appropriate here. */
@@ -66,13 +70,23 @@ export const DashboardPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState<string | null>(null);
 
-  /* ─── Fetch summary on date change ────────────────────────────────────── */
+  /* ─── Branch filter (Sprint 4 Batch 6) ──────────────────────────────────
+   * Scoped to Dashboard/sales reporting only — cost data (InventoryCost)
+   * stays tenant-wide per D-09, so this never touches the Cost History
+   * drawer/export. '' = "All branches" (unfiltered, the default). */
+  const [branchId, setBranchId] = useState<number | ''>('');
+  const [branches, setBranches] = useState<BranchLite[]>([]);
+  useEffect(() => {
+    branchesApi.list().then(asResults).then(setBranches).catch(() => setBranches([]));
+  }, []);
+
+  /* ─── Fetch summary on date/branch change ───────────────────────────── */
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
     dashboardApi
-      .summary({ start_date: startDate, end_date: endDate })
+      .summary({ start_date: startDate, end_date: endDate, branch_id: branchId || undefined })
       .then((d) => { if (!cancelled) setData(d); })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -86,7 +100,27 @@ export const DashboardPage: React.FC = () => {
       })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [startDate, endDate]);
+  }, [startDate, endDate, branchId]);
+
+  /* ─── Fetch trend series for the Margin/COGS chart (Sprint 4 Batch 5) ──── */
+  const [trendDays,    setTrendDays]    = useState<DashboardTrendDay[]>([]);
+  const [trendLoading, setTrendLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setTrendLoading(true);
+    dashboardApi
+      .trend({ start_date: startDate, end_date: endDate, branch_id: branchId || undefined })
+      .then((d) => { if (!cancelled) setTrendDays(d.days); })
+      .catch(() => { if (!cancelled) setTrendDays([]); })
+      .finally(() => { if (!cancelled) setTrendLoading(false); });
+    return () => { cancelled = true; };
+  }, [startDate, endDate, branchId]);
+
+  // Sprint 4 Batch 8 — drill-down: click a Top-10 or low-stock row to open
+  // the same read-only Cost History drawer used everywhere else (per the
+  // owner's confirmed choice, not a new /products/:id route).
+  const [costHistoryProduct, setCostHistoryProduct] = useState<{ id: number; name: string } | null>(null);
 
   const kpis = data?.kpis;
   const paymentMethods = useMemo<DashboardPaymentMethodSummary[]>(() => {
@@ -97,7 +131,12 @@ export const DashboardPage: React.FC = () => {
       .sort((a, b) => b.total - a.total);
   }, [data]);
 
-  const subtitle = `${fmtRangeLabel(startDate, endDate)}${branchName ? ` · ${branchName}` : ''}`;
+  // Selected branch filter takes precedence over the logged-in user's own
+  // home branch in the subtitle — they're different concepts once a filter
+  // is applied (e.g. an Owner filtering into a branch that isn't their own).
+  const filteredBranchName = branchId ? branches.find((b) => b.id === branchId)?.name : undefined;
+  const subtitleBranch = filteredBranchName ?? branchName;
+  const subtitle = `${fmtRangeLabel(startDate, endDate)}${subtitleBranch ? ` · ${subtitleBranch}` : ''}`;
 
   /* ─── KPI card definitions, fed by live data ─────────────────────────── */
   // `trend` is deliberately omitted (not zero) on the two costing tiles —
@@ -156,6 +195,19 @@ export const DashboardPage: React.FC = () => {
         subtitle={subtitle}
         right={
           <>
+            {branches.length > 0 && (
+              <select
+                value={branchId}
+                onChange={(e) => setBranchId(e.target.value ? Number(e.target.value) : '')}
+                className="h-9 px-2.5 rounded-md border border-neutral-300 bg-white text-[13px] focus-ring"
+                aria-label="Branch"
+              >
+                <option value="">All branches</option>
+                {branches.map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
+              </select>
+            )}
             <div className="flex items-center gap-2">
               <input
                 type="date"
@@ -218,6 +270,19 @@ export const DashboardPage: React.FC = () => {
           ))}
         </div>
 
+        {/* Margin / COGS trend (Sprint 4 Batch 5) */}
+        <Card className="p-5">
+          <div className="flex items-center justify-between mb-1">
+            <h3 className="text-[15px] font-semibold">Revenue, COGS & margin trend</h3>
+            <div className="flex items-center gap-4 text-[11.5px] text-neutral-500">
+              <span className="inline-flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm" style={{ background: '#3B82F6' }} />Net revenue</span>
+              <span className="inline-flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm" style={{ background: '#F59E0B' }} />COGS</span>
+              <span className="inline-flex items-center gap-1.5"><span className="w-2.5 h-0.5 rounded" style={{ background: '#EC4899' }} />Gross margin %</span>
+            </div>
+          </div>
+          <MarginCogsChart days={trendDays} loading={trendLoading} />
+        </Card>
+
         {/* Top products + low stock */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           <Card className="col-span-2 overflow-hidden">
@@ -252,7 +317,14 @@ export const DashboardPage: React.FC = () => {
                   </tr>
                 ) : (
                   data.top_products.map((p, i) => (
-                    <tr key={p.name + i} className="border-t border-neutral-100 hover:bg-neutral-50">
+                    <tr
+                      key={p.id}
+                      className="border-t border-neutral-100 hover:bg-neutral-50 cursor-pointer"
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setCostHistoryProduct({ id: p.id, name: p.name })}
+                      onKeyDown={(e) => { if (e.key === 'Enter') setCostHistoryProduct({ id: p.id, name: p.name }); }}
+                    >
                       <td className="px-5 py-2.5 text-neutral-400 font-mono w-10">{i + 1}</td>
                       <td className="py-2.5 font-medium">{p.name}</td>
                       <td className="text-end font-mono tabular-nums">{fmtDecimal(p.units_sold)}</td>
@@ -284,7 +356,14 @@ export const DashboardPage: React.FC = () => {
                 data.low_stock.map((p) => {
                   const b = lowStockBadge(Number(p.stock));
                   return (
-                    <div key={p.id} className="px-5 py-3 flex items-center gap-3 hover:bg-neutral-50">
+                    <div
+                      key={p.id}
+                      className="px-5 py-3 flex items-center gap-3 hover:bg-neutral-50 cursor-pointer"
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setCostHistoryProduct({ id: p.id, name: p.name })}
+                      onKeyDown={(e) => { if (e.key === 'Enter') setCostHistoryProduct({ id: p.id, name: p.name }); }}
+                    >
                       <div
                         className={`w-8 h-8 rounded-md grid place-items-center text-[13px] shrink-0 bg-gradient-to-br ${productVisual(p.name).gradient}`}
                       >
@@ -341,6 +420,13 @@ export const DashboardPage: React.FC = () => {
           </Card>
         </div>
       </div>
+
+      {costHistoryProduct && (
+        <ProductCostHistoryDrawer
+          product={costHistoryProduct}
+          onClose={() => setCostHistoryProduct(null)}
+        />
+      )}
     </div>
   );
 };

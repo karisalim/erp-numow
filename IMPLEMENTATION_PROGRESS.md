@@ -2006,6 +2006,127 @@ Dashboard branch-filter selector, Cost History drawer enhancements
 [date filter + trend chart + export button], Dashboard drill-down into
 the existing drawer), then Batch 9 (regression checkpoint).
 
+#### Batch 5-8 — Frontend: Margin/COGS chart, branch filter, drawer enhancements, drill-down
+
+**Scope:** 100% frontend, zero backend files changed (confirmed via
+`git diff --stat` scoped to `superpos_backend/`). Consumes the four
+backend batches above.
+
+**Files changed:**
+- `superpos/package.json` — added `recharts` (the project's first chart
+  library; no chart of any kind existed anywhere in the codebase before
+  this).
+- `superpos/src/components/dashboard/MarginCogsChart.tsx` (new) — a
+  `ComposedChart` (Recharts): bars for net revenue vs. COGS per day
+  (left axis), a line for gross margin % (right axis, 0-100). Directly
+  visualizes the two figures the owner named ("Margin و COGS").
+- `superpos/src/api/erp.ts` — `dashboardApi.trend()` wrapper for the new
+  Batch 1 endpoint; `inventoryCostApi.exportMovements()` (blob response,
+  `export_format` param) for the new Batch 4 endpoint.
+- `superpos/src/types/erp.ts` — `DashboardTrendDay`/`DashboardTrendResponse`;
+  added `id: number` to `DashboardTopProduct` (mirrors the Batch 2 backend
+  fix, closes the frontend half of the drill-down gap).
+- `superpos/src/pages/DashboardPage.tsx`:
+  - New trend-fetching effect + `MarginCogsChart` card, reusing the page's
+    existing `startDate`/`endDate` state — no new date inputs needed.
+  - Branch filter: a `<select>` in the `Header`'s `right` slot (styled to
+    match the existing date inputs, not `SelectField`, to stay visually
+    consistent with that compact control row), populated from
+    `branchesApi.list()`, feeding `branch_id` into both `summary()` and
+    `trend()` calls. Subtitle now prefers the *selected filter's* branch
+    name over the logged-in user's own home branch once a filter is
+    active — they're different concepts (e.g. an Owner filtering into a
+    branch that isn't their own).
+  - Drill-down: Top-10 rows and low-stock rows are now `role="button"`,
+    keyboard-accessible (`tabIndex`, `Enter` key), opening
+    `ProductCostHistoryDrawer` for that product — the existing drawer
+    reused in place, per the owner's confirmed choice, not a new
+    `/products/:id` route.
+- `superpos/src/components/products/ProductCostHistoryDrawer.tsx`:
+  - Widened `product` prop from the full `Product` type to
+    `{ id: number | string; name: string }` — the only two fields it
+    actually reads — so Dashboard drill-down (which only has a
+    `DashboardTopProduct`/`DashboardLowStockEntry` row, not a full
+    `Product`) can open it without fabricating dummy field values for
+    unrelated required fields. Both existing callers (`ProductFormModal`,
+    `ProductsPage`) already pass full `Product` objects, which satisfy
+    the narrower shape structurally — no call-site change needed.
+  - New date-range filter (two `<input type="date">`, matching the same
+    inline pattern already used on `DashboardPage`/`SalesPage` — a third,
+    explicitly-accepted occurrence of the same ~15-line pattern rather
+    than a premature shared component), narrowing both the table and the
+    new trend chart together.
+  - New "Average cost over time" chart (`CostTrendChart.tsx`, new file) —
+    fetched as a separate query at `page_size=500` (Batch 3's documented
+    ceiling) rather than reusing the table's paginated `page_size=20`
+    response, since the table needs true pagination (an audit-ledger
+    principle from Sprint 3 Batch 6) and the chart needs the fuller series.
+  - New Export row (CSV/XLSX/PDF buttons), wired to
+    `inventoryCostApi.exportMovements()` via the same
+    `Blob`/`createObjectURL`/synthetic-`<a>`-click download pattern
+    `SalesPage.tsx`'s CSV export already established.
+- `superpos/src/components/products/CostTrendChart.tsx` (new) — a small
+  `LineChart` of `avg_cost_after` over `occurred_at`; re-sorts to
+  chronological order itself since the drawer's own data stays
+  newest-first (an audit-ledger convention); shows an explicit "need at
+  least 2 points" empty state rather than a broken/degenerate chart.
+
+**Tests:** none (matches this project's consistent, already-tracked
+zero-frontend-test-framework precedent — governance rule R-I).
+
+**Verification performed (not just a build check):**
+1. `npm run build` clean after every batch (5, 6, 7, 8 individually and
+   combined).
+2. Real end-to-end browser click-through (Playwright + headless Chromium,
+   per the `/run` skill) against a live local stack (Postgres + Django +
+   Vite) with real data — not mocked:
+   - Created a second branch ("Downtown Branch") and one sale scoped to
+     it, and one intentionally-low-stock product, purely to exercise the
+     branch filter and low-stock drill-down paths with real, meaningful
+     data (both additive, on the same local dev database prior batches
+     already used for verification — not production).
+   - Dashboard: confirmed the trend chart renders with a correct tooltip
+     (COGS/net revenue/gross margin values cross-checked against the
+     fixture sale's numbers), the branch selector narrows the KPI
+     tiles/chart/top-products table correctly, and reverts cleanly to
+     "All branches".
+   - Confirmed clicking a Top-10 row AND a low-stock row both open the
+     Cost History drawer for the correct product.
+   - Confirmed the drawer's date-range inputs render and are wired; the
+     "Average cost over time" chart renders a correct 2-point line
+     matching the two real purchase-invoice movements already in the
+     database (9.00→9.50→10.43).
+   - Confirmed all three export buttons (CSV/XLSX/PDF) trigger a real
+     browser download each, with non-zero, plausible file sizes
+     (221 / 5188 / 1967 bytes respectively) — not just that the button
+     exists or that the request doesn't 404.
+3. Both dev servers stopped cleanly after verification.
+
+**Architectural decisions:**
+1. `MarginCogsChart` is a single combined chart (bars + line), not two
+   separate charts — keeps "Margin and COGS" scannable together, matching
+   how the owner phrased the original request.
+2. The Cost History drawer's trend chart is a second, separate fetch at a
+   higher page size rather than reusing the table's paginated response —
+   the table's own real-pagination requirement (Sprint 3 Batch 6) and the
+   chart's need for a fuller series are different jobs.
+3. No shared `DateRangePicker` component extracted despite this being the
+   third occurrence of the same inline date-input pattern — an explicit,
+   accepted duplication rather than a premature abstraction; worth
+   revisiting only if a fourth occurrence appears.
+4. `ProductCostHistoryDrawer`'s prop type is now structurally minimal
+   (`{id, name}`) rather than the full `Product` type — a deliberate
+   widening to unblock drill-down from non-Product data shapes, not a
+   sign the drawer needs more product data than before.
+
+**Not touched:** any backend file (confirmed via `git diff --stat`), any
+new route (`/products/:id` still doesn't exist — intentional per the
+owner's confirmed choice), `SalesPage.tsx`'s own date-range inputs (branch
+filter stays Dashboard-only this sprint, per the owner's confirmed scope).
+
+**Next:** Batch 9 — regression + documentation checkpoint (full suite +
+build green across the whole sprint, then this section's final closeout).
+
 ---
 
 *(Later sprints get their own sections here after their pre-sprint audits.)*

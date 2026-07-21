@@ -599,6 +599,9 @@ export interface DashboardKPIs {
 }
 
 export interface DashboardTopProduct {
+  /* Sprint 4 Batch 2 — the real product pk (SET_NULL'd deleted products
+   * are excluded server-side, so this is never null/undefined here). */
+  id: number;
   name: string;
   units_sold: number;
   revenue: number;
@@ -630,4 +633,18 @@ export interface DashboardSummaryResponse {
   payment_methods: Record<string, DashboardPaymentMethodSummary>;
   low_stock: DashboardLowStockEntry[];
   low_stock_count: number;
+}
+
+/* Sprint 4 Batch 1 — GET /api/dashboard/trend/, one row per calendar day. */
+export interface DashboardTrendDay {
+  date: string;
+  net_revenue: number;
+  cogs: number;
+  gross_profit: number;
+  gross_margin_pct: number;
+}
+
+export interface DashboardTrendResponse {
+  range: { start_date: string; end_date: string };
+  days: DashboardTrendDay[];
 }
