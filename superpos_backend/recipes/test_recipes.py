@@ -710,6 +710,11 @@ class RecipeSalePostingTests(APITestCase):
             component_product=cls.cheese, component_unit=cls.cheese_unit,
             entered_qty=Decimal('40'), qty_base=Decimal('40'),
         )
+        # Batch 7 gate: the sale path now rejects a modifier that isn't
+        # offered for the product, so the fixture must attach the group.
+        ProductModifierGroup.objects.create(
+            tenant=cls.tenant, product=cls.sandwich, modifier_group=cls.cheese_group,
+        )
 
     def setUp(self):
         self.client.force_authenticate(user=self.manager_a)
@@ -1056,6 +1061,9 @@ class RecipeSalePostingTests(APITestCase):
             component_product=onion, component_unit=onion_unit,
             entered_qty=Decimal('-40'), qty_base=Decimal('-40'),
         )
+        ProductModifierGroup.objects.create(
+            tenant=self.tenant, product=self.sandwich, modifier_group=group,
+        )
 
         resp = self._post_sale([{
             'product': self.sandwich.id, 'qty': '1',
@@ -1094,6 +1102,9 @@ class RecipeSalePostingTests(APITestCase):
             tenant=self.tenant, modifier_option=option, variant=None,
             component_product=onion, component_unit=onion_unit,
             entered_qty=Decimal('-20'), qty_base=Decimal('-20'),
+        )
+        ProductModifierGroup.objects.create(
+            tenant=self.tenant, product=self.sandwich, modifier_group=group,
         )
 
         resp = self._post_sale([{
@@ -1169,6 +1180,9 @@ class RecipeSalePostingTests(APITestCase):
             component_product=precise, component_unit=precise_unit,
             entered_qty=Decimal('1'), qty_base=Decimal('1'),
         )
+        ProductModifierGroup.objects.create(
+            tenant=self.tenant, product=self.sandwich, modifier_group=group,
+        )
 
         resp = self._post_sale([{
             'product': self.sandwich.id, 'qty': '1',
@@ -1200,6 +1214,56 @@ class RecipeSalePostingTests(APITestCase):
         )
         self.assertEqual(precise_movements.count(), 1)
         self.assertEqual(precise_movements.first().qty, Decimal('-2.000'))
+
+    def test_recipe_consume_counts_as_outflow_in_movement_derived_balance(self):
+        """Batch 7 gate fix — RECIPE_CONSUME is classified as an OUT movement
+        (`stock_movements._OUT_TYPES`), so the movement-derived balance
+        (`get_product_stock_balance`, backing the /stock-balance/ and
+        /stock-movements/ reconciliation endpoints) reflects recipe
+        ingredient consumption. Before the fix, RECIPE_CONSUME was in neither
+        direction set and was silently ignored, overstating an ingredient's
+        stock on those reads."""
+        before = stock_svc.get_product_stock_balance(self.chicken)
+
+        resp = self._post_sale([{'product': self.sandwich.id, 'qty': '1'}])
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        sale = Sale.objects.get(sale_uuid=resp.json()['sale_uuid'])
+
+        after = stock_svc.get_product_stock_balance(self.chicken)
+        # Recipe uses 150g chicken → the ledger-derived balance must drop by
+        # exactly that, matching the authoritative Product.stock decrement.
+        self.assertEqual(before - after, Decimal('150'))
+
+        # And a void's RETURN_IN (an IN type) brings it back symmetrically.
+        void_resp = self.client.post(
+            reverse('sale-void', kwargs={'sale_uuid': sale.sale_uuid}), {}, format='json',
+        )
+        self.assertEqual(void_resp.status_code, status.HTTP_200_OK, void_resp.content)
+        restored = stock_svc.get_product_stock_balance(self.chicken)
+        self.assertEqual(restored, before)
+
+    def test_modifier_not_offered_for_product_is_rejected(self):
+        """Batch 7 gate fix — the backend must not trust the client's
+        modifier selection: a modifier option whose group is NOT attached to
+        the product via ProductModifierGroup is rejected with a 400, so a
+        buggy/hostile client can't apply an arbitrary price delta or
+        ingredient consumption to a recipe product. No sale/snapshot is
+        written."""
+        stray_group = ModifierGroup.objects.create(tenant=self.tenant, name='Not Offered Here')
+        stray_option = ModifierOption.objects.create(
+            tenant=self.tenant, modifier_group=stray_group,
+            name='Sneaky Discount', price_delta=Decimal('-5.00'),
+        )
+        # Deliberately NOT linked to the sandwich via ProductModifierGroup.
+
+        sales_before = Sale.objects.count()
+        resp = self._post_sale([{
+            'product': self.sandwich.id, 'qty': '1',
+            'modifier_option_ids': [stray_option.id],
+        }])
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
+        self.assertIn('modifier', str(resp.content).lower())
+        self.assertEqual(Sale.objects.count(), sales_before)
 
     def test_void_recipe_sale_restores_ingredient_stock(self):
         """Point 5/void-awareness — voiding a recipe-product sale must

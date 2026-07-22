@@ -67,6 +67,17 @@ _OUT_TYPES = {
     StockMovement.MovementType.SALE_OUT,
     StockMovement.MovementType.ADJUSTMENT,
     StockMovement.MovementType.ADJUSTMENT_OUT,
+    # Sprint 5 Batch 5: a recipe/BOM ingredient depleted at sale time is a
+    # genuine outflow. It MUST be classified here so the movement-derived
+    # balance (`get_product_stock_balance`) and statement summary
+    # (`total_out` / `closing_quantity`) account for recipe consumption —
+    # otherwise an ingredient sold only through recipes would read as never
+    # consumed on those reconciliation endpoints, while the authoritative
+    # `Product.stock` / `WarehouseStock` (decremented via `deduct_stock` /
+    # `apply_warehouse_delta` at sale time) show the real, lower on-hand.
+    # The void reversal already posts a `RETURN_IN` (an IN type), so a
+    # consume-then-void nets to zero on these reads too.
+    StockMovement.MovementType.RECIPE_CONSUME,
 }
 
 

@@ -3068,4 +3068,82 @@ code — this batch is a pure consumer of data those already produce.
 
 ---
 
+### Batch 7 — Production-readiness & architecture validation gate (2026-07-23, `s5/batch-7-production-readiness-gate`)
+
+**Goal:** a validation gate before Sprint 5 frontend starts — not a feature
+batch. Reviewed the full recipe lifecycle (Sale → Snapshot →
+RECIPE_CONSUME → Void) across 10 axes: data integrity, concurrency/ACID,
+idempotency, snapshot completeness, inventory/cost ledger consistency,
+performance (N+1/caches), migration safety, API contract, and test gaps.
+Fixed only justified defects; documented the rest. Full findings, the
+coverage matrix, the ACID analysis, and every Sprint 5 architectural
+decision live in the new **`SPRINT5_ARCHITECTURE_DECISIONS.md`** (repo
+root).
+
+**Defects fixed (justified by correctness / production risk / perf):**
+- **F-1 (P1, correctness):** `RECIPE_CONSUME` was in neither
+  `_IN_TYPES`/`_OUT_TYPES` in `pos/services/stock_movements.py`, so the
+  movement-derived balance (`get_product_stock_balance`) and the stock-
+  statement summary silently ignored recipe-ingredient consumption —
+  overstating an ingredient's on-hand on `/products/<pk>/stock-balance/`
+  and `/products/<pk>/stock-movements/` (the authoritative
+  `Product.stock`/`WarehouseStock` were always correct). Fixed by adding
+  `RECIPE_CONSUME` to `_OUT_TYPES`; a consume-then-void nets to zero since
+  the void posts a `RETURN_IN` (an IN type).
+- **F-2 (P1, data integrity / client-trust):** the sale path accepted any
+  tenant `modifier_option_id` without checking the option's group is
+  attached to the product via `ProductModifierGroup` — a buggy/hostile
+  client could apply an arbitrary price delta (incl. a negative
+  "discount") and arbitrary ingredient consumption to any recipe product.
+  Fixed in `SaleSerializer.validate()` (rejects modifiers not offered for
+  the product; tenant isolation was already enforced by the field
+  queryset).
+- **F-3 (P2, perf hot path):** recipe cost-snapshot lines were written one
+  `INSERT` per component in the revenue path → switched to a single
+  `bulk_create` per recipe sale line.
+
+**Files changed:**
+- `pos/services/stock_movements.py` — `RECIPE_CONSUME` added to `_OUT_TYPES`
+  (with rationale comment).
+- `pos/serializers.py` — `SaleSerializer.validate()` now enforces
+  `ProductModifierGroup` membership for selected modifiers;
+  `SaleSerializer.create()` writes snapshot lines via `bulk_create`.
+- `recipes/test_recipes.py` — 2 new regression tests
+  (`test_recipe_consume_counts_as_outflow_in_movement_derived_balance`,
+  `test_modifier_not_offered_for_product_is_rejected`); Batch 5 fixtures
+  updated to attach modifier groups via `ProductModifierGroup` (previously
+  they relied on the now-closed validation gap).
+- `SPRINT5_ARCHITECTURE_DECISIONS.md` (new) — the gate's full deliverable.
+
+**Documented (not fixed — pre-existing or scale-dependent, with
+recommendations):** F-4 the idempotency check-then-act race (pre-existing,
+cross-cutting across all POST endpoints — recommend a reservation-row
+rewrite in its own batch, R-1); F-5 per-component cost lookups (bounded by
+recipe size, cached per-call, R-2); F-6 a future `StockMovement(tenant,
+movement_type, created_at)` index for the ingredient report (R-3); F-7
+`RECIPE_CONSUME`/void `RETURN_IN` rows not populating
+`quantity_before`/`quantity_after` (consistent with the legacy sale/void
+paths; the ledger chain tolerates NULLs). Rationale for each is in the
+architecture doc.
+
+**Migrations:** none — all fixes are logic/validation-only.
+`makemigrations --check --dry-run` clean before and after.
+
+**Tests:** full suite **759/759 passed** (757 baseline + 2 new). ACID
+review confirmed: the whole sale posts in one `transaction.atomic()`
+(sale + items + modifiers + snapshots + stock + ledgers roll back
+together); locking uses `select_for_update`/atomic `F()` updates; no
+lock-order inversion between concurrent sales and purchases (sale locks
+Product-only, purchase locks Product→InventoryCost).
+
+**Gate decision:** Sprint 5 backend cleared for the frontend batches
+(8–10). All P1 defects fixed + regression-tested; migrations additive;
+API additive; residual risks documented with recommendations.
+
+**Not touched:** Batches 8-10 (frontend) — not started. No GL code. No
+change to the AVCO math, recipe cost roll-up, or snapshot semantics — only
+the ledger classification, one input validation, and one insert batching.
+
+---
+
 *(Later batches of Sprint 5 get their own entries here as they land.)*

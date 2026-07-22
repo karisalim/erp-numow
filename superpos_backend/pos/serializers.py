@@ -1394,6 +1394,7 @@ class SaleSerializer(serializers.ModelSerializer):
     def validate(self, data):
         from pos.services import pricing as pricing_svc
         from pos.services import units as units_svc
+        from recipes.models import ProductModifierGroup
         from recipes.services import costing as recipes_costing_svc
 
         items = data.get('items', [])
@@ -1448,9 +1449,33 @@ class SaleSerializer(serializers.ModelSerializer):
                         'variant must belong to the same product as this line.'
                     )
                 else:
+                    modifier_options = item.get('modifier_option_ids') or []
+                    # Production-readiness gate (B7-2/B7-8): the backend must
+                    # not trust the client's modifier selection. Every
+                    # selected option's group must actually be attached to
+                    # THIS product via `ProductModifierGroup` — otherwise a
+                    # buggy/hostile client could apply any tenant modifier's
+                    # price delta (incl. a negative "discount" delta) and its
+                    # ingredient consumption to any recipe product. Tenant
+                    # isolation is already enforced by the field queryset;
+                    # this closes the remaining product-scope hole.
+                    if modifier_options:
+                        allowed_group_ids = set(
+                            ProductModifierGroup.objects
+                            .filter(product=product)
+                            .values_list('modifier_group_id', flat=True)
+                        )
+                        if any(
+                            opt.modifier_group_id not in allowed_group_ids
+                            for opt in modifier_options
+                        ):
+                            errors[f'{key}.modifier_option_ids'] = (
+                                'One or more selected modifiers are not '
+                                'offered for this product.'
+                            )
                     base_price = variant.price if variant is not None else product.price
                     modifier_total = sum(
-                        (opt.price_delta for opt in (item.get('modifier_option_ids') or [])),
+                        (opt.price_delta for opt in modifier_options),
                         Decimal('0.00'),
                     )
                     item['price_each'] = base_price + modifier_total
@@ -1657,8 +1682,13 @@ class SaleSerializer(serializers.ModelSerializer):
                         tenant=sale.tenant, sale_item=sale_item,
                         recipe_version=recipe_version, total_recipe_cost=item_data['unit_cost'],
                     )
-                    for line in recipe_cost_lines:
-                        SaleItemRecipeCostSnapshotLine.objects.create(
+                    # Batch 7 gate (perf): one bulk INSERT for all of a recipe
+                    # line's snapshot rows instead of one INSERT per component
+                    # — this is the revenue hot path, and a recipe can carry
+                    # many ingredient + modifier lines. No per-row save signal
+                    # is relied on, so bulk_create is a pure query-count win.
+                    SaleItemRecipeCostSnapshotLine.objects.bulk_create([
+                        SaleItemRecipeCostSnapshotLine(
                             tenant=sale.tenant, snapshot=snapshot,
                             component_product_id=line.component_product_id,
                             component_name=line.component_name, qty_base=line.qty_base,
@@ -1666,6 +1696,8 @@ class SaleSerializer(serializers.ModelSerializer):
                             is_modifier_line=line.is_modifier_line,
                             source_modifier_option_id=line.source_modifier_option_id,
                         )
+                        for line in recipe_cost_lines
+                    ])
 
             # Payment ledger — separate row so reporting queries don't have
             # to JOIN cashier-tendered / change-given off the Sale table.
