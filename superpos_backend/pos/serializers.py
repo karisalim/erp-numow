@@ -1394,6 +1394,7 @@ class SaleSerializer(serializers.ModelSerializer):
     def validate(self, data):
         from pos.services import pricing as pricing_svc
         from pos.services import units as units_svc
+        from recipes.services import costing as recipes_costing_svc
 
         items = data.get('items', [])
         if not items:
@@ -1434,7 +1435,7 @@ class SaleSerializer(serializers.ModelSerializer):
                         item['price_each'] = pricing_svc.resolve_unit_price(
                             product_unit=product_unit, price_tier=price_tier,
                         )
-            elif product is not None and not product.type_behavior.affects_stock and product.type_behavior.can_have_recipe:
+            elif product is not None and recipes_costing_svc.is_recipe_eligible(product):
                 # Sprint 5 Batch 5 — a recipe-product line (product_unit
                 # never applies here; a recipe product carries no stock/
                 # unit conversion of its own). `price_each` is always
@@ -1589,41 +1590,57 @@ class SaleSerializer(serializers.ModelSerializer):
                 item_data['line_total']   = self._money_qty(item_data) * item_data['price_each']
                 if item_data.get('warehouse') is None:
                     item_data['warehouse'] = default_warehouse
+                # Snapshot of the variant's name/price at sale time — same
+                # rationale as product_name/barcode above (pre-Batch-6
+                # architecture review, point 2): a later variant rename,
+                # reprice, or deletion must never alter a historical line.
+                if variant is not None:
+                    item_data['variant_name']  = variant.name
+                    item_data['variant_price'] = variant.price
 
                 recipe_version    = None
                 recipe_cost_lines = []
-                if (
-                    product is not None and not product.type_behavior.affects_stock
-                    and product.type_behavior.can_have_recipe
-                ):
+                if product is not None and recipes_costing_svc.is_recipe_eligible(product):
                     # A recipe product has no InventoryCost of its own —
                     # its cost is always the live roll-up of its active
                     # recipe + any selected modifiers, at THIS sale's
                     # branch (the owner's own requirement: the recipe
                     # definition stays put, but the cost of a new sale
                     # moves with ingredient prices).
+                    #
+                    # `compute_recipe_sale_lines` is THE single call for
+                    # this (review point 6): it nets the recipe's own line
+                    # quantities against every selected modifier's delta
+                    # per component — a "No Onion" modifier actually
+                    # reduces the onion consumed, not just the reported
+                    # cost — and raises RecipeError if any component's net
+                    # would go negative, instead of ever writing a negative
+                    # RECIPE_CONSUME movement. Its result is frozen into the
+                    # snapshot below; nothing recomputes a recipe's cost or
+                    # consumption again after this point (review point 5) —
+                    # `_apply_stock`/void/refund read the snapshot only.
                     recipe_version = recipes_costing_svc.get_active_recipe(product, variant=variant)
                     if recipe_version is None:
                         raise serializers.ValidationError({
                             'items': [f'"{product.name}" has no active recipe configured yet.'],
                         })
-                    recipe_result = recipes_costing_svc.compute_recipe_cost(
-                        recipe_version, branch=sale.branch,
-                    )
-                    recipe_cost_lines.extend(recipe_result.lines)
-                    total_cost = recipe_result.total_cost
-                    for option in modifier_options:
-                        modifier_result = recipes_costing_svc.compute_modifier_deltas(
-                            option, variant=variant, branch=sale.branch,
+                    try:
+                        recipe_result = recipes_costing_svc.compute_recipe_sale_lines(
+                            recipe_version, modifier_options=modifier_options,
+                            variant=variant, branch=sale.branch,
                         )
-                        recipe_cost_lines.extend(modifier_result.lines)
-                        total_cost += modifier_result.total_cost
-                    item_data['unit_cost'] = total_cost
+                    except recipes_costing_svc.RecipeError as exc:
+                        raise serializers.ValidationError({'items': [str(exc)]})
+                    recipe_cost_lines = recipe_result.lines
+                    item_data['unit_cost'] = recipe_result.total_cost
                 else:
                     # Cost snapshot for COGS; unchanged from before Sprint 5
                     # — still Product.cost, not branch-scoped, for every
-                    # non-recipe line (see Batch 5's IMPLEMENTATION_PROGRESS
-                    # entry for why this wasn't widened too).
+                    # non-recipe line. Deliberate (review point 4): only
+                    # recipe-eligible lines use branch-scoped Recipe Cost;
+                    # ordinary stock products keep reading Product.cost, to
+                    # avoid disturbing the existing Sprint 3/4 COGS tests —
+                    # not an oversight.
                     item_data['unit_cost'] = product.cost if product else Decimal('0')
 
                 sale_item = SaleItem.objects.create(sale=sale, **item_data)
@@ -1631,6 +1648,7 @@ class SaleSerializer(serializers.ModelSerializer):
                 for option in modifier_options:
                     SaleItemModifier.objects.create(
                         tenant=sale.tenant, sale_item=sale_item, modifier_option=option,
+                        group_name=option.modifier_group.name,
                         option_name=option.name, price_delta=option.price_delta,
                     )
 
@@ -1725,22 +1743,25 @@ class SaleSerializer(serializers.ModelSerializer):
 
                 product = item.product
 
-                if not product.type_behavior.affects_stock and product.type_behavior.can_have_recipe:
+                if recipes_costing_svc.is_recipe_eligible(product):
                     # Sprint 5 Batch 5 — narrowly scoped to recipe-eligible
-                    # types (RECIPE_PRODUCT/PREP_ITEM/BUNDLE) only.
+                    # types (RECIPE_PRODUCT/PREP_ITEM) only, via the same
+                    # centralized `is_recipe_eligible()` predicate `create()`
+                    # and `validate()` use — never re-derived inline.
                     # `affects_stock=False` alone is NOT enough — SERVICE
                     # and FIXED_ASSET also carry it but have no recipe
-                    # concept at all, and Sprint 2 deliberately left every
-                    # classification flag dormant (metadata only) until a
-                    # real consumer wired one up — for those types this
-                    # must keep falling through to the exact legacy
+                    # concept at all; `can_have_recipe=True` alone is NOT
+                    # enough either — BUNDLE also carries it but is a
+                    # Sprint-2 placeholder for a future, different feature
+                    # (see `is_recipe_eligible`'s docstring). Any type this
+                    # predicate excludes falls through to the exact legacy
                     # deduct_stock/SALE_OUT path below, unchanged.
                     #
-                    # A recipe product (or a prep/bundle sold directly) has
-                    # no stock of its own to deduct; its RECIPE_CONSUME
-                    # movements come from the cost snapshot
-                    # already written in create() (the exact frozen
-                    # components/quantities, not a re-computation).
+                    # A recipe product has no stock of its own to deduct;
+                    # its RECIPE_CONSUME movements come from the cost
+                    # snapshot already written in create() (the exact
+                    # frozen components/quantities — this function never
+                    # recomputes the recipe or modifier deltas itself).
                     snapshot = (
                         SaleItemRecipeCostSnapshot.objects
                         .filter(sale_item=item)

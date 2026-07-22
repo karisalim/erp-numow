@@ -901,3 +901,251 @@ class RecipeSalePostingTests(APITestCase):
                 product=water, movement_type=StockMovement.MovementType.SALE_OUT,
             ).exists()
         )
+
+
+    # ── Sprint 5 Batch 5 hotfix — pre-Batch-6 architecture review ──────────
+    # (2026-07-22). Reuses this class's fixture (branches, ingredients,
+    # sandwich recipe, cheese modifier) directly.
+
+    def test_bundle_type_recipe_ignored_falls_through_to_legacy_stock_path(self):
+        """Point 1 — `can_have_recipe=True` is shared by RECIPE_PRODUCT,
+        PREP_ITEM, and BUNDLE, but only the first two are recipe-eligible.
+        A BUNDLE with a Recipe attached must still sell through the legacy
+        stock-item path (its own Product.stock/SALE_OUT), never through
+        RECIPE_CONSUME on its "recipe"'s ingredients."""
+        bundle = Product.objects.create(
+            tenant=self.tenant, category=self.category,
+            name='Combo Bundle', barcode='RS-BND', sku='SKU-RS-BND',
+            price=Decimal('20.00'), cost=Decimal('5.00'), stock=Decimal('100'),
+            product_type=ProductType.BUNDLE,
+        )
+        bundle_recipe = Recipe.objects.create(tenant=self.tenant, product=bundle)
+        bundle_version = RecipeVersion.objects.create(
+            tenant=self.tenant, recipe=bundle_recipe, version_no=1,
+            status=RecipeVersion.Status.ACTIVE,
+        )
+        RecipeLine.objects.create(
+            tenant=self.tenant, recipe_version=bundle_version,
+            component_product=self.chicken, component_unit=self.chicken_unit,
+            entered_qty=Decimal('10'), qty_base=Decimal('10'),
+        )
+
+        resp = self._post_sale([{'product': bundle.id, 'qty': '2', 'price_each': '20.00'}])
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        sale = Sale.objects.get(sale_uuid=resp.json()['sale_uuid'])
+        item = sale.items.get(product=bundle)
+
+        self.assertTrue(
+            StockMovement.objects.filter(
+                product=bundle, movement_type=StockMovement.MovementType.SALE_OUT,
+                source_document_id=sale.id,
+            ).exists()
+        )
+        bundle.refresh_from_db()
+        self.assertEqual(bundle.stock, Decimal('98'))
+        self.assertFalse(
+            StockMovement.objects.filter(
+                product=bundle, movement_type=StockMovement.MovementType.RECIPE_CONSUME,
+            ).exists()
+        )
+        self.assertFalse(
+            StockMovement.objects.filter(
+                product=self.chicken, movement_type=StockMovement.MovementType.RECIPE_CONSUME,
+                source_document_id=sale.id,
+            ).exists()
+        )
+        self.assertFalse(SaleItemRecipeCostSnapshot.objects.filter(sale_item=item).exists())
+
+    def test_variant_snapshot_fields_survive_variant_rename_and_deletion(self):
+        """Point 2 — SaleItem.variant_name/variant_price freeze the
+        variant's name/price at sale time, independent of the live
+        ProductVariant row (later renamed, repriced, or deleted)."""
+        large = ProductVariant.objects.create(
+            tenant=self.tenant, product=self.sandwich, name='Large', price=Decimal('70.00'),
+        )
+        large_recipe = Recipe.objects.create(tenant=self.tenant, product=self.sandwich, variant=large)
+        large_version = RecipeVersion.objects.create(
+            tenant=self.tenant, recipe=large_recipe, version_no=1,
+            status=RecipeVersion.Status.ACTIVE,
+        )
+        RecipeLine.objects.create(
+            tenant=self.tenant, recipe_version=large_version,
+            component_product=self.chicken, component_unit=self.chicken_unit,
+            entered_qty=Decimal('300'), qty_base=Decimal('300'),
+        )
+
+        resp = self._post_sale([{'product': self.sandwich.id, 'qty': '1', 'variant': large.id}])
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        sale = Sale.objects.get(sale_uuid=resp.json()['sale_uuid'])
+        item = sale.items.get(product=self.sandwich)
+
+        self.assertEqual(item.variant_name, 'Large')
+        self.assertEqual(item.variant_price, Decimal('70.00'))
+
+        large.name = 'XL Renamed'
+        large.price = Decimal('99.00')
+        large.save()
+        large.delete()  # cascades: Recipe(variant=large) is deleted too
+
+        item.refresh_from_db()
+        self.assertEqual(item.variant_name, 'Large')
+        self.assertEqual(item.variant_price, Decimal('70.00'))
+        self.assertIsNone(item.variant_id)  # SET_NULL on the variant FK itself
+
+    def test_modifier_group_name_snapshot_survives_group_rename(self):
+        """Point 3 — SaleItemModifier.group_name freezes the modifier
+        group's name at sale time; a later rename of the ModifierGroup must
+        not alter an already-recorded sale line."""
+        resp = self._post_sale([{
+            'product': self.sandwich.id, 'qty': '1',
+            'modifier_option_ids': [self.cheese_option.id],
+        }])
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        sale = Sale.objects.get(sale_uuid=resp.json()['sale_uuid'])
+        item = sale.items.get(product=self.sandwich)
+        sim = SaleItemModifier.objects.get(sale_item=item, option_name='Extra Cheese')
+        self.assertEqual(sim.group_name, 'Extras')
+
+        self.cheese_group.name = 'Renamed Extras'
+        self.cheese_group.save()
+
+        sim.refresh_from_db()
+        self.assertEqual(sim.group_name, 'Extras')
+
+    def _add_onion_ingredient(self, *, name, barcode):
+        onion = Product.objects.create(
+            tenant=self.tenant, category=self.ingredients_cat,
+            name=name, barcode=barcode, sku=f'SKU-{barcode}',
+            price=Decimal('0.00'), cost=Decimal('0.00'), stock=Decimal('0'),
+        )
+        onion_unit = ProductUnit.objects.create(
+            tenant=self.tenant, product=onion, unit=self.gram,
+            conversion_to_base=Decimal('1'), is_base=True,
+        )
+        for branch, warehouse in ((self.branch_a, self.wh_a), (self.branch_b, self.wh_b)):
+            pos_costing_svc.apply_purchase_receipt(
+                product=onion, qty=Decimal('50000'), unit_cost=Decimal('0.05'),
+                branch=branch, source_document_type='purchase_invoice',
+            )
+            stock_svc.record_stock_in(
+                product=onion, quantity=Decimal('50000'),
+                movement_type=StockMovement.MovementType.PURCHASE_IN,
+                branch=branch, warehouse=warehouse,
+                source_document_type='purchase_invoice',
+            )
+        RecipeLine.objects.create(
+            tenant=self.tenant, recipe_version=self.recipe_version,
+            component_product=onion, component_unit=onion_unit,
+            entered_qty=Decimal('20'), qty_base=Decimal('20'), sort_order=2,
+        )
+        return onion, onion_unit
+
+    def test_negative_net_consumption_from_modifier_is_rejected(self):
+        """Point 6 — a removal modifier taking away MORE of an ingredient
+        than the recipe actually provides must be rejected with a clean
+        validation error, never floored to zero and never posted as a
+        negative RECIPE_CONSUME movement."""
+        onion, onion_unit = self._add_onion_ingredient(name='Onion', barcode='RS-ONI')
+        group = ModifierGroup.objects.create(tenant=self.tenant, name='Removals')
+        option = ModifierOption.objects.create(
+            tenant=self.tenant, modifier_group=group,
+            name='Too Much No Onion', price_delta=Decimal('0.00'),
+        )
+        ModifierOptionConsumption.objects.create(
+            tenant=self.tenant, modifier_option=option, variant=None,
+            component_product=onion, component_unit=onion_unit,
+            entered_qty=Decimal('-40'), qty_base=Decimal('-40'),
+        )
+
+        resp = self._post_sale([{
+            'product': self.sandwich.id, 'qty': '1',
+            'modifier_option_ids': [option.id],
+        }])
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
+        self.assertFalse(
+            StockMovement.objects.filter(
+                product=onion, movement_type=StockMovement.MovementType.RECIPE_CONSUME,
+            ).exists()
+        )
+        self.assertFalse(
+            SaleItemRecipeCostSnapshot.objects.filter(lines__component_product=onion).exists()
+        )
+
+    def test_modifier_reduces_recipe_line_to_valid_zero_net(self):
+        """Point 6 — a removal modifier taking away EXACTLY the recipe's own
+        quantity nets to zero: valid, no error, no RECIPE_CONSUME movement
+        and no cost contribution for that component, and (the actual bug
+        this hotfix fixes) the base recipe's own onion line must NOT still
+        fire at its original quantity — the modifier must net against it,
+        not just be dropped from the cost total."""
+        onion, onion_unit = self._add_onion_ingredient(name='Onion Zero', barcode='RS-ONI0')
+        group = ModifierGroup.objects.create(tenant=self.tenant, name='Removals Zero')
+        option = ModifierOption.objects.create(
+            tenant=self.tenant, modifier_group=group,
+            name='No Onion', price_delta=Decimal('0.00'),
+        )
+        ModifierOptionConsumption.objects.create(
+            tenant=self.tenant, modifier_option=option, variant=None,
+            component_product=onion, component_unit=onion_unit,
+            entered_qty=Decimal('-20'), qty_base=Decimal('-20'),
+        )
+
+        resp = self._post_sale([{
+            'product': self.sandwich.id, 'qty': '1',
+            'modifier_option_ids': [option.id],
+        }])
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        sale = Sale.objects.get(sale_uuid=resp.json()['sale_uuid'])
+        item = sale.items.get(product=self.sandwich)
+
+        # Base recipe cost (chicken+lettuce only) unchanged — onion nets to
+        # zero, contributes nothing to cost, and is never actually consumed.
+        self.assertEqual(item.unit_cost, Decimal('16.00'))
+        self.assertFalse(
+            StockMovement.objects.filter(
+                product=onion, movement_type=StockMovement.MovementType.RECIPE_CONSUME,
+                source_document_id=sale.id,
+            ).exists()
+        )
+        snapshot = SaleItemRecipeCostSnapshot.objects.get(sale_item=item)
+        self.assertFalse(snapshot.lines.filter(component_product=onion).exists())
+
+    def test_void_recipe_sale_restores_ingredient_stock(self):
+        """Point 5/void-awareness — voiding a recipe-product sale must
+        restore the actual ingredients consumed via RECIPE_CONSUME (read
+        from the frozen StockMovement ledger), not bump the recipe
+        product's own (never-decremented) stock counter."""
+        resp = self._post_sale([{'product': self.sandwich.id, 'qty': '1'}])
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        sale = Sale.objects.get(sale_uuid=resp.json()['sale_uuid'])
+
+        self.chicken.refresh_from_db()
+        self.lettuce.refresh_from_db()
+        chicken_after_sale = self.chicken.stock
+        lettuce_after_sale = self.lettuce.stock
+
+        void_resp = self.client.post(
+            reverse('sale-void', kwargs={'sale_uuid': sale.sale_uuid}), {}, format='json',
+        )
+        self.assertEqual(void_resp.status_code, status.HTTP_200_OK, void_resp.content)
+
+        self.chicken.refresh_from_db()
+        self.lettuce.refresh_from_db()
+        self.assertEqual(self.chicken.stock, chicken_after_sale + Decimal('150'))
+        self.assertEqual(self.lettuce.stock, lettuce_after_sale + Decimal('50'))
+
+        return_movements = StockMovement.objects.filter(
+            sale=sale, movement_type=StockMovement.MovementType.RETURN_IN,
+        )
+        self.assertEqual(
+            set(return_movements.values_list('product_id', flat=True)),
+            {self.chicken.id, self.lettuce.id},
+        )
+        for mv in return_movements:
+            self.assertIn(mv.qty, (Decimal('150'), Decimal('50')))
+
+        # The recipe product itself must NOT get a phantom stock bump / a
+        # meaningless RETURN_IN on its own (never-decremented) product row.
+        self.assertFalse(
+            StockMovement.objects.filter(sale=sale, product=self.sandwich).exists()
+        )

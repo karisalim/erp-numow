@@ -364,8 +364,9 @@ class ModifierOptionConsumption(models.Model):
 
 class SaleItemModifier(models.Model):
     """Snapshot of one selected modifier on a sale line (Sprint 5 Batch 5).
-    `option_name`/`price_delta` are frozen at sale time — a later rename or
-    price change on the `ModifierOption` never alters a historical sale.
+    `group_name`/`option_name`/`price_delta` are all frozen at sale time —
+    a later rename, regrouping, price change, or deletion of the
+    `ModifierGroup`/`ModifierOption` never alters a historical sale line.
     """
 
     tenant = models.ForeignKey(
@@ -378,12 +379,13 @@ class SaleItemModifier(models.Model):
     modifier_option = models.ForeignKey(
         ModifierOption, on_delete=models.SET_NULL, null=True, blank=True,
     )
+    group_name = models.CharField(max_length=80, blank=True, default='')
     option_name = models.CharField(max_length=80)
     price_delta = models.DecimalField(max_digits=10, decimal_places=2)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return f'{self.sale_item_id}: {self.option_name}'
+        return f'{self.sale_item_id}: {self.group_name} / {self.option_name}'
 
 
 class SaleItemRecipeCostSnapshot(models.Model):
@@ -395,6 +397,19 @@ class SaleItemRecipeCostSnapshot(models.Model):
     (`cogs = Σ(unit_cost × qty)`) works for recipe sales with zero code
     changes — this snapshot exists purely for the detailed "why" breakdown
     a food-cost report needs.
+
+    Contract (pre-Batch-6 architecture review, point 5): once written, this
+    row (and its `.lines`) is the SOLE source of truth for this sale item's
+    recipe cost and ingredient consumption, forever. No later operation —
+    void, refund, or any future feature — may call
+    `recipes.services.costing.compute_recipe_cost()`,
+    `compute_modifier_deltas()`, or `compute_recipe_sale_lines()` again for
+    an already-posted sale item. Those functions read the *current* recipe
+    definition and *current* ingredient costs, which is correct only at the
+    moment of sale; re-invoking them later would silently let a historical
+    sale's recorded cost/consumption drift as recipes are edited or
+    ingredient prices change. `pos.serializers.SaleSerializer._apply_stock`
+    and `pos.views.void_sale` both read `.lines` directly for this reason.
     """
 
     tenant = models.ForeignKey(

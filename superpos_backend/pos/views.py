@@ -1089,8 +1089,23 @@ def void_sale(request, pk=None, sale_uuid=None):
             # Restore product stock + record the reversing movement. Keep qty
             # as Decimal so weighted items (e.g., 0.5 kg) round-trip without
             # truncating to zero.
+            from recipes.services import costing as recipes_costing_svc
+
             for item in sale.items.select_related('product', 'warehouse').all():
                 if not item.product_id:
+                    continue
+                if recipes_costing_svc.is_recipe_eligible(item.product):
+                    # Sprint 5 Batch 5 hotfix (review point 5): a recipe
+                    # product was never itself decremented at sale time —
+                    # only its ingredients were, via RECIPE_CONSUME. Bumping
+                    # Product.stock on the recipe product here (as the
+                    # legacy path below does) would be meaningless, and
+                    # skipping ingredient reversal entirely would silently
+                    # leak stock forever on every recipe-sale void. The
+                    # actual reversal happens once, below, from the
+                    # RECIPE_CONSUME ledger — not recomputed from the
+                    # recipe/modifier definitions (those may have changed
+                    # since the sale; only the frozen movements are trusted).
                     continue
                 qty = item.qty
                 if qty > 0:
@@ -1114,6 +1129,39 @@ def void_sale(request, pk=None, sale_uuid=None):
                     source_document_id   = sale.id,
                     actor_user    = user,
                     note          = f'Void of sale {sale.sale_uuid}',
+                )
+
+            # ── Recipe-ingredient stock reversal (Sprint 5 hotfix) ─────────
+            # Reverses every RECIPE_CONSUME movement this sale posted — read
+            # straight from the StockMovement ledger (the frozen record of
+            # what actually left stock), never from a fresh recipe/modifier
+            # computation. This is what makes a recipe-product sale's void
+            # correct: the ingredients that were actually depleted are the
+            # ones restored, at the same warehouse they left from.
+            recipe_consume_moves = StockMovement.objects.filter(
+                tenant=tenant, sale=sale,
+                movement_type=StockMovement.MovementType.RECIPE_CONSUME,
+            ).select_related('product', 'warehouse')
+            for mv in recipe_consume_moves:
+                qty = -mv.qty  # RECIPE_CONSUME rows are stored negative.
+                if qty > 0 and mv.product_id:
+                    Product.objects.filter(pk=mv.product_id).update(
+                        stock=F('stock') + qty,
+                    )
+                    stock_svc.apply_warehouse_delta(
+                        product=mv.product, warehouse=mv.warehouse, delta=qty,
+                    )
+                StockMovement.objects.create(
+                    tenant        = tenant,
+                    product_id    = mv.product_id,
+                    warehouse     = mv.warehouse,
+                    qty           = qty,
+                    movement_type = StockMovement.MovementType.RETURN_IN,
+                    sale          = sale,
+                    source_document_type = 'sale_void',
+                    source_document_id   = sale.id,
+                    actor_user    = user,
+                    note          = f'Void of sale {sale.sale_uuid} — recipe ingredient reversal',
                 )
 
             # ── Financial reversal (GA-7) ─────────────────────────────────

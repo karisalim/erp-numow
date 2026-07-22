@@ -336,6 +336,15 @@ class SaleItem(models.Model):
         'recipes.ProductVariant', on_delete=models.SET_NULL,
         null=True, blank=True, related_name='sale_items',
     )
+    # Snapshot of the variant's name/price at sale time — same rationale as
+    # `product_name`/`barcode` above: if the variant is later renamed,
+    # repriced, or deactivated, this historical line must read exactly as
+    # it did at the moment of sale. `variant_name` stays '' (not NULL) to
+    # match `product_name`'s own convention; `variant_price` stays NULL
+    # (not 0) when there was no variant on this line, since 0 would be
+    # indistinguishable from "a free variant".
+    variant_name  = models.CharField(max_length=60, blank=True, default='')
+    variant_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     created_at   = models.DateTimeField(auto_now_add=True)
     updated_at   = models.DateTimeField(auto_now=True)
 

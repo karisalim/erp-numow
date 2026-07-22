@@ -2720,4 +2720,165 @@ unchanged (see the deliberate scope decision above).
 
 ---
 
+### Batch 5 Hotfix — pre-Batch-6 architecture review (2026-07-22, `s5/batch-5-hotfix-review`)
+
+**Goal:** the Business Owner reviewed Batch 5's design before authorizing
+Batch 6 and raised 6 concrete confirmation/cleanup points (verbatim
+request preserved in the branch's commit history). Two of the six
+surfaced real bugs (points 1 and 6); the rest were legitimate
+documentation/snapshot-completeness gaps. All six are closed in this
+batch — Batch 6 (reporting) has not started yet.
+
+**Point 1 — `PREP_ITEM`/`BUNDLE` ambiguity.** `can_have_recipe=True` is
+shared by three types: `RECIPE_PRODUCT`, `PREP_ITEM`, and `BUNDLE`.
+`PREP_ITEM` belongs in the recipe path (it's consumed directly via a
+recipe in this MVP — no Production Orders exist). `BUNDLE` does **not** —
+it's a Sprint 2 placeholder for a future, different "bundle explosion"
+feature (combos of already-stocked finished goods, consumed as whole-unit
+multiples), not a recipe. Before this fix, the inline condition
+`not affects_stock and can_have_recipe` silently included `BUNDLE` too.
+Fixed by adding `recipes/services/costing.py`'s `is_recipe_eligible(product)`
+— a single centralized predicate (`not affects_stock and can_have_recipe
+and product_type != BUNDLE`), fully documented in its own docstring, and
+wired into all three call sites that used to re-derive the rule inline:
+`SaleSerializer.validate()`, `SaleSerializer.create()`, and
+`SaleSerializer._apply_stock()`.
+
+**Point 2 — Variant snapshot fields.** `SaleItem.variant` was a bare FK;
+a later variant rename/reprice/delete would silently alter how an old
+sale line reads. Added `SaleItem.variant_name` (CharField, blank default
+`''`, matching `product_name`'s convention) and `SaleItem.variant_price`
+(nullable Decimal — `NULL` means "no variant on this line", distinct from
+a legitimate `0`), populated in `create()` whenever `variant is not None`.
+Migration `pos/migrations/0031_saleitem_variant_name_saleitem_variant_price.py`
+— additive only.
+
+**Point 3 — Modifier snapshot completeness.** `SaleItemModifier` already
+froze `option_name`/`price_delta` but not which `ModifierGroup` the option
+belonged to. Added `SaleItemModifier.group_name` (CharField, blank
+default `''`), populated from `option.modifier_group.name` at the same
+point `option_name` is written. Migration
+`recipes/migrations/0005_saleitemmodifier_group_name.py` — additive only.
+
+**Point 4 — Costing-decision documentation.** The "why does only a
+recipe-eligible line use branch-scoped cost, and every other line keep
+reading `Product.cost`" decision was previously explained only in this
+progress doc (see the Batch 5 entry above), not in the code itself.
+Strengthened the inline comment at the `create()` call site to state
+explicitly: this is a deliberate, permanent design choice to avoid
+breaking the Sprint 3/4 COGS test fixtures, not an oversight or a TODO.
+
+**Point 5 — Snapshot as sole source of truth.** Added an explicit
+contract to `SaleItemRecipeCostSnapshot`'s docstring: once written, this
+row (and its `.lines`) is the **only** thing any later operation — void,
+refund, or any future feature — may read for this sale item's recipe cost
+and ingredient consumption. Nothing may call `compute_recipe_cost()`,
+`compute_modifier_deltas()`, or `compute_recipe_sale_lines()` again for an
+already-posted sale item; those functions read *live* recipe/cost state,
+which is only correct at the moment of sale. Verified true in code: the
+new `compute_recipe_sale_lines()` (point 6) is called exactly once, in
+`create()`; `_apply_stock()` reads `snapshot.lines` only; the new
+recipe-aware `void_sale` (below) reads the `StockMovement` ledger only —
+neither recomputes anything.
+
+**Point 6 — Negative-consumption netting bug (real bug, not just a
+documentation gap).** `compute_modifier_deltas()` (Batch 4/5 design)
+correctly *drops* a negative-delta consumption line from its returned
+`lines` for cost purposes (D-34: a removal doesn't create negative COGS)
+— but Batch 5's `create()` was reusing that same filtered list for actual
+**stock consumption** too. Net effect: a "No Onion" modifier's `-20g`
+line was silently dropped before ever being netted against the recipe's
+own `+20g` onion line, so the onion was **never actually removed from
+stock** — the modifier affected cost/price bookkeeping but not real
+consumption. Fixed with a new function,
+`recipes/services/costing.py::compute_recipe_sale_lines()`, which is now
+the *only* function `create()` calls for a recipe line's cost/consumption:
+it nets recipe-line quantities against every selected modifier's delta
+**per component** (summing signed quantities across both sources), then:
+- raises `RecipeError` (→ clean 400) if any component's net would go
+  negative — a modifier can never remove more of an ingredient than the
+  recipe (plus other selected modifiers) actually provides;
+- treats an exact net of zero as valid and normal (fully, legitimately
+  removed) — no error, no `RECIPE_CONSUME` movement, no cost for that
+  component;
+- otherwise consumes/costs the net positive quantity, correctly reduced
+  by the modifier.
+
+`compute_modifier_deltas()` itself is kept unchanged (still used for
+per-modifier cost previews elsewhere) — `_resolve_modifier_consumptions()`
+was extracted as a shared helper so both functions resolve
+variant-specific-vs-agnostic consumption rows identically.
+
+**Additional fix surfaced during point 5's review, not in the original 6
+points but directly blocking a correct "sole source of truth" story:
+`void_sale` was not recipe-aware.** Before this fix, voiding a recipe-
+product sale item would (a) bump the recipe product's own `Product.stock`
+— meaningless, since it was never decremented at sale time
+(`affects_stock=False`) — and (b) do nothing at all to restore the
+ingredients actually consumed via `RECIPE_CONSUME`, silently leaking
+stock forever on every recipe-sale void. This is a correctness gap
+introduced by Batch 5 itself (before Batch 5, every sale item went
+through the same uniform `SALE_OUT`/stock-bump path, so the old void loop
+was correct for everything it saw). Fixed in `pos/views.py::void_sale`:
+the per-item loop now skips the direct stock bump for a recipe-eligible
+item (via the same `is_recipe_eligible()` predicate), and a new block
+reverses every `RECIPE_CONSUME` `StockMovement` the sale posted — read
+directly from the ledger (`StockMovement.objects.filter(sale=sale,
+movement_type=RECIPE_CONSUME)`), never recomputed from the recipe/modifier
+definitions (which may have changed since the sale). Each reversed
+movement restores `Product.stock` + the cached `WarehouseStock` balance at
+the exact warehouse the ingredient left from, and writes a compensating
+`RETURN_IN` row.
+
+**Files changed:**
+- `recipes/services/costing.py` — `is_recipe_eligible()`,
+  `_resolve_modifier_consumptions()` (extracted), `compute_recipe_sale_lines()`
+  (new); `__all__` updated.
+- `recipes/models.py` — `SaleItemModifier.group_name` field;
+  `SaleItemRecipeCostSnapshot` docstring strengthened (point 5 contract).
+- `pos/models.py` — `SaleItem.variant_name`/`variant_price` fields.
+- `pos/migrations/0031_saleitem_variant_name_saleitem_variant_price.py`,
+  `recipes/migrations/0005_saleitemmodifier_group_name.py` — both
+  additive-only (`AddField`), no data mutation.
+- `pos/serializers.py` — `SaleSerializer.validate()`/`create()` use
+  `is_recipe_eligible()`; `create()` calls `compute_recipe_sale_lines()`
+  instead of separate `compute_recipe_cost()` +
+  per-option `compute_modifier_deltas()` calls, catches `RecipeError` as a
+  400, populates `variant_name`/`variant_price`/`group_name`;
+  `_apply_stock()` uses `is_recipe_eligible()`.
+- `pos/views.py` — `void_sale` is now recipe-aware (see above).
+
+**Tests:** 8 new tests added to `recipes/test_recipes.py`'s
+`RecipeSalePostingTests` (now 17 tests in that class, 42 in the file):
+BUNDLE-with-a-Recipe-attached still sells through the legacy `SALE_OUT`
+path, never `RECIPE_CONSUME` (point 1); variant snapshot fields survive a
+rename + outright deletion of the `ProductVariant` (point 2); modifier
+`group_name` survives a `ModifierGroup` rename (point 3); a removal
+modifier taking more than the recipe provides → clean 400, zero
+`RECIPE_CONSUME` movement, zero snapshot line (point 6, the "reject"
+half); a removal modifier taking exactly the recipe's own quantity → 201,
+net-zero, zero `RECIPE_CONSUME` movement, zero cost/snapshot line for
+that component, base recipe cost unaffected (point 6, the "net correctly"
+half — this is the test that would have caught the original bug: before
+the fix, this modifier would leave the onion's `+20g` `RECIPE_CONSUME`
+movement firing unchanged); voiding a recipe sale restores both
+ingredients' stock by their exact original quantities via `RETURN_IN`,
+with zero movement recorded against the recipe product itself (void
+fix).
+
+**Verification:** `manage.py check` clean. `manage.py makemigrations
+--check --dry-run` clean (exactly the two expected additive migrations).
+`recipes.test_recipes` alone: 42/42 passed. Full suite: **741/741
+passed** (735 baseline + 8 new — the two new migrations added zero net
+test-count change beyond the 8 new test methods, since no prior test
+needed updating).
+
+**Not touched:** Batch 6 (recipe/food-cost reporting) not started — this
+batch is exclusively the pre-Batch-6 confirmation/cleanup the owner asked
+for. No frontend file. No GL code. `compute_modifier_deltas()`'s own
+signature/behavior unchanged (still used standalone elsewhere); only
+`create()`'s call site switched to `compute_recipe_sale_lines()`.
+
+---
+
 *(Later batches of Sprint 5 get their own entries here as they land.)*

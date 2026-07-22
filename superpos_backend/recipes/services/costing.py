@@ -23,6 +23,7 @@ from django.db.models import Q
 
 from pos.models import BranchWarehouse
 from pos.services import costing as pos_costing_svc
+from pos.services.product_types import ProductType
 from recipes.models import Recipe, RecipeVersion
 
 # D-26 (Sprint 5 Phase 0, 2026-07-22): recipe -> sub-recipe -> raw
@@ -52,6 +53,44 @@ class RecipeCostLine:
 class RecipeCostResult:
     total_cost: Decimal
     lines: List[RecipeCostLine] = field(default_factory=list)
+
+
+def is_recipe_eligible(product) -> bool:
+    """Whether `product` sells through the Sprint 5 recipe path
+    (branch-scoped cost roll-up + `RECIPE_CONSUME` depletion) rather than
+    the legacy stock-item path (`Product.cost` snapshot + `SALE_OUT`). This
+    is the single, centralized gate — `SaleSerializer.validate()`/
+    `create()`/`_apply_stock()` all call this instead of re-deriving the
+    condition inline, matching the "ask the centralized matrix, never
+    branch on raw flags in more than one place" discipline
+    `pos.services.product_types` already established.
+
+    Deliberately narrower than the raw `can_have_recipe` behavior-matrix
+    flag. Three product types carry `can_have_recipe=True`:
+    `RECIPE_PRODUCT`, `PREP_ITEM`, and `BUNDLE` — but only the first two
+    are in scope here:
+
+      * `RECIPE_PRODUCT` / `PREP_ITEM` — a genuine recipe/BOM of measured
+        ingredients (grams, ml, …), costed via AVCO and consumed through
+        base-unit quantities. This is exactly what Sprint 5 builds.
+      * `BUNDLE` is EXCLUDED on purpose. `can_have_recipe=True` on `BUNDLE`
+        is a Sprint 2 placeholder for a future, different feature — "bundle
+        explosion": a combo of already-stocked FINISHED goods (e.g. "Combo
+        Meal = 1 Burger + 1 Fries + 1 Drink"), each consumed as a whole-unit
+        multiple, not a measured/converted recipe quantity. Nothing in this
+        sprint's scope (owner's request, Sprint 5 plan) designs or builds
+        that mechanism. A `BUNDLE`-typed product — even if a `Recipe` is
+        attached to it via the Batch 3 API, which has no type restriction —
+        falls through to the exact legacy stock-item sale path unchanged
+        (its own `Product.stock`/`SALE_OUT`, same as before Sprint 5, same
+        as `SERVICE`/`FIXED_ASSET` today) until real bundle-explosion logic
+        is designed and built as its own slice.
+    """
+    behavior = product.type_behavior
+    return (
+        not behavior.affects_stock and behavior.can_have_recipe
+        and product.product_type != ProductType.BUNDLE
+    )
 
 
 def get_active_recipe(product, variant=None) -> Optional[RecipeVersion]:
@@ -139,18 +178,12 @@ def validate_recipe_lines(*, product, component_products: Iterable) -> None:
             )
 
 
-def compute_modifier_deltas(modifier_option, variant=None, branch=None) -> RecipeCostResult:
-    """Cost contribution of one selected `ModifierOption`, for a given
-    `variant` (or `variant=None` for a product with no size variants).
-
-    Matches `ModifierOptionConsumption` rows scoped to this exact variant
-    OR variant-agnostic (`variant=NULL`); when both exist for the same
-    component, the variant-specific row wins. Per D-34, a **negative**
-    consumption delta (e.g. "No Onion", `qty_base < 0`) is not consumed at
-    sale time and contributes **zero** cost — removing an ingredient must
-    never produce a negative COGS line; a free modifier (`price_delta=0`)
-    still contributes its full consumption cost.
-    """
+def _resolve_modifier_consumptions(modifier_option, variant=None) -> List:
+    """`ModifierOptionConsumption` rows for `modifier_option`, scoped to
+    this exact `variant` OR variant-agnostic (`variant=NULL`); when both
+    exist for the same component, the variant-specific row wins. Shared by
+    every function below that reads modifier consumption — the one place
+    this dedup rule is expressed."""
     consumptions = list(
         modifier_option.consumptions.filter(is_active=True)
         .filter(Q(variant=variant) | Q(variant__isnull=True))
@@ -162,10 +195,29 @@ def compute_modifier_deltas(modifier_option, variant=None, branch=None) -> Recip
         is_more_specific = existing is not None and existing.variant_id is None and consumption.variant_id is not None
         if existing is None or is_more_specific:
             by_component[consumption.component_product_id] = consumption
+    return list(by_component.values())
 
+
+def compute_modifier_deltas(modifier_option, variant=None, branch=None) -> RecipeCostResult:
+    """Cost contribution of one selected `ModifierOption` in isolation, for
+    a given `variant` (or `variant=None` for a product with no size
+    variants). Per D-34, a **negative** consumption delta (e.g. "No
+    Onion", `qty_base < 0`) is not consumed at sale time and contributes
+    **zero** cost here — removing an ingredient must never produce a
+    negative COGS line; a free modifier (`price_delta=0`) still
+    contributes its full consumption cost.
+
+    This function looks at ONE modifier on its own — it does not know
+    about the recipe's own quantities, so it cannot tell whether a removal
+    delta is actually satisfiable (e.g. "No Onion" -40g when the recipe
+    only has 20g). For a real sale line, `compute_recipe_sale_lines` is
+    the function that nets a recipe against every selected modifier
+    together and enforces that. This one stays useful on its own for a
+    "preview this modifier's cost" API/report.
+    """
     lines = []
     total = Decimal('0.00')
-    for consumption in by_component.values():
+    for consumption in _resolve_modifier_consumptions(modifier_option, variant):
         if consumption.qty_base <= 0:
             continue  # negative/removal delta — not consumed, zero cost (D-34)
         unit_cost = pos_costing_svc.get_cost_for_sale(consumption.component_product, branch=branch)
@@ -176,6 +228,79 @@ def compute_modifier_deltas(modifier_option, variant=None, branch=None) -> Recip
             component_name=consumption.component_product.name,
             qty_base=consumption.qty_base, unit_cost=unit_cost, line_cost=line_cost,
             is_modifier_line=True, source_modifier_option_id=modifier_option.id,
+        ))
+    return RecipeCostResult(total_cost=total, lines=lines)
+
+
+def compute_recipe_sale_lines(
+    recipe_version: RecipeVersion, *, modifier_options: Iterable = (), variant=None, branch=None,
+) -> RecipeCostResult:
+    """The single authoritative computation for one real recipe sale line
+    — `SaleSerializer.create()` calls this exactly once per recipe line;
+    its result is what gets frozen into the immutable
+    `SaleItemRecipeCostSnapshot`(+lines), and everything downstream
+    (`_apply_stock`'s `RECIPE_CONSUME` movements, any future void/refund)
+    reads that snapshot only — nothing calls this function, or
+    `compute_recipe_cost`/`compute_modifier_deltas`, a second time for an
+    already-posted sale.
+
+    Unlike `compute_recipe_cost` (base recipe only) and
+    `compute_modifier_deltas` (one modifier in isolation), this function
+    **nets** the base recipe's per-component quantities against every
+    selected modifier's consumption delta for that same component —
+    required so a removal modifier (e.g. "No Onion", -20g) actually
+    reduces what the recipe's own onion line would otherwise consume,
+    rather than being silently dropped alongside it.
+
+    Business rule (confirmed): the net quantity for any component can
+    never go negative. If a modifier is configured to remove MORE of an
+    ingredient than the recipe (plus any other selected modifier) actually
+    provides — e.g. the recipe has 20g onion and "No Onion" is configured
+    to remove 40g — that is a data/configuration problem, not something to
+    silently floor to zero: this function raises `RecipeError` (the
+    caller turns it into a 400) instead of ever producing a negative
+    `RECIPE_CONSUME` quantity. A net of exactly zero (fully, validly
+    removed) is not an error — that component simply contributes no cost
+    and no stock movement.
+    """
+    net_qty: dict = {}
+    component_by_id: dict = {}
+    touched_by_modifier: set = set()
+
+    for line in recipe_version.lines.filter(is_active=True).select_related('component_product'):
+        cid = line.component_product_id
+        net_qty[cid] = net_qty.get(cid, Decimal('0')) + line.qty_base
+        component_by_id[cid] = line.component_product
+
+    for option in modifier_options:
+        for consumption in _resolve_modifier_consumptions(option, variant):
+            cid = consumption.component_product_id
+            net_qty[cid] = net_qty.get(cid, Decimal('0')) + consumption.qty_base
+            component_by_id[cid] = consumption.component_product
+            touched_by_modifier.add(cid)
+
+    for cid, qty in net_qty.items():
+        if qty < 0:
+            raise RecipeError(
+                f'modifier selection would consume a negative quantity of '
+                f'"{component_by_id[cid].name}" ({qty}) — a removal modifier '
+                f'cannot take away more of an ingredient than the recipe '
+                f'actually provides',
+            )
+
+    lines = []
+    total = Decimal('0.00')
+    for cid, qty_base in net_qty.items():
+        if qty_base <= 0:
+            continue  # fully removed by a modifier — nothing consumed, nothing costed
+        component = component_by_id[cid]
+        unit_cost = pos_costing_svc.get_cost_for_sale(component, branch=branch)
+        line_cost = pos_costing_svc.quantize_money(qty_base * unit_cost)
+        total += line_cost
+        lines.append(RecipeCostLine(
+            component_product_id=cid, component_name=component.name,
+            qty_base=qty_base, unit_cost=unit_cost, line_cost=line_cost,
+            is_modifier_line=cid in touched_by_modifier,
         ))
     return RecipeCostResult(total_cost=total, lines=lines)
 
@@ -220,6 +345,7 @@ def resolve_kitchen_warehouse(*, tenant, branch):
 
 __all__ = [
     'RecipeError', 'RecipeCostLine', 'RecipeCostResult', 'MAX_RECIPE_DEPTH',
-    'get_active_recipe', 'compute_recipe_cost', 'validate_recipe_lines',
-    'compute_modifier_deltas', 'activate_recipe_version', 'resolve_kitchen_warehouse',
+    'is_recipe_eligible', 'get_active_recipe', 'compute_recipe_cost',
+    'validate_recipe_lines', 'compute_modifier_deltas', 'compute_recipe_sale_lines',
+    'activate_recipe_version', 'resolve_kitchen_warehouse',
 ]
