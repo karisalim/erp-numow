@@ -2413,6 +2413,55 @@ already-tracked product, skipped nothing unexpectedly).
 empty scaffold only — no models/migrations yet, that starts at Batch 2),
 sale-posting path, any frontend file, any GL code.
 
+### Batch 2 — `ProductVariant` model + CRUD (backend)
+
+**Goal:** size variants (Small/Medium/Large) as their own model, matching
+D-24's "variant-of-one-product" decision — each variant is an independent
+row with its own sell price, not a computed scale of the parent product's
+price, and deliberately carries no barcode.
+
+**Files changed:**
+- `recipes/models.py` (new app, first real model) — `ProductVariant`:
+  `tenant`, `product` FK (string ref `'pos.Product'`, CASCADE,
+  `related_name='variants'`), `name`, `sku`, `plu`, `price` (own sell
+  price), `sort_order`, `is_active`, timestamps. `Meta`:
+  `unique(tenant, product, name)` + `CHECK price >= 0`.
+- `recipes/migrations/0001_initial.py` — `CreateModel` + 2 constraints,
+  the app's first migration.
+- `recipes/serializers.py` (new) — `ProductVariantSerializer`, mirrors
+  `PriceTierSerializer`'s friendly-400 duplicate-name validation pattern.
+- `recipes/views.py` (new) — `_ProductScopedMixin` (a deliberate, small
+  duplicate of `pos.views._ProductScopedMixin` — that one is module-local
+  to `pos.views`, and re-implementing ~15 lines was cheaper than exporting
+  a new cross-app contract for it) + `ProductVariantListCreateView`/
+  `DetailView`/`DeactivateView`, reusing `pos.views.TenantMixin` (generic,
+  no `pos`-model dependency, safe to import across apps) and
+  `accounts.permissions`. Same `IsCashierOrAbove` read / `IsManagerOrAbove`
+  write split as every other catalog-admin endpoint.
+- `recipes/urls.py` (new) — `products/<product_pk>/variants/` (+detail/
+  deactivate), same nested-resource shape as `pos`'s
+  `products/<pk>/units/`.
+- `superpos_backend/urls.py` — mounted `recipes.urls` at `api/`, alongside
+  `pos.urls` (no path collisions — `recipes` only owns the `variants/`
+  sub-path under `products/<pk>/`).
+
+**Tests:** new `recipes/tests.py` — `ProductVariantModelTests` (create,
+per-`(tenant, product, name)` uniqueness enforced at the DB level, the
+same name allowed on two different products, negative price rejected,
+confirms no `barcode` field exists on the model at all) and
+`ProductVariantApiTests` (manager can create, cashier forbidden to
+write but can list, duplicate name → friendly 400, negative price →
+friendly 400, PATCH updates price, deactivate + deactivate forbidden for
+cashier, cross-tenant product → 404, no DELETE verb — mirrors the
+`ProductUnit`/`PriceTier` API test conventions exactly).
+
+**Verification:** `manage.py check` clean. `manage.py makemigrations
+--check --dry-run` clean (exactly the one expected `recipes` migration).
+Full suite: **699/699 passed** (684 baseline + 15 new).
+
+**Not touched:** `pos` app's models/migrations, sale-posting path, Recipe/
+Modifier models (Batches 3-4), any frontend file, any GL code.
+
 ---
 
 *(Later batches of Sprint 5 get their own entries here as they land.)*
