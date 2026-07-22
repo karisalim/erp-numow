@@ -386,47 +386,249 @@ Cross-checked Sprint 5 against every doc that could plausibly need updating:
 
 ### E-5. Coverage gap review — measured with `coverage.py`, not guessed
 
-Ran `coverage run --source=recipes,pos.serializers,pos.services.costing,
-pos.services.stock_movements,pos.views` against the full suite (a tool the
-repo didn't have installed; added to the dev venv only, not
-`requirements.txt`, since it's a measurement tool, not a runtime dependency).
+**Correction (2026-07-22, owner pre-close-out review):** the original 91%
+figure below was measured by running `coverage run ... manage.py test
+recipes pos.test_costing pos.test_reporting` — three test modules, not the
+full suite. That undercounted `pos/services/stock_movements.py` badly (49%
+in that scoped run) because most of its coverage comes from `pos/tests.py`,
+which the scoped run never executed. Re-measured against the full suite
+(`coverage run --source=recipes,pos.services.costing,pos.services
+.stock_movements manage.py test`, all 781 tests) — the honest baseline was
+**95%**, not 91%; a coverage figure is only meaningful measured against the
+same suite that will actually run in CI, never a hand-picked subset.
 
-| Module | Before this pass | After |
+| Module | Corrected baseline (full suite) | After this review's fixes |
 |---|---|---|
-| `recipes/services/costing.py` | 99% (2 missing: L161, L394) | 99% (1 missing: L161) |
-| `pos/serializers.py` (whole file) | 93% | 94% |
-| `pos/views.py` (whole file) | 85% | 85% (2 real gaps closed; net flat — the file is large and mostly pre-Sprint-5 code) |
-| **Sprint-5-relevant total** (recipes + costing.py + stock_movements.py) | 91% | 91%, with both real gaps closed |
+| `pos/services/costing.py` | 97% (2 missing: L259-260) | **100%** |
+| `pos/services/stock_movements.py` | 96% (5 missing, all pre-existing optional-filter branches, not Sprint-5 code) | 96% (unchanged — see below) |
+| `recipes/models.py` | 93% (11 missing, all `__str__` methods) | 93% (unchanged — see below) |
+| `recipes/serializers.py` | 85% | 86% |
+| `recipes/views.py` | 83% | **96%** |
+| **Sprint-5-relevant total** | **95%** (corrected) | **97%** |
 
-Two genuine gaps found and closed with real tests (not defensive/unreachable
-branches — both are plausible production scenarios):
+Gaps found and closed in this review (all real, plausible-in-production
+gaps, not defensive padding):
 
-- **`recipes.services.costing.resolve_kitchen_warehouse`'s `RecipeError`
-  path** (a branch with no default KITCHEN or SALES warehouse configured —
-  a realistic "new branch not fully set up yet" state) had **zero test
-  coverage** of the exception actually reaching a clean 400, not an
-  unhandled 500, and of the whole sale (including the already-inserted
-  `Sale` row) rolling back. New test:
-  `test_recipe_sale_rejected_when_branch_has_no_kitchen_or_sales_warehouse`.
-- **`_parse_report_window`'s error branches, as reached through the two
-  Batch 6 report views specifically** (not just through `dashboard-summary`/
-  `dashboard-trend`, which were already tested) — invalid date and
-  non-numeric `branch_id` on `recipe-profitability` and
-  `ingredient-consumption-report`. New tests: `test_invalid_start_date_
-  returns_400` / `test_non_numeric_branch_id_returns_400` on both report
-  test classes.
+- **`update_cost_from_adjustment`'s cold-start branch** (`pos/services
+  /costing.py:259-260` — a positive stock-count adjustment on a
+  `(product, branch)` pair with no prior `InventoryCost` row at all) had
+  zero coverage; every existing test called `apply_purchase_receipt` first,
+  which always creates the row before the adjustment path could ever hit
+  its own `if inv_cost is None` branch. Real scenario: an ingredient
+  entered via a physical count before it was ever purchased through the
+  system. New test:
+  `test_update_cost_from_adjustment_on_product_with_no_prior_inventory_cost_row`.
+  `pos/services/costing.py` is now **100%** covered.
+- **Every GET/PATCH/deactivate admin endpoint for Recipe, RecipeVersion,
+  ModifierGroup, and ModifierOption had never been called by a single
+  test** — the existing suite exercised the POST/create paths heavily
+  (needed for the sale-integration tests) but never a plain retrieve,
+  update, or deactivate on any of these five view classes, and never the
+  `?variant_id=` filter on the recipe list. Closed with 6 new tests:
+  `test_recipe_detail_get_and_patch`, `test_recipe_detail_cashier_can_read
+  _but_not_write`, `test_recipe_list_filters_by_variant_id`,
+  `test_recipe_version_detail_get`,
+  `test_modifier_group_detail_get_patch_and_deactivate`,
+  `test_modifier_option_detail_get_patch_and_deactivate`,
+  `test_modifier_option_consumption_detail_get`. This took
+  `recipes/views.py` from 83% to 96%.
+- **AR/GL isolation for a recipe sale was asserted only by code-reading,
+  never by a running test** — see F-9 in Part F below. New test:
+  `test_credit_recipe_sale_posts_correct_ar_charge_unaffected_by_recipe_logic`.
+- **Combined void scenario** — see F-10 in Part F below. New test:
+  `test_void_recipe_sale_with_variant_modifier_and_oversell_combined`.
 
-Remaining gaps reviewed and **deliberately left uncovered**, each verified to
-be a defensive/unreachable branch or a pattern consistent with the rest of
-the codebase's own baseline (not a Sprint-5-introduced risk):
-`recipes/services/costing.py:161` (an active `RecipeVersion` with zero
-active lines — a degenerate state the function still handles safely,
-returning 0); the `else: serializer.save(product=...)` no-tenant fallback
-branches across `recipes/views.py` (same pattern, same coverage level, as
-every pre-existing Units/Price-Tiers/Categories admin view in this repo);
-GET-vs-write permission branches and idempotent-deactivate-when-already-
-inactive branches in the modifier/variant/recipe CRUD views (standard DRF
-CRUD boilerplate, not custom Sprint 5 logic).
+Remaining gaps reviewed and **deliberately left uncovered**, each verified
+line-by-line (not assumed) to be a defensive/unreachable branch or a
+pattern consistent with the rest of the codebase's own baseline (not a
+Sprint-5-introduced risk):
+
+- `recipes/services/costing.py:161` — an active `RecipeVersion` with zero
+  active lines, handled safely (returns 0).
+- `recipes/models.py`'s 11 missing lines — every one is a `__str__` method
+  (Django-admin display only, zero business logic, never exercised by an
+  API test anywhere in this codebase's existing convention).
+- `recipes/views.py`'s remaining 10 lines — the `else:
+  serializer.save(product=...)` no-tenant fallback branches (same pattern,
+  same coverage level, as every pre-existing Units/Price-Tiers/Categories
+  admin view in this repo) and a handful of `IsCashierOrAbove()` /
+  `get_queryset()` lines on view classes whose write half is tested but
+  whose plain-GET half wasn't worth a dedicated test once the sibling
+  classes above proved the shared `_ProductScopedMixin`/
+  `_ModifierGroupScopedMixin` pattern works correctly.
+- `pos/services/stock_movements.py`'s 5 missing lines — optional-filter
+  combinations (`branch`/`warehouse`/`actor_user`/date-range) inside a
+  pre-existing (Sprint 1-2 era) stock-statement query builder, not
+  Sprint-5-introduced code; every combination that Sprint 5 itself
+  exercises (branch + product) is covered.
+- `recipes/serializers.py`'s remaining 27 lines — cross-tenant FK guards,
+  name-uniqueness guards, and unit-conversion error translation, all
+  identical in shape to guards already tested on every other Sprint 2-5
+  serializer in this codebase (`ProductUnitSerializer`, `PriceTierSerializer`,
+  etc.) — not re-tested per serializer as a matter of this repo's own
+  established convention, not a Sprint-5-specific gap.
+
+---
+
+## Part F — Pre-close-out owner review (2026-07-22)
+
+The Business Owner asked six specific questions before signing off on
+Sprint 5. Each was answered by re-running real code, not by re-reasoning
+from the verification pass's existing prose — three led to genuine gaps,
+closed with new tests in this same pass (see E-5 above for the coverage
+deltas).
+
+### F-1 (was Q1). What are the 60 queries, and is there more to squeeze?
+
+Re-ran the 60-query recipe sale (2 base recipe lines + 1 modifier line, 3
+distinct components) under `CaptureQueriesContext` and categorized every
+query by table:
+
+| Count | Table / operation | Why |
+|---|---|---|
+| 12 | `SAVEPOINT`/`RELEASE` (6 pairs) | Nested-transaction overhead — each of the 3 components' `stock_movements.record_stock_out()` call opens its own `@transaction.atomic()` block (2 savepoints per component: the stock-out call itself, plus one more nested inside it). |
+| 8 | `pos_product` (5 SELECT + 3 UPDATE) | 1 SELECT for the sold product, 3 `select_for_update()` SELECTs + 3 stock-counter UPDATEs, one pair per component. |
+| 6 | `pos_warehousestock` (3+3) | One SELECT + one UPDATE per component (`apply_warehouse_delta`). |
+| 4 | `accounts_tenant` | Four independent tenant lookups in one request (permission classes, `TenantMixin._tenant()`, serializer context) instead of one resolved-and-reused value. |
+| 3 | `pos_inventorycost` (SELECT) | One per component's `get_cost_for_sale()` — already minimal post-F-8 (1 query when the row exists, not 2). |
+| 3 | `pos_stockmovement` (INSERT) | One `RECIPE_CONSUME` row per component — necessary, one write per real ledger entry. |
+| 3 | `pos_saleitem` | 1 INSERT + 2 SELECT. |
+| 2 | `pos_branchwarehouse` | `resolve_kitchen_warehouse`'s try-KITCHEN-then-SALES fallback — resolved **once** per sale, not once per component (already correctly cached). |
+| 2 each | `recipes_saleitemmodifier`, `recipes_saleitemrecipecostsnapshot`, `recipes_saleitemrecipecostsnapshotline`, `accounts_financialaccountmovement` | 1 INSERT (the snapshot-line INSERT is a single `bulk_create` regardless of line count) + 1 SELECT reading the row back for the response payload. |
+| 1 each | 11 more tables | Recipe/version/line/modifier-group/modifier-option reads (one each, correctly not repeated), the `Sale` INSERT, the `Payment` INSERT, payment-routing/account reads. |
+
+**Real remaining opportunity, found but not taken:** the 4 `accounts_tenant`
+re-fetches and the 12 SAVEPOINT/RELEASE pairs together are ~16 of the 60
+queries (27%). The tenant re-fetches are collapsible if `_tenant()` cached
+its result on the request instead of re-querying. The savepoints are
+collapsible by not wrapping each component's `record_stock_out()` call in
+its own `atomic()` when it's already running inside the sale's outer
+transaction — but that call is written to be independently atomic on
+purpose (so a partial per-component failure can't leave a half-written
+`StockMovement`), and removing it changes a real correctness property, not
+just a performance one. **Not done in this pass** — matches this project's
+own standing rule ("don't refactor working code without measurable
+benefit"): at Sprint 5's current scale (a handful of components per sale)
+this is single-digit-millisecond overhead, and the fix for the savepoints
+specifically trades a small perf gain for touching lock-sensitive code
+right after a gate review, which is the wrong moment to do it. Flagged as
+a **P3 backlog item** for whenever real production query-volume data
+justifies it — not before.
+
+### F-2 (was Q2). Do the Batch 6 reports paginate? If not, what's the plan?
+
+**No.** Both `recipe_profitability` and `ingredient_consumption_report`
+(`pos/views.py`) are plain `@api_view` functions returning
+`Response({'results': rows})` — no `ListAPIView`, no
+`StandardPageNumberPagination`, no `LIMIT`.
+
+The actual risk differs by endpoint:
+
+- **`recipe_profitability`** aggregates entirely in SQL
+  (`.values(...).annotate(...)`) — response size is bounded by the number
+  of distinct `(product, variant)` pairs *sold in the window*, which
+  tracks menu size, not transaction volume. Low risk at any realistic
+  catalog size.
+- **`ingredient_consumption_report`** aggregates in **Python**, iterating
+  every `RECIPE_CONSUME` `StockMovement` row in the window
+  (`movements.iterator()`) to build the per-ingredient totals dict. The
+  *response* is still bounded by distinct ingredients (catalog-sized), but
+  the *request's work* scales linearly with movement-row count — a
+  year-long window on a high-volume tenant reads every recipe-consumption
+  row ever written in that window, in Python, on every request.
+
+**Plan (not done in this pass — a real architectural choice, not a quick
+fix, so it's recorded here for the next sprint rather than rushed into a
+gate-review turn):** convert `ingredient_consumption_report`'s
+per-movement Python loop to a SQL-side `.values('product').annotate(qty=
+Sum(...))`, matching `recipe_profitability`'s own pattern. The blocker is
+that `cost_consumed` needs each movement's own `(product, branch)`-scoped
+`InventoryCost.avg_unit_cost`, which isn't stored on the movement row
+itself — doing this in pure SQL needs either a correlated subquery per
+`(product, branch)` or a join against `InventoryCost`, not just a
+straight `Sum()`. Recommended as a Sprint 6 backlog item once there's a
+tenant with enough real transaction volume to justify it; not urgent
+today.
+
+### F-3 (was Q3). Was performance measured at production-scale data volume?
+
+**No — say so plainly.** Every query-count test in Sprint 5 (the 60/35/≤5
+regression guards) uses realistic-but-small fixtures: one sale with 3
+components, 10 movements, 10 sale lines. These prove query **count** stays
+flat as row count grows (the actual N+1 defense) — they do **not** measure
+wall-clock latency under production-scale volume (thousands of sales,
+tens of thousands of `RECIPE_CONSUME` rows). No load/stress test exists
+anywhere in this sprint or the ones before it. Do not read "60 queries,
+measured" as "verified fast at scale" — those are different claims, and
+only the first one has evidence behind it. A real stress-test pass (seed
+10k+ sales, measure `ingredient_consumption_report` and
+`recipe_profitability` latency directly, ideally against
+production-realistic Postgres statistics/indexes) is recommended as a
+dedicated pre-launch task, not something this backend-correctness gate
+was ever scoped to cover.
+
+### F-4 (was Q4). Coverage, module-by-module, with an honest account of the remainder.
+
+See the corrected **E-5** above for the full table and per-module
+breakdown — summary: **97%** Sprint-5-relevant coverage (up from a
+corrected 95% baseline; the previously-reported 91% was a measurement
+error, not a real number — see E-5's correction note), `pos/services
+/costing.py` now 100%. The remaining 3% is, line-by-line: `__str__`
+methods (`recipes/models.py`), pre-existing shared-module optional-filter
+combinations (`pos/services/stock_movements.py`), one degenerate-but-safe
+recipe-cost edge case, and cross-tenant/uniqueness validation guards
+whose shape is already proven by identical, already-tested guards
+elsewhere in this codebase's own established convention.
+
+### F-5 (was Q5). Is FinancialAccountMovement / CustomerARMovement / the GL pipeline unaffected?
+
+**Yes — verified two ways, not just asserted:**
+
+1. **Structurally**, by reading the call graph: `SaleSerializer.create()`
+   calls `pos.services.sale_posting.post_sale_ledgers(sale=sale,
+   method=..., customer=..., actor_user=...)` exactly **once per sale**,
+   *after* every item (recipe or plain stock-item) has already been
+   processed. That function reads only `sale.total`, `method`, and
+   `customer` — it never reads `SaleItem.variant`, `SaleItemModifier`, or
+   any recipe-cost-snapshot table. It cannot be affected by anything
+   Sprint 5 added because it has no code path that touches those tables.
+2. **Empirically**, by two runs of real code: the F-1 query trace above
+   shows a cash recipe sale creates exactly the same
+   `accounts_financialaccountmovement` shape (1 SELECT + 1 INSERT) as any
+   ordinary cash sale. New test
+   `test_credit_recipe_sale_posts_correct_ar_charge_unaffected_by_recipe_logic`
+   posts a **credit** sale of a recipe product with a modifier and asserts
+   the resulting `CustomerARMovement.debit` equals `sale.total` exactly
+   (base price + modifier price delta + tax), `source_document_type`/`_id`
+   point at the sale, and zero `FinancialAccountMovement` rows are created
+   (credit sales never touch the cash-drawer ledger) — closing what was
+   previously an inference from Sprint 3's `Batch4NoGlPostingTests` (which
+   never actually posted a recipe sale) into a direct proof.
+
+### F-6 (was Q6). Was void tested with Variant + Modifier + Oversell combined?
+
+**No, until this pass — a real, now-closed gap.** The pre-existing void
+test (`test_void_recipe_sale_restores_ingredient_stock`) used a plain
+base-recipe sale with no variant and no modifier; the oversell test
+(`test_oversell_recipe_ingredient_still_succeeds_with_warning`) and the
+variant test (`test_recipe_sale_with_variant_uses_variant_recipe_and_price`)
+each proved their own mechanism independently at **sale** time, but none
+of the three had ever been combined with each other, and none had ever
+been combined with **void**.
+
+New test
+`test_void_recipe_sale_with_variant_modifier_and_oversell_combined`: sells
+the "Large" variant (its own independent 300g-chicken recipe) plus the
+Extra Cheese modifier (40g cheese), with the variant's own chicken
+ingredient deliberately oversold (stock=10 against a 300g requirement,
+confirmed via the sale-time warning and a post-sale negative stock
+balance) — then voids the sale and asserts both `RECIPE_CONSUME` rows
+(chicken 300g, cheese 40g) reverse via `RETURN_IN` for their **exact**
+consumed quantities, restoring stock to precisely its pre-sale value even
+though it went negative in between; that the base recipe's lettuce line
+(irrelevant to the variant's own recipe) never appears in the sale's
+movements at all; and that the recipe product itself never gets a
+phantom stock movement. Passed on the first run.
 
 ---
 
@@ -435,11 +637,19 @@ CRUD boilerplate, not custom Sprint 5 logic).
 Sprint 5 backend is **cleared for the frontend batches (8–10).** All P1
 defects from the first pass are fixed and regression-tested; the
 verification pass found one additional real perf issue (F-8, fixed) and
-closed two real coverage gaps with regression tests — no new correctness
-defect was found. The full suite is green (**771 tests**); migrations are
-additive-only; the API surface is additive; an end-to-end reconciliation
-test now proves the COGS and recipe-costing pipelines agree exactly across
-five independent read paths. The two remaining documented risks (F-4
-idempotency race, F-6/R-3 a future ingredient-report index) are pre-existing
-or scale-dependent, carry explicit recommendations, and do not block the
-frontend work.
+closed two real coverage gaps with regression tests; the pre-close-out
+owner review (Part F) closed three further gaps (the AR/GL isolation proof,
+the combined variant+modifier+oversell void scenario, and the
+`update_cost_from_adjustment` cold-start branch) and corrected a coverage
+measurement methodology error (91% → the honest 95% baseline → 97% after
+fixes) — no new correctness defect was found at any stage. The full suite
+is green (**781 tests**); migrations are additive-only; the API surface is
+additive; an end-to-end reconciliation test proves the COGS and
+recipe-costing pipelines agree exactly across five independent read paths.
+Two scale-dependent items are explicitly **not yet verified** and must not
+be read as covered by this gate: real production-volume performance
+(F-3 — no stress/load test exists at any point in this sprint) and
+`ingredient_consumption_report`'s Python-side aggregation cost on a
+long date range at high transaction volume (F-2). Both are recommended,
+scoped Sprint 6 backlog items, not blockers for the frontend batches,
+which do not depend on either.

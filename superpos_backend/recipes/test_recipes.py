@@ -17,7 +17,8 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from accounts.models import (
-    Branch, BranchPaymentMethod, FinancialAccount, PaymentMethod, Tenant, User,
+    Branch, BranchPaymentMethod, Customer, CustomerARMovement,
+    FinancialAccount, FinancialAccountMovement, PaymentMethod, Tenant, User,
 )
 from pos.models import (
     BranchWarehouse, Category, InventoryCost, Product, ProductUnit, Sale,
@@ -403,6 +404,78 @@ class RecipeApiTests(APITestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_recipe_detail_get_and_patch(self):
+        """Batch 7 verification (coverage gap review) — RecipeDetailView
+        (GET/PATCH one recipe) was never called by any test before this;
+        every prior test only ever POSTed to recipe-list or nested versions."""
+        recipe = Recipe.objects.create(tenant=self.tenant, product=self.sandwich)
+        get_resp = self.client.get(reverse('recipe-detail', args=[self.sandwich.id, recipe.id]))
+        self.assertEqual(get_resp.status_code, status.HTTP_200_OK, get_resp.content)
+        self.assertEqual(get_resp.json()['id'], recipe.id)
+        self.assertTrue(get_resp.json()['is_active'])
+
+        patch_resp = self.client.patch(
+            reverse('recipe-detail', args=[self.sandwich.id, recipe.id]),
+            {'is_active': False}, format='json',
+        )
+        self.assertEqual(patch_resp.status_code, status.HTTP_200_OK, patch_resp.content)
+        recipe.refresh_from_db()
+        self.assertFalse(recipe.is_active)
+
+    def test_recipe_detail_cashier_can_read_but_not_write(self):
+        recipe = Recipe.objects.create(tenant=self.tenant, product=self.sandwich)
+        self.client.force_authenticate(user=self.cashier)
+        get_resp = self.client.get(reverse('recipe-detail', args=[self.sandwich.id, recipe.id]))
+        self.assertEqual(get_resp.status_code, status.HTTP_200_OK)
+        patch_resp = self.client.patch(
+            reverse('recipe-detail', args=[self.sandwich.id, recipe.id]),
+            {'is_active': False}, format='json',
+        )
+        self.assertEqual(patch_resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_recipe_list_filters_by_variant_id(self):
+        """The `?variant_id=` filter on RecipeListCreateView.get_queryset
+        was defined in Batch 3 but never exercised by any test."""
+        base_recipe = Recipe.objects.create(tenant=self.tenant, product=self.sandwich, variant=None)
+        variant = ProductVariant.objects.create(
+            tenant=self.tenant, product=self.sandwich, name='Large', price=Decimal('90.00'),
+        )
+        variant_recipe = Recipe.objects.create(tenant=self.tenant, product=self.sandwich, variant=variant)
+
+        resp_all = self.client.get(reverse('recipe-list', args=[self.sandwich.id]))
+        self.assertEqual(resp_all.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            {r['id'] for r in resp_all.json()['results']}, {base_recipe.id, variant_recipe.id},
+        )
+
+        resp_filtered = self.client.get(
+            reverse('recipe-list', args=[self.sandwich.id]), {'variant_id': variant.id},
+        )
+        self.assertEqual(resp_filtered.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [r['id'] for r in resp_filtered.json()['results']], [variant_recipe.id],
+        )
+
+    def test_recipe_version_detail_get(self):
+        """RecipeVersionDetailView (GET one version) was never called
+        directly by any test before this — only the list/create and
+        activate endpoints were exercised."""
+        recipe = Recipe.objects.create(tenant=self.tenant, product=self.sandwich)
+        version = RecipeVersion.objects.create(
+            tenant=self.tenant, recipe=recipe, version_no=1, status=RecipeVersion.Status.DRAFT,
+        )
+        RecipeLine.objects.create(
+            tenant=self.tenant, recipe_version=version,
+            component_product=self.chicken, component_unit=self.chicken_unit,
+            entered_qty=Decimal('100'), qty_base=Decimal('100'),
+        )
+        resp = self.client.get(
+            reverse('recipe-version-detail', args=[self.sandwich.id, recipe.id, version.id]),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+        self.assertEqual(resp.json()['id'], version.id)
+        self.assertEqual(len(resp.json()['lines']), 1)
+
 
 # ── Sprint 5 Batch 4: Modifiers ──────────────────────────────────────────────
 
@@ -582,6 +655,78 @@ class ModifierApiTests(APITestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(ProductModifierGroup.objects.filter(pk=link.id).exists())
+
+    def test_modifier_group_detail_get_patch_and_deactivate(self):
+        """Batch 7 verification (coverage gap review) — ModifierGroupDetailView
+        and ModifierGroupDeactivateView were defined in Batch 4 but never
+        called by any test; only modifier-group-list (create) was exercised."""
+        group = ModifierGroup.objects.create(tenant=self.tenant, name='Sauces')
+        get_resp = self.client.get(reverse('modifier-group-detail', args=[group.id]))
+        self.assertEqual(get_resp.status_code, status.HTTP_200_OK, get_resp.content)
+        self.assertEqual(get_resp.json()['name'], 'Sauces')
+
+        patch_resp = self.client.patch(
+            reverse('modifier-group-detail', args=[group.id]), {'name': 'Sauces Renamed'}, format='json',
+        )
+        self.assertEqual(patch_resp.status_code, status.HTTP_200_OK, patch_resp.content)
+        group.refresh_from_db()
+        self.assertEqual(group.name, 'Sauces Renamed')
+
+        deactivate_resp = self.client.post(reverse('modifier-group-deactivate', args=[group.id]))
+        self.assertEqual(deactivate_resp.status_code, status.HTTP_200_OK, deactivate_resp.content)
+        group.refresh_from_db()
+        self.assertFalse(group.is_active)
+
+        self.client.force_authenticate(user=self.cashier)
+        get_resp_cashier = self.client.get(reverse('modifier-group-detail', args=[group.id]))
+        self.assertEqual(get_resp_cashier.status_code, status.HTTP_200_OK)
+        patch_resp_cashier = self.client.patch(
+            reverse('modifier-group-detail', args=[group.id]), {'name': 'Blocked'}, format='json',
+        )
+        self.assertEqual(patch_resp_cashier.status_code, status.HTTP_403_FORBIDDEN)
+        deactivate_resp_cashier = self.client.post(reverse('modifier-group-deactivate', args=[group.id]))
+        self.assertEqual(deactivate_resp_cashier.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_modifier_option_detail_get_patch_and_deactivate(self):
+        group = ModifierGroup.objects.create(tenant=self.tenant, name='Toppings')
+        option = ModifierOption.objects.create(
+            tenant=self.tenant, modifier_group=group, name='Olives', price_delta=Decimal('3.00'),
+        )
+        get_resp = self.client.get(reverse('modifier-option-detail', args=[group.id, option.id]))
+        self.assertEqual(get_resp.status_code, status.HTTP_200_OK, get_resp.content)
+        self.assertEqual(get_resp.json()['name'], 'Olives')
+
+        patch_resp = self.client.patch(
+            reverse('modifier-option-detail', args=[group.id, option.id]),
+            {'price_delta': '4.00'}, format='json',
+        )
+        self.assertEqual(patch_resp.status_code, status.HTTP_200_OK, patch_resp.content)
+        option.refresh_from_db()
+        self.assertEqual(option.price_delta, Decimal('4.00'))
+
+        deactivate_resp = self.client.post(
+            reverse('modifier-option-deactivate', args=[group.id, option.id]),
+        )
+        self.assertEqual(deactivate_resp.status_code, status.HTTP_200_OK, deactivate_resp.content)
+        option.refresh_from_db()
+        self.assertFalse(option.is_active)
+
+    def test_modifier_option_consumption_detail_get(self):
+        """ModifierOptionConsumptionDetailView (GET/PATCH one consumption
+        row) was never called directly by any test — only the list/create
+        endpoint was exercised."""
+        group = ModifierGroup.objects.create(tenant=self.tenant, name='Extras Detail')
+        option = ModifierOption.objects.create(tenant=self.tenant, modifier_group=group, name='Bacon')
+        consumption = ModifierOptionConsumption.objects.create(
+            tenant=self.tenant, modifier_option=option, variant=None,
+            component_product=self.cheese, component_unit=self.cheese_unit,
+            entered_qty=Decimal('25'), qty_base=Decimal('25'),
+        )
+        resp = self.client.get(
+            reverse('modifier-option-consumption-detail', args=[option.id, consumption.id]),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+        self.assertEqual(resp.json()['id'], consumption.id)
 
 
 # ── Sprint 5 Batch 5: RECIPE_CONSUME sale-posting integration ──────────────
@@ -787,6 +932,47 @@ class RecipeSalePostingTests(APITestCase):
             source_document_id=sale.id,
         )
         self.assertEqual(cheese_mv.qty, Decimal('-40.000'))
+
+    def test_credit_recipe_sale_posts_correct_ar_charge_unaffected_by_recipe_logic(self):
+        """User question (pre-close-out review): does the AR/GL pipeline
+        stay correct for a recipe sale? `SaleSerializer.create()` calls
+        `sale_posting.post_sale_ledgers(sale=sale, method=..., customer=...)`
+        exactly ONCE per sale, after every item (recipe or plain stock-item)
+        has already been processed — it reads only `sale.total`/`method`/
+        `customer`, never `SaleItem.variant`/`SaleItemModifier`/the recipe
+        cost snapshot, so it structurally cannot be affected by anything
+        Sprint 5 added. This proves it end-to-end for a CREDIT sale (the
+        one payment method that actually touches `CustomerARMovement`) of a
+        recipe product with a modifier."""
+        customer = Customer.objects.create(tenant=self.tenant, name='Regular Customer')
+        ar_before = CustomerARMovement.objects.filter(customer=customer).count()
+        fam_before = FinancialAccountMovement.objects.count()
+
+        resp = self.client.post(reverse('sale-list'), {
+            'items': [{
+                'product': self.sandwich.id, 'qty': '1',
+                'modifier_option_ids': [self.cheese_option.id],
+            }],
+            'method': 'credit', 'customer': customer.id, 'amount_paid': '0.00',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        sale = Sale.objects.get(sale_uuid=resp.json()['sale_uuid'])
+        # 50.00 base + 6.00 modifier price delta, plus the product's default
+        # tax rate — whatever `sale.total` actually is, the AR charge must
+        # match it exactly (that's the property under test, not the literal
+        # number).
+        self.assertGreater(sale.total, Decimal('56.00'))
+
+        ar_rows = CustomerARMovement.objects.filter(customer=customer)
+        self.assertEqual(ar_rows.count(), ar_before + 1)
+        ar_mv = ar_rows.latest('id')
+        self.assertEqual(ar_mv.debit, sale.total)  # a sale is a debit — customer owes more
+        self.assertEqual(ar_mv.credit, Decimal('0'))
+        self.assertEqual(ar_mv.source_document_type, 'sale')
+        self.assertEqual(ar_mv.source_document_id, sale.id)
+
+        # Credit sales never touch the cash-drawer ledger.
+        self.assertEqual(FinancialAccountMovement.objects.count(), fam_before)
 
     def test_recipe_sale_with_variant_uses_variant_recipe_and_price(self):
         large = ProductVariant.objects.create(
@@ -1313,6 +1499,97 @@ class RecipeSalePostingTests(APITestCase):
 
         # The recipe product itself must NOT get a phantom stock bump / a
         # meaningless RETURN_IN on its own (never-decremented) product row.
+        self.assertFalse(
+            StockMovement.objects.filter(sale=sale, product=self.sandwich).exists()
+        )
+
+    def test_void_recipe_sale_with_variant_modifier_and_oversell_combined(self):
+        """Point 6 (user-requested, pre-close-out review) — the existing
+        void test only covers a plain base-recipe sale; the variant,
+        modifier, and oversell paths are each covered independently at
+        SALE time but were never combined with each other, nor with VOID,
+        in any prior test. This is the missing combined case: a sale of
+        the 'Large' variant (its own independent recipe: 300g chicken) plus
+        the Extra Cheese modifier (40g cheese, variant-agnostic), where the
+        variant's own ingredient is oversold — voiding must correctly
+        reverse every RECIPE_CONSUME row from both the variant recipe and
+        the modifier, using the real consumed quantities read off the
+        ledger (not recomputed from the current recipe definition), even
+        though one of those quantities pushed stock negative."""
+        large = ProductVariant.objects.create(
+            tenant=self.tenant, product=self.sandwich, name='Large', price=Decimal('70.00'),
+        )
+        large_recipe = Recipe.objects.create(tenant=self.tenant, product=self.sandwich, variant=large)
+        large_version = RecipeVersion.objects.create(
+            tenant=self.tenant, recipe=large_recipe, version_no=1,
+            status=RecipeVersion.Status.ACTIVE,
+        )
+        RecipeLine.objects.create(
+            tenant=self.tenant, recipe_version=large_version,
+            component_product=self.chicken, component_unit=self.chicken_unit,
+            entered_qty=Decimal('300'), qty_base=Decimal('300'),
+        )
+
+        # Oversell the variant's own ingredient — far below the 300g the
+        # Large recipe requires.
+        self.chicken.stock = Decimal('10')
+        self.chicken.save(update_fields=['stock'])
+        chicken_stock_before_sale = self.chicken.stock
+        self.cheese.refresh_from_db()
+        cheese_stock_before_sale = self.cheese.stock
+
+        resp = self._post_sale([{
+            'product': self.sandwich.id, 'qty': '1', 'variant': large.id,
+            'modifier_option_ids': [self.cheese_option.id],
+        }])
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        self.assertTrue(
+            any('Chicken' in w for w in resp.json().get('warnings', [])),
+            'oversold variant ingredient must surface a warning at sale time',
+        )
+        sale = Sale.objects.get(sale_uuid=resp.json()['sale_uuid'])
+        item = sale.items.get(product=self.sandwich)
+        self.assertEqual(item.variant_id, large.id)
+        self.assertEqual(item.unit_cost, Decimal('36.00'))  # 300*0.10 + 40*0.15
+
+        self.chicken.refresh_from_db()
+        self.cheese.refresh_from_db()
+        chicken_stock_after_sale = self.chicken.stock
+        cheese_stock_after_sale = self.cheese.stock
+        self.assertLess(chicken_stock_after_sale, Decimal('0'))  # confirms the oversell really happened
+        self.assertEqual(chicken_stock_after_sale, chicken_stock_before_sale - Decimal('300'))
+        self.assertEqual(cheese_stock_after_sale, cheese_stock_before_sale - Decimal('40'))
+
+        void_resp = self.client.post(
+            reverse('sale-void', kwargs={'sale_uuid': sale.sale_uuid}), {}, format='json',
+        )
+        self.assertEqual(void_resp.status_code, status.HTTP_200_OK, void_resp.content)
+
+        self.chicken.refresh_from_db()
+        self.cheese.refresh_from_db()
+        # Void restores exactly what was consumed (300g/40g), regardless of
+        # the fact that the chicken leg went negative — it does not clamp
+        # to zero or otherwise "correct" the oversold state, it reverses
+        # the ledger row byte-for-byte.
+        self.assertEqual(self.chicken.stock, chicken_stock_after_sale + Decimal('300'))
+        self.assertEqual(self.chicken.stock, chicken_stock_before_sale)
+        self.assertEqual(self.cheese.stock, cheese_stock_before_sale)
+
+        return_movements = StockMovement.objects.filter(
+            sale=sale, movement_type=StockMovement.MovementType.RETURN_IN,
+        )
+        self.assertEqual(
+            set(return_movements.values_list('product_id', flat=True)),
+            {self.chicken.id, self.cheese.id},
+        )
+        for mv in return_movements:
+            self.assertIn(mv.qty, (Decimal('300'), Decimal('40')))
+
+        # The base recipe's own lettuce line must not appear anywhere —
+        # the variant's recipe is fully independent of the base recipe.
+        self.assertFalse(
+            StockMovement.objects.filter(sale=sale, product=self.lettuce).exists()
+        )
         self.assertFalse(
             StockMovement.objects.filter(sale=sale, product=self.sandwich).exists()
         )

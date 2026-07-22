@@ -3249,4 +3249,95 @@ No change to the AVCO formula, recipe cost roll-up, or snapshot semantics.
 
 ---
 
+### Sprint 5 — Pre-close-out owner review (2026-07-22)
+
+Before signing off on Sprint 5, the Business Owner asked six specific
+questions about the verification pass's own claims. Each was answered by
+re-running real code (not re-reasoning from existing prose); three led to
+genuine, now-closed gaps. Full answers with evidence are in
+`SPRINT5_ARCHITECTURE_DECISIONS.md`'s new **Part F**.
+
+- **Coverage measurement correction:** the previously-reported 91% figure
+  was measured by running only `recipes pos.test_costing
+  pos.test_reporting` under `coverage.py`, not the full suite — that
+  undercounted `pos/services/stock_movements.py` (49% in the scoped run,
+  since most of its coverage comes from `pos/tests.py`, which the scoped
+  run never executed). Re-measured against the full 781-test suite: the
+  honest baseline was **95%**, not 91%.
+- **Three real gaps found and closed with new tests:**
+  1. `update_cost_from_adjustment`'s cold-start branch (a stock-count cost
+     adjustment on a `(product, branch)` pair with no prior `InventoryCost`
+     row) had zero coverage — every existing test seeded the row via
+     `apply_purchase_receipt` first. `pos/services/costing.py` is now
+     **100%** covered.
+  2. Every GET/PATCH/deactivate admin endpoint for Recipe, RecipeVersion,
+     ModifierGroup, and ModifierOption had never been called by a single
+     test (only their POST/create paths were exercised, needed for the
+     sale-integration tests). 7 new tests took `recipes/views.py` from 83%
+     to 96%.
+  3. Void was never tested with a variant, a modifier, and an oversold
+     ingredient combined — each was only proven independently at sale
+     time. New test `test_void_recipe_sale_with_variant_modifier_and_
+     oversell_combined` proves the combined reversal is exact.
+- **AR/GL isolation proven, not just asserted:** new test
+  `test_credit_recipe_sale_posts_correct_ar_charge_unaffected_by_recipe_logic`
+  posts a real credit sale of a recipe product with a modifier and asserts
+  the `CustomerARMovement` charge matches `sale.total` exactly and zero
+  `FinancialAccountMovement` rows are created — closing what was
+  previously only a code-reading inference into a direct proof.
+- **Two scale-dependent gaps identified and explicitly left open** (real,
+  not hidden): no load/stress test exists anywhere in Sprint 5 at
+  production-realistic data volume; `ingredient_consumption_report`
+  aggregates in Python (not SQL) over every matching `RECIPE_CONSUME` row,
+  so its *response size* stays catalog-bounded but its *request cost*
+  scales with movement-row count on a long date range. Both are recorded
+  as scoped Sprint 6 backlog items, not blockers.
+- A real 60-query recipe-sale breakdown (by table, not estimated) found a
+  further ~16-query (27%) opportunity — 4 redundant `accounts_tenant`
+  re-fetches and 12 nested-transaction savepoints from wrapping each
+  component's stock-out call in its own `atomic()` block — deliberately
+  **not** taken in this pass: the savepoints protect a real
+  partial-failure correctness property, and touching lock-sensitive code
+  right after a gate review for a single-digit-millisecond gain fails this
+  project's own "no refactor without measurable benefit" rule. Flagged as
+  a P3 backlog item.
+
+**Files changed:**
+- `pos/services/costing.py` — one new coverage-closing test target only
+  (no production code change).
+- `pos/test_costing.py` — 1 new test
+  (`test_update_cost_from_adjustment_on_product_with_no_prior_inventory_cost_row`).
+- `recipes/test_recipes.py` — 9 new tests: the combined void scenario, the
+  credit-sale AR isolation proof, and 7 CRUD detail/deactivate/filter
+  tests across Recipe/RecipeVersion/ModifierGroup/ModifierOption/
+  ModifierOptionConsumption (new imports: `Customer`, `CustomerARMovement`,
+  `FinancialAccountMovement`).
+- `SPRINT5_ARCHITECTURE_DECISIONS.md` — E-5 corrected with the honest
+  full-suite methodology and numbers; new **Part F** with all six answers;
+  the Gate decision section updated with the corrected test/coverage
+  counts and an explicit call-out of the two scale-dependent open items.
+
+**Migrations:** none — tests and documentation only. `makemigrations
+--check --dry-run` clean before and after.
+
+**Tests:** full suite **781/781 passed** (771 baseline + 10 new).
+Sprint-5-relevant coverage: **97%** (corrected 95% baseline → 97% after
+closing the three real gaps above), `pos/services/costing.py` now 100%.
+
+**Verification:** `manage.py check` clean. `manage.py makemigrations
+--check --dry-run` clean. Full suite green.
+
+**Gate decision (reaffirmed again):** Sprint 5 backend stays cleared for
+the frontend batches (8–10). No new correctness defect surfaced at any
+point in this review — every finding was either a documentation/
+measurement correction or a genuine-but-non-blocking test-coverage gap,
+all now closed.
+
+**Not touched:** Batches 8-10 (frontend) — still not started. No GL code.
+No change to the AVCO formula, recipe cost roll-up, or snapshot semantics.
+No production code changed in this review at all — every fix was a test
+or a documentation correction.
+
+---
+
 *(Later batches of Sprint 5 get their own entries here as they land.)*

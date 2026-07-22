@@ -343,6 +343,33 @@ class CostingServiceTests(TestCase):
         self.assertEqual(mv.source_document_id, 42)
         self.assertEqual(mv.note, 'Found 5 extra units during a physical count')
 
+    def test_update_cost_from_adjustment_on_product_with_no_prior_inventory_cost_row(self):
+        """Batch 7 verification (coverage gap review) — every other
+        `update_cost_from_adjustment` test calls `apply_purchase_receipt`
+        first, which always creates the `InventoryCost` row via its own
+        `get_or_create_inventory_cost` call — so the `if inv_cost is None`
+        cold-start branch inside `update_cost_from_adjustment` itself
+        (lines 258-260) had zero coverage. This is a real production
+        scenario: a product counted into stock for the first time via a
+        physical count, before it was ever purchased through the system
+        (e.g. opening inventory entered as a count, not a purchase invoice)."""
+        self.assertFalse(InventoryCost.objects.filter(product=self.coffee).exists())
+
+        costing_svc.update_cost_from_adjustment(
+            product=self.coffee, qty=Decimal('20'), adjustment_cost=Decimal('300'),
+            source_document_type='stock_adjustment', source_document_id=99,
+            note='Opening count, never purchased before',
+        )
+        inv = InventoryCost.objects.get(product=self.coffee)
+        # No prior row, no prior stock: denom=20, (0*0 + 20*300)/20 = 300.0000.
+        self.assertEqual(inv.avg_unit_cost, Decimal('300.0000'))
+        self.coffee.refresh_from_db()
+        self.assertEqual(self.coffee.cost, Decimal('300.00'))
+
+        mv = InventoryCostMovement.objects.get(source_document_id=99)
+        self.assertEqual(mv.avg_cost_before, Decimal('0.0000'))
+        self.assertEqual(mv.avg_cost_after, Decimal('300.0000'))
+
     def test_multi_step_negative_stock_recovery(self):
         """Pre-Batch-5 architecture review coverage gap: the existing
         negative-stock regression only proves the SINGLE-step fallback
