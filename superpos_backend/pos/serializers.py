@@ -16,6 +16,12 @@ from .models import (
     PurchaseInvoiceLine, Sale, SaleItem, SalesCategory, StockMovement, Unit,
     UnitGroup, Warehouse, WarehouseStock,
 )
+# Sprint 5 Batch 5: recipe-product sale lines need the variant/modifier
+# catalog models for field declarations below. Safe at module level — the
+# `recipes` app has no import back onto `pos.serializers` (only string FKs
+# in its own models.py + real imports of `pos.services`/`pos.models`), so
+# this is not a cycle.
+from recipes.models import ModifierOption, ProductVariant
 
 logger = logging.getLogger(__name__)
 
@@ -1228,7 +1234,14 @@ class SaleItemSerializer(serializers.ModelSerializer):
         entered_qty, optional warehouse. `qty`/`price_each` are then derived
         server-side (`SaleSerializer.validate`/`create`) via
         `pos.services.units.convert_to_base` +
-        `pos.services.pricing.resolve_unit_price` — never sent by the client.
+        `pos.services.pricing.resolve_unit_price` — never sent by the client;
+      * recipe-product shape (Sprint 5 Batch 5) — product (a recipe
+        product), optional `variant`, optional `modifier_option_ids`, `qty`
+        (how many sold — a plain count, no unit conversion involved).
+        `price_each` is server-computed from the variant's own price (or
+        the base product's price) plus selected modifiers' price deltas;
+        `unit_cost` is server-computed by rolling up the active recipe +
+        modifier consumption at the sale's branch.
     Server fills:  product_name, barcode, line_total, unit_cost automatically.
     """
 
@@ -1243,20 +1256,41 @@ class SaleItemSerializer(serializers.ModelSerializer):
     entered_qty = serializers.DecimalField(
         max_digits=14, decimal_places=3, required=False, allow_null=True,
     )
+    # Sprint 5 Batch 5 — which size/option variant was sold (a recipe
+    # product with no variants, or a legacy line, omits this).
+    variant = serializers.PrimaryKeyRelatedField(
+        queryset=ProductVariant.objects.none(), required=False, allow_null=True,
+    )
+    # Write-only: not a SaleItem model field — resolved into SaleItemModifier
+    # rows by SaleSerializer.create(). Defaults to an empty list so a plain
+    # stock-item/product_unit line never has to mention it.
+    modifier_option_ids = serializers.ListField(
+        child=serializers.PrimaryKeyRelatedField(queryset=ModifierOption.objects.none()),
+        required=False, default=list, write_only=True,
+    )
     # Sprint 3 Batch 4 — read-only, computed from the unit_cost snapshot
     # already taken at sale time. A SerializerMethodField can't be written
     # to, so a spoofed value in a create payload is silently dropped.
     line_cogs = serializers.SerializerMethodField()
+    # Sprint 5 Batch 5 — read-only summary of the modifiers actually
+    # recorded for this line (post-create), for receipts/detail views.
+    modifiers = serializers.SerializerMethodField()
 
     def get_line_cogs(self, obj):
         from pos.services import costing as costing_svc
         return str(costing_svc.quantize_money((obj.unit_cost or Decimal('0')) * obj.qty))
 
+    def get_modifiers(self, obj):
+        return [
+            {'option_name': m.option_name, 'price_delta': str(m.price_delta)}
+            for m in obj.modifiers.all()
+        ] if obj.pk else []
+
     class Meta:
         model  = SaleItem
         fields = [
             'id', 'product', 'product_name', 'barcode',
-            'product_unit', 'entered_qty',
+            'product_unit', 'entered_qty', 'variant', 'modifier_option_ids', 'modifiers',
             'qty', 'price_each', 'line_total', 'unit_cost', 'line_cogs', 'warehouse',
         ]
         read_only_fields = ['id', 'product_name', 'barcode', 'line_total', 'unit_cost']
@@ -1336,6 +1370,10 @@ class SaleSerializer(serializers.ModelSerializer):
             item_fields['product'].queryset = Product.objects.filter(tenant=tenant)
             item_fields['warehouse'].queryset = Warehouse.objects.filter(tenant=tenant)
             item_fields['product_unit'].queryset = ProductUnit.objects.filter(tenant=tenant)
+            item_fields['variant'].queryset = ProductVariant.objects.filter(tenant=tenant)
+            item_fields['modifier_option_ids'].child.queryset = (
+                ModifierOption.objects.filter(tenant=tenant)
+            )
 
     def get_cashier_name(self, obj):
         if obj.cashier:
@@ -1367,6 +1405,7 @@ class SaleSerializer(serializers.ModelSerializer):
         for i, item in enumerate(items):
             product      = item.get('product')
             product_unit = item.get('product_unit')
+            variant      = item.get('variant')
             key          = f'items[{i}]'
 
             # Sprint 2 Batch 5a: a unit-aware line derives qty/price_each
@@ -1395,6 +1434,25 @@ class SaleSerializer(serializers.ModelSerializer):
                         item['price_each'] = pricing_svc.resolve_unit_price(
                             product_unit=product_unit, price_tier=price_tier,
                         )
+            elif product is not None and not product.type_behavior.affects_stock and product.type_behavior.can_have_recipe:
+                # Sprint 5 Batch 5 — a recipe-product line (product_unit
+                # never applies here; a recipe product carries no stock/
+                # unit conversion of its own). `price_each` is always
+                # server-computed — never accepted from the client — same
+                # discipline as the product_unit branch above: the
+                # variant's own price (or the base product's price when no
+                # variant), plus every selected modifier's price_delta.
+                if variant is not None and variant.product_id != product.pk:
+                    errors[f'{key}.variant'] = (
+                        'variant must belong to the same product as this line.'
+                    )
+                else:
+                    base_price = variant.price if variant is not None else product.price
+                    modifier_total = sum(
+                        (opt.price_delta for opt in (item.get('modifier_option_ids') or [])),
+                        Decimal('0.00'),
+                    )
+                    item['price_each'] = base_price + modifier_total
 
             qty        = item.get('qty',        Decimal('0'))
             price_each = item.get('price_each', Decimal('0'))
@@ -1515,16 +1573,81 @@ class SaleSerializer(serializers.ModelSerializer):
                 **validated_data,
             )
 
+            # Sprint 5 Batch 5 — recipe-product lines only; lazy-imported to
+            # match this file's existing style for pos.services.* imports.
+            from recipes.models import (
+                SaleItemModifier, SaleItemRecipeCostSnapshot, SaleItemRecipeCostSnapshotLine,
+            )
+            from recipes.services import costing as recipes_costing_svc
+
             for item_data in items_data:
                 product = item_data.get('product')
+                variant = item_data.get('variant')
+                modifier_options = item_data.pop('modifier_option_ids', None) or []
                 item_data['product_name'] = product.name        if product else ''
                 item_data['barcode']      = product.barcode or '' if product else ''
                 item_data['line_total']   = self._money_qty(item_data) * item_data['price_each']
-                # Cost snapshot for future COGS; explicit-or-default warehouse.
-                item_data['unit_cost']    = product.cost if product else Decimal('0')
                 if item_data.get('warehouse') is None:
                     item_data['warehouse'] = default_warehouse
-                SaleItem.objects.create(sale=sale, **item_data)
+
+                recipe_version    = None
+                recipe_cost_lines = []
+                if (
+                    product is not None and not product.type_behavior.affects_stock
+                    and product.type_behavior.can_have_recipe
+                ):
+                    # A recipe product has no InventoryCost of its own —
+                    # its cost is always the live roll-up of its active
+                    # recipe + any selected modifiers, at THIS sale's
+                    # branch (the owner's own requirement: the recipe
+                    # definition stays put, but the cost of a new sale
+                    # moves with ingredient prices).
+                    recipe_version = recipes_costing_svc.get_active_recipe(product, variant=variant)
+                    if recipe_version is None:
+                        raise serializers.ValidationError({
+                            'items': [f'"{product.name}" has no active recipe configured yet.'],
+                        })
+                    recipe_result = recipes_costing_svc.compute_recipe_cost(
+                        recipe_version, branch=sale.branch,
+                    )
+                    recipe_cost_lines.extend(recipe_result.lines)
+                    total_cost = recipe_result.total_cost
+                    for option in modifier_options:
+                        modifier_result = recipes_costing_svc.compute_modifier_deltas(
+                            option, variant=variant, branch=sale.branch,
+                        )
+                        recipe_cost_lines.extend(modifier_result.lines)
+                        total_cost += modifier_result.total_cost
+                    item_data['unit_cost'] = total_cost
+                else:
+                    # Cost snapshot for COGS; unchanged from before Sprint 5
+                    # — still Product.cost, not branch-scoped, for every
+                    # non-recipe line (see Batch 5's IMPLEMENTATION_PROGRESS
+                    # entry for why this wasn't widened too).
+                    item_data['unit_cost'] = product.cost if product else Decimal('0')
+
+                sale_item = SaleItem.objects.create(sale=sale, **item_data)
+
+                for option in modifier_options:
+                    SaleItemModifier.objects.create(
+                        tenant=sale.tenant, sale_item=sale_item, modifier_option=option,
+                        option_name=option.name, price_delta=option.price_delta,
+                    )
+
+                if recipe_version is not None:
+                    snapshot = SaleItemRecipeCostSnapshot.objects.create(
+                        tenant=sale.tenant, sale_item=sale_item,
+                        recipe_version=recipe_version, total_recipe_cost=item_data['unit_cost'],
+                    )
+                    for line in recipe_cost_lines:
+                        SaleItemRecipeCostSnapshotLine.objects.create(
+                            tenant=sale.tenant, snapshot=snapshot,
+                            component_product_id=line.component_product_id,
+                            component_name=line.component_name, qty_base=line.qty_base,
+                            unit_cost=line.unit_cost, line_cost=line.line_cost,
+                            is_modifier_line=line.is_modifier_line,
+                            source_modifier_option_id=line.source_modifier_option_id,
+                        )
 
             # Payment ledger — separate row so reporting queries don't have
             # to JOIN cashier-tendered / change-given off the Sale table.
@@ -1591,14 +1714,92 @@ class SaleSerializer(serializers.ModelSerializer):
         warehouse on the movement *labels* the outflow; it does not *scope* it.
         """
         from pos.services import stock_movements as stock_svc
+        from recipes.models import SaleItemRecipeCostSnapshot
+        from recipes.services import costing as recipes_costing_svc
 
         warnings = []
         with transaction.atomic():
-            for item in sale.items.select_related('product', 'warehouse').all():
+            for item in sale.items.select_related('product', 'warehouse', 'variant').all():
                 if not item.product:
                     continue
 
-                product   = item.product
+                product = item.product
+
+                if not product.type_behavior.affects_stock and product.type_behavior.can_have_recipe:
+                    # Sprint 5 Batch 5 — narrowly scoped to recipe-eligible
+                    # types (RECIPE_PRODUCT/PREP_ITEM/BUNDLE) only.
+                    # `affects_stock=False` alone is NOT enough — SERVICE
+                    # and FIXED_ASSET also carry it but have no recipe
+                    # concept at all, and Sprint 2 deliberately left every
+                    # classification flag dormant (metadata only) until a
+                    # real consumer wired one up — for those types this
+                    # must keep falling through to the exact legacy
+                    # deduct_stock/SALE_OUT path below, unchanged.
+                    #
+                    # A recipe product (or a prep/bundle sold directly) has
+                    # no stock of its own to deduct; its RECIPE_CONSUME
+                    # movements come from the cost snapshot
+                    # already written in create() (the exact frozen
+                    # components/quantities, not a re-computation).
+                    snapshot = (
+                        SaleItemRecipeCostSnapshot.objects
+                        .filter(sale_item=item)
+                        .prefetch_related('lines__component_product')
+                        .first()
+                    )
+                    if snapshot is None:
+                        continue  # defensive — create() always writes one for this product type
+                    try:
+                        kitchen_warehouse = recipes_costing_svc.resolve_kitchen_warehouse(
+                            tenant=sale.tenant, branch=sale.branch,
+                        )
+                    except recipes_costing_svc.RecipeError as exc:
+                        raise serializers.ValidationError({'items': [str(exc)]})
+                    for line in snapshot.lines.all():
+                        component = line.component_product
+                        if component is None:
+                            continue
+                        qty_delta = line.qty_base
+                        note = f'Sale #{sale.pk} — recipe consume for "{product.name}"'
+                        try:
+                            component.deduct_stock(qty_delta)
+                        except InsufficientStockError as exc:
+                            msg = (
+                                f'Only {exc.available} in stock. '
+                                f'Recipe needed {exc.requested} of "{component.name}".'
+                            )
+                            logger.warning(
+                                'OVERSOLD (recipe ingredient): product "%s" (id=%s), '
+                                'requested=%s, had=%s',
+                                component.name, component.pk, exc.requested, exc.available,
+                            )
+                            warnings.append(msg)
+                            note += ' — oversold'
+                            component.deduct_stock(qty_delta, allow_oversell=True)
+
+                        StockMovement.objects.create(
+                            tenant=sale.tenant,
+                            product=component,
+                            branch=sale.branch,
+                            warehouse=kitchen_warehouse,
+                            qty=-qty_delta,
+                            movement_type=StockMovement.MovementType.RECIPE_CONSUME,
+                            sale=sale,
+                            source_document_type='sale',
+                            source_document_id=sale.id,
+                            actor_user=sale.cashier,
+                            note=note,
+                        )
+                        stock_svc.apply_warehouse_delta(
+                            product=component, warehouse=kitchen_warehouse, delta=-qty_delta,
+                        )
+                        if component.stock < component.reorder:
+                            logger.warning(
+                                'LOW STOCK: "%s" (id=%s) stock=%s below reorder=%s',
+                                component.name, component.pk, component.stock, component.reorder,
+                            )
+                    continue
+
                 qty_delta = item.qty
                 note      = f'Sale #{sale.pk}'
 

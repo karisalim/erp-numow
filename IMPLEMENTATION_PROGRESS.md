@@ -2597,6 +2597,127 @@ detach via DELETE).
 where `RECIPE_CONSUME` and the actual per-line modifier selection at sale
 time land), any frontend file, any GL code.
 
+### Batch 5 — Sale-posting integration: `RECIPE_CONSUME`, variant/modifier selection, cost snapshot (backend)
+
+**Goal:** the centerpiece of the sprint — a POS sale of a recipe product
+with a chosen variant and modifiers correctly consumes every component's
+stock at the branch's kitchen warehouse, snapshots the cost immutably, and
+feeds the existing Sprint 3/4 COGS pipeline with **zero changes to that
+pipeline**. Highest regression risk in the sprint — touches the shared
+`SaleSerializer.create()`/`_apply_stock()` path every sale in the system
+goes through.
+
+**Files changed:**
+- `pos/models.py` — `StockMovement.MovementType.RECIPE_CONSUME` added;
+  `SaleItem.variant` FK (string ref `'recipes.ProductVariant'`, SET_NULL,
+  nullable — which size was actually sold, snapshot-safe).
+- `pos/migrations/0030_saleitem_variant_alter_stockmovement_movement_type.py`
+  — additive only, correctly depends on `recipes.0003` for the
+  cross-app FK.
+- `recipes/models.py` — `SaleItemModifier` (frozen `option_name`/
+  `price_delta` per selected modifier), `SaleItemRecipeCostSnapshot`
+  (`total_recipe_cost`, mirrored onto `SaleItem.unit_cost` itself — see
+  below), `SaleItemRecipeCostSnapshotLine` (per-D-31-Option-B normalized
+  rows: one per base-recipe ingredient or modifier consumption delta,
+  frozen `component_name`/`unit_cost`/`line_cost` independent of the
+  component's live average by the time anyone reads it later).
+- `recipes/migrations/0004_saleitemrecipecostsnapshot_and_more.py` —
+  `CreateModel` × 3, no data; depends on `pos.0030` (needs `SaleItem` for
+  the OneToOne/FK).
+- `recipes/services/costing.py` — new `resolve_kitchen_warehouse(tenant,
+  branch)`: mirrors `purchase_invoices._resolve_line_warehouse`'s exact
+  pattern — prefers the branch's default `role=KITCHEN` `BranchWarehouse`,
+  falls back to `role=SALES`, raises `RecipeError` (now caught in
+  `_apply_stock` and converted to a clean 400) if neither exists.
+- `pos/serializers.py` — the integration itself:
+  - `SaleItemSerializer` gains `variant` (writable FK) and
+    `modifier_option_ids` (write-only list, not a model field — resolved
+    into `SaleItemModifier` rows), plus a read-only `modifiers` summary
+    field for receipts/detail views.
+  - `SaleSerializer.validate()`: a recipe-eligible line (`not
+    affects_stock and can_have_recipe` — i.e. `RECIPE_PRODUCT`/
+    `PREP_ITEM`/`BUNDLE`) gets its `price_each` **server-computed** —
+    `variant.price` (or the base product's price) plus every selected
+    modifier's `price_delta` — never accepted from the client, same
+    discipline as the existing `product_unit` line's server-computed
+    price.
+  - `SaleSerializer.create()`: for a recipe line, resolves the active
+    `Recipe`/`RecipeVersion` for `(product, variant)`, rolls up cost via
+    `compute_recipe_cost` + `compute_modifier_deltas` (both branch-scoped,
+    at `sale.branch`), writes `SaleItem.unit_cost` = that total, and
+    writes the `SaleItemModifier`/`SaleItemRecipeCostSnapshot`(+lines)
+    rows. A recipe product with no active recipe configured raises a
+    clean 400 rather than silently selling at zero cost.
+  - `_apply_stock()`: branches on `not affects_stock and can_have_recipe`
+    — for a recipe line, walks the snapshot's frozen component lines (not
+    a re-computation) and writes one `RECIPE_CONSUME` `StockMovement` per
+    component at the resolved kitchen warehouse, reusing the exact same
+    oversell fallback (`deduct_stock` → `InsufficientStockError` → retry
+    `allow_oversell=True`) as the legacy path. Every other line
+    (including a plain stock-item line) falls through to the **byte-for-
+    byte original** `deduct_stock`/`SALE_OUT` code, unchanged.
+
+**Regression found and fixed (the one real bug this batch's full-suite
+run caught):** `_apply_stock`'s first draft branched on
+`not product.type_behavior.affects_stock` alone. `SERVICE` and
+`FIXED_ASSET` product types *also* carry `affects_stock=False` — they're
+Sprint 2's deliberately-dormant classification flags, not recipe-eligible.
+`pos.test_product_foundation.LegacyCompatibilityTests
+.test_sale_flow_untouched_by_new_classification` (which explicitly sells a
+`SERVICE`-typed product and asserts stock still deducts exactly like
+legacy) caught this immediately — my new branch was silently skipping
+stock deduction for that product with no recipe to fall back to. Fixed by
+narrowing the condition to `not affects_stock **and** can_have_recipe`
+(only `RECIPE_PRODUCT`/`PREP_ITEM`/`BUNDLE`), matching `create()`'s
+already-correct condition exactly. No other test's behavior changed.
+
+**Deliberate scope decision (deviates from the original plan text, made
+during implementation once the real risk was visible in the code, not
+assumed):** the plan's Batch 5 description also proposed switching
+*every* sale line's `unit_cost` — not just recipe lines — from
+`product.cost` to the new branch-scoped `costing.get_cost_for_sale
+(branch=sale.branch)`, as a general correctness improvement. Verified by
+reading `pos/tests.py`'s fixtures that several existing sale tests
+manually override `Product.cost` mid-test (`self.product.cost = X; save()`)
+*after* an `InventoryCost` row already exists from an earlier step in the
+same test — under the branch-scoped read, that manual override would be
+silently ignored (the stale `InventoryCost.avg_unit_cost` would win),
+diverging from every existing assertion. This is real, avoidable risk for
+zero benefit the owner actually asked for, so **non-recipe lines keep
+reading `product.cost` directly, exactly as before Sprint 5** — only
+recipe-product lines (which never had a trustworthy cost source before
+this batch) get the new branch-scoped roll-up.
+
+**Tests:** new `recipes.test_recipes.RecipeSalePostingTests` (9 tests,
+posted through the real `/api/sales/` endpoint, not just service calls) —
+full end-to-end recipe sale (2-ingredient recipe, correct `unit_cost`,
+correct `RECIPE_CONSUME` movements per component, correct snapshot rows,
+zero `SALE_OUT` on the recipe product itself); with a modifier (cost and
+price both include the modifier, its own `RECIPE_CONSUME` movement fires);
+with a variant (uses the variant's own independent recipe and price, the
+base recipe's lettuce line does NOT fire); branch-scoped cost in a real
+sale (two branches, two different ingredient costs, two different
+`unit_cost` results from the identical recipe); snapshot immutability (a
+later purchase moves the ingredient average sharply — the already-sold
+item's `unit_cost`/snapshot are provably unchanged); oversell fallback for
+a recipe ingredient (still 201, warning surfaced, negative stock
+recorded); no-active-recipe → clean 400; the Sprint 3/4 dashboard COGS
+pipeline reflects a recipe sale's COGS with the dashboard view's own code
+untouched; a plain stock-item sale is unaffected. Before writing any of
+these, `pos.tests`/`pos.test_pos_integration`/`pos.test_costing`/
+`pos.test_hotfix_pack` (213 tests) were re-run unmodified and stayed
+green, then the *entire* suite was run twice more (once surfacing the
+`SERVICE`-type regression above, once clean after the fix).
+
+**Verification:** `manage.py check` clean. `manage.py makemigrations
+--check --dry-run` clean (exactly the two expected migrations — one in
+`pos`, one in `recipes`, additive only). Full suite: **735/735 passed**
+(726 baseline + 9 new).
+
+**Not touched:** recipe/food-cost reporting (Batch 6's job), any frontend
+file, any GL code. `Product.cost`/non-recipe `SaleItem.unit_cost` sourcing
+unchanged (see the deliberate scope decision above).
+
 ---
 
 *(Later batches of Sprint 5 get their own entries here as they land.)*

@@ -327,6 +327,15 @@ class SaleItem(models.Model):
         'pos.Warehouse', on_delete=models.SET_NULL,
         null=True, blank=True, related_name='sale_items',
     )
+    # Sprint 5 Batch 5: which size/option variant was actually sold, for a
+    # recipe product (D-24 — variant-of-one-product). NULL for a legacy
+    # stock-item line or a recipe product with no variants. SET_NULL: a
+    # variant may be deactivated later without invalidating historical
+    # sale rows, same rationale as `product_unit` above.
+    variant      = models.ForeignKey(
+        'recipes.ProductVariant', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='sale_items',
+    )
     created_at   = models.DateTimeField(auto_now_add=True)
     updated_at   = models.DateTimeField(auto_now=True)
 
@@ -356,6 +365,11 @@ class StockMovement(models.Model):
         # with movement_type='adjustment') uses one of these two instead.
         ADJUSTMENT_IN  = 'adjustment_in',  'Adjustment In'
         ADJUSTMENT_OUT = 'adjustment_out', 'Adjustment Out'
+        # Sprint 5 Batch 5: a recipe/BOM component consumed at sale time —
+        # written for each ingredient a recipe product's sale line
+        # depletes, never for the recipe product itself (it has no stock
+        # of its own, per its behavior-matrix `affects_stock=False`).
+        RECIPE_CONSUME = 'recipe_consume', 'Recipe Consume'
 
     tenant        = models.ForeignKey(
         'accounts.Tenant', on_delete=models.CASCADE,

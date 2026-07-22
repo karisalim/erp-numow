@@ -360,3 +360,90 @@ class ModifierOptionConsumption(models.Model):
 
     def __str__(self):
         return f'{self.modifier_option_id}: {self.entered_qty} of {self.component_product_id}'
+
+
+class SaleItemModifier(models.Model):
+    """Snapshot of one selected modifier on a sale line (Sprint 5 Batch 5).
+    `option_name`/`price_delta` are frozen at sale time — a later rename or
+    price change on the `ModifierOption` never alters a historical sale.
+    """
+
+    tenant = models.ForeignKey(
+        'accounts.Tenant', on_delete=models.CASCADE,
+        related_name='sale_item_modifiers', db_index=True,
+    )
+    sale_item = models.ForeignKey(
+        'pos.SaleItem', on_delete=models.CASCADE, related_name='modifiers',
+    )
+    modifier_option = models.ForeignKey(
+        ModifierOption, on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    option_name = models.CharField(max_length=80)
+    price_delta = models.DecimalField(max_digits=10, decimal_places=2)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f'{self.sale_item_id}: {self.option_name}'
+
+
+class SaleItemRecipeCostSnapshot(models.Model):
+    """The immutable recipe-cost snapshot taken at sale time (D-31 Option B
+    — normalized rows, not a JSON blob, matching `InventoryCostMovement`'s
+    established pattern). One per recipe-product sale line;
+    `total_recipe_cost` is also mirrored onto `SaleItem.unit_cost` itself,
+    so the entire existing COGS/gross-profit/dashboard pipeline
+    (`cogs = Σ(unit_cost × qty)`) works for recipe sales with zero code
+    changes — this snapshot exists purely for the detailed "why" breakdown
+    a food-cost report needs.
+    """
+
+    tenant = models.ForeignKey(
+        'accounts.Tenant', on_delete=models.CASCADE,
+        related_name='sale_item_recipe_cost_snapshots', db_index=True,
+    )
+    sale_item = models.OneToOneField(
+        'pos.SaleItem', on_delete=models.CASCADE, related_name='recipe_cost_snapshot',
+    )
+    recipe_version = models.ForeignKey(
+        RecipeVersion, on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    total_recipe_cost = models.DecimalField(max_digits=10, decimal_places=2)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f'RecipeCostSnapshot sale_item={self.sale_item_id} total={self.total_recipe_cost}'
+
+
+class SaleItemRecipeCostSnapshotLine(models.Model):
+    """One component's frozen cost contribution within a
+    `SaleItemRecipeCostSnapshot` — a base-recipe ingredient or a selected
+    modifier's consumption delta (`is_modifier_line` distinguishes them).
+    `component_name`/`unit_cost` are frozen text/values, independent of
+    whatever the component's live average cost is by the time anyone reads
+    this row later.
+    """
+
+    tenant = models.ForeignKey(
+        'accounts.Tenant', on_delete=models.CASCADE,
+        related_name='sale_item_recipe_cost_snapshot_lines', db_index=True,
+    )
+    snapshot = models.ForeignKey(
+        SaleItemRecipeCostSnapshot, on_delete=models.CASCADE, related_name='lines',
+    )
+    component_product = models.ForeignKey(
+        'pos.Product', on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    component_name = models.CharField(max_length=120)
+    qty_base = models.DecimalField(max_digits=14, decimal_places=4)
+    unit_cost = models.DecimalField(max_digits=14, decimal_places=4)
+    line_cost = models.DecimalField(max_digits=10, decimal_places=2)
+    is_modifier_line = models.BooleanField(default=False)
+    source_modifier_option = models.ForeignKey(
+        ModifierOption, on_delete=models.SET_NULL, null=True, blank=True,
+    )
+
+    class Meta:
+        ordering = ['id']
+
+    def __str__(self):
+        return f'{self.snapshot_id}: {self.component_name} = {self.line_cost}'

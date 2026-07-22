@@ -15,14 +15,51 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from accounts.models import Branch, Tenant, User
-from pos.models import Category, InventoryCost, Product, ProductUnit, Unit, UnitGroup
+from accounts.models import (
+    Branch, BranchPaymentMethod, FinancialAccount, PaymentMethod, Tenant, User,
+)
+from pos.models import (
+    BranchWarehouse, Category, InventoryCost, Product, ProductUnit, Sale,
+    StockMovement, Unit, UnitGroup, Warehouse, WarehouseStock,
+)
 from pos.services import costing as pos_costing_svc
+from pos.services import stock_movements as stock_svc
+from pos.services.product_types import ProductType
 from recipes.models import (
     ModifierGroup, ModifierOption, ModifierOptionConsumption,
     ProductModifierGroup, ProductVariant, Recipe, RecipeLine, RecipeVersion,
+    SaleItemModifier, SaleItemRecipeCostSnapshot,
 )
 from recipes.services import costing as recipes_costing_svc
+
+
+def _grant_default_routing(tenant, branch):
+    """Mirrors `pos.tests._grant_default_routing` (private to that module) —
+    under strict routing (GA-2) every completed sale must resolve a
+    payment route, so any test posting a real sale needs this."""
+    accounts = {}
+    for acct_type, name in [
+        (FinancialAccount.AccountType.CASHBOX,         'Main Cashbox'),
+        (FinancialAccount.AccountType.CARD_SETTLEMENT, 'Card Settlement'),
+        (FinancialAccount.AccountType.WALLET,          'Wallet'),
+    ]:
+        accounts[acct_type] = FinancialAccount.objects.create(
+            tenant=tenant, name=f'{name} ({branch.name})', account_type=acct_type,
+        )
+    for mtype, acct_type in [
+        (PaymentMethod.MethodType.CASH,   FinancialAccount.AccountType.CASHBOX),
+        (PaymentMethod.MethodType.CARD,   FinancialAccount.AccountType.CARD_SETTLEMENT),
+        (PaymentMethod.MethodType.WALLET, FinancialAccount.AccountType.WALLET),
+    ]:
+        pm = PaymentMethod.objects.create(
+            tenant=tenant, name=f'{mtype} ({branch.name})', method_type=mtype,
+        )
+        BranchPaymentMethod.objects.create(
+            tenant=tenant, branch=branch, payment_method=pm,
+            destination_account=accounts[acct_type],
+            is_default=True, is_active=True,
+        )
+    return accounts
 
 
 def _make_ingredient(tenant, category, unit, *, name, barcode, sku, cost):
@@ -544,3 +581,323 @@ class ModifierApiTests(APITestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(ProductModifierGroup.objects.filter(pk=link.id).exists())
+
+
+# ── Sprint 5 Batch 5: RECIPE_CONSUME sale-posting integration ──────────────
+# Highest regression risk in the sprint — touches the shared SaleSerializer
+# create()/_apply_stock() path. pos.tests' full 213-test sale-posting suite
+# was re-run unmodified before writing anything below and stayed green,
+# confirming zero behavior change for every non-recipe (stock_item) line.
+
+class RecipeSalePostingTests(APITestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.tenant = Tenant.objects.create(name='Recipe Sale Tenant')
+        cls.branch_a = Branch.objects.create(tenant=cls.tenant, name='Branch A')
+        cls.branch_b = Branch.objects.create(tenant=cls.tenant, name='Branch B')
+        cls.manager_a = User.objects.create_user(
+            username='rsmgr_a', password='pw', role=User.Role.MANAGER,
+            tenant=cls.tenant, branch=cls.branch_a,
+        )
+        cls.manager_b = User.objects.create_user(
+            username='rsmgr_b', password='pw', role=User.Role.MANAGER,
+            tenant=cls.tenant, branch=cls.branch_b,
+        )
+        _grant_default_routing(cls.tenant, cls.branch_a)
+        _grant_default_routing(cls.tenant, cls.branch_b)
+
+        cls.category = Category.objects.create(tenant=cls.tenant, name='Menu')
+        cls.ingredients_cat = Category.objects.create(tenant=cls.tenant, name='Ingredients')
+        cls.mass = UnitGroup.objects.create(tenant=cls.tenant, name='Mass')
+        cls.gram = Unit.objects.create(
+            tenant=cls.tenant, unit_group=cls.mass, name='Gram', symbol='g',
+            factor_to_base=Decimal('1'), allow_decimal=True,
+        )
+
+        cls.wh_a = Warehouse.objects.create(tenant=cls.tenant, code='KIT-A', name='Kitchen A')
+        cls.wh_b = Warehouse.objects.create(tenant=cls.tenant, code='KIT-B', name='Kitchen B')
+        BranchWarehouse.objects.create(
+            tenant=cls.tenant, branch=cls.branch_a, warehouse=cls.wh_a,
+            role=BranchWarehouse.Role.KITCHEN, is_default=True, is_active=True,
+        )
+        BranchWarehouse.objects.create(
+            tenant=cls.tenant, branch=cls.branch_b, warehouse=cls.wh_b,
+            role=BranchWarehouse.Role.KITCHEN, is_default=True, is_active=True,
+        )
+
+        cls.chicken = Product.objects.create(
+            tenant=cls.tenant, category=cls.ingredients_cat,
+            name='Chicken', barcode='RS-CHK', sku='SKU-RS-CHK',
+            price=Decimal('0.00'), cost=Decimal('0.00'), stock=Decimal('0'),
+        )
+        cls.chicken_unit = ProductUnit.objects.create(
+            tenant=cls.tenant, product=cls.chicken, unit=cls.gram,
+            conversion_to_base=Decimal('1'), is_base=True,
+        )
+        cls.lettuce = Product.objects.create(
+            tenant=cls.tenant, category=cls.ingredients_cat,
+            name='Lettuce', barcode='RS-LET', sku='SKU-RS-LET',
+            price=Decimal('0.00'), cost=Decimal('0.00'), stock=Decimal('0'),
+        )
+        cls.lettuce_unit = ProductUnit.objects.create(
+            tenant=cls.tenant, product=cls.lettuce, unit=cls.gram,
+            conversion_to_base=Decimal('1'), is_base=True,
+        )
+        cls.cheese = Product.objects.create(
+            tenant=cls.tenant, category=cls.ingredients_cat,
+            name='Cheese', barcode='RS-CHZ', sku='SKU-RS-CHZ',
+            price=Decimal('0.00'), cost=Decimal('0.00'), stock=Decimal('0'),
+        )
+        cls.cheese_unit = ProductUnit.objects.create(
+            tenant=cls.tenant, product=cls.cheese, unit=cls.gram,
+            conversion_to_base=Decimal('1'), is_base=True,
+        )
+
+        # Stock both branches with plenty of ingredients — branch A's
+        # chicken is deliberately priced differently from branch B's, to
+        # prove branch-scoped costing flows all the way into a real sale.
+        for branch, warehouse, chicken_cost in (
+            (cls.branch_a, cls.wh_a, Decimal('0.10')),
+            (cls.branch_b, cls.wh_b, Decimal('0.20')),
+        ):
+            for product, unit_cost in (
+                (cls.chicken, chicken_cost),
+                (cls.lettuce, Decimal('0.02')),
+                (cls.cheese, Decimal('0.15')),
+            ):
+                qty = Decimal('50000')  # StockMovement.qty is Decimal(8,3): must stay < 10^5
+                pos_costing_svc.apply_purchase_receipt(
+                    product=product, qty=qty, unit_cost=unit_cost, branch=branch,
+                    source_document_type='purchase_invoice',
+                )
+                stock_svc.record_stock_in(
+                    product=product, quantity=qty,
+                    movement_type=StockMovement.MovementType.PURCHASE_IN,
+                    branch=branch, warehouse=warehouse,
+                    source_document_type='purchase_invoice',
+                )
+
+        cls.sandwich = Product.objects.create(
+            tenant=cls.tenant, category=cls.category,
+            name='Chicken Sandwich', barcode='RS-SW', sku='SKU-RS-SW',
+            price=Decimal('50.00'), cost=Decimal('0.00'), stock=Decimal('0'),
+            product_type=ProductType.RECIPE_PRODUCT,
+        )
+        cls.recipe = Recipe.objects.create(tenant=cls.tenant, product=cls.sandwich)
+        cls.recipe_version = RecipeVersion.objects.create(
+            tenant=cls.tenant, recipe=cls.recipe, version_no=1,
+            status=RecipeVersion.Status.ACTIVE,
+        )
+        RecipeLine.objects.create(
+            tenant=cls.tenant, recipe_version=cls.recipe_version,
+            component_product=cls.chicken, component_unit=cls.chicken_unit,
+            entered_qty=Decimal('150'), qty_base=Decimal('150'), sort_order=0,
+        )
+        RecipeLine.objects.create(
+            tenant=cls.tenant, recipe_version=cls.recipe_version,
+            component_product=cls.lettuce, component_unit=cls.lettuce_unit,
+            entered_qty=Decimal('50'), qty_base=Decimal('50'), sort_order=1,
+        )
+        # Base recipe cost @ branch A: 150*0.10 + 50*0.02 = 16.00.
+
+        cls.cheese_group = ModifierGroup.objects.create(tenant=cls.tenant, name='Extras')
+        cls.cheese_option = ModifierOption.objects.create(
+            tenant=cls.tenant, modifier_group=cls.cheese_group,
+            name='Extra Cheese', price_delta=Decimal('6.00'),
+        )
+        ModifierOptionConsumption.objects.create(
+            tenant=cls.tenant, modifier_option=cls.cheese_option, variant=None,
+            component_product=cls.cheese, component_unit=cls.cheese_unit,
+            entered_qty=Decimal('40'), qty_base=Decimal('40'),
+        )
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.manager_a)
+
+    def _post_sale(self, items, user=None):
+        if user is not None:
+            self.client.force_authenticate(user=user)
+        body = {'items': items, 'method': 'cash', 'amount_paid': '1000.00'}
+        return self.client.post(reverse('sale-list'), body, format='json')
+
+    def test_recipe_sale_end_to_end_deducts_ingredients_and_snapshots_cost(self):
+        resp = self._post_sale([{'product': self.sandwich.id, 'qty': '1'}])
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        sale = Sale.objects.get(sale_uuid=resp.json()['sale_uuid'])
+        item = sale.items.get(product=self.sandwich)
+
+        self.assertEqual(item.unit_cost, Decimal('16.00'))
+        self.assertEqual(item.price_each, Decimal('50.00'))
+
+        chicken_mv = StockMovement.objects.get(
+            product=self.chicken, movement_type=StockMovement.MovementType.RECIPE_CONSUME,
+            source_document_id=sale.id,
+        )
+        self.assertEqual(chicken_mv.qty, Decimal('-150.000'))
+        self.assertEqual(chicken_mv.branch_id, self.branch_a.id)
+        self.assertEqual(chicken_mv.warehouse_id, self.wh_a.id)
+
+        lettuce_mv = StockMovement.objects.get(
+            product=self.lettuce, movement_type=StockMovement.MovementType.RECIPE_CONSUME,
+            source_document_id=sale.id,
+        )
+        self.assertEqual(lettuce_mv.qty, Decimal('-50.000'))
+
+        snapshot = SaleItemRecipeCostSnapshot.objects.get(sale_item=item)
+        self.assertEqual(snapshot.total_recipe_cost, Decimal('16.00'))
+        self.assertEqual(snapshot.lines.count(), 2)
+
+        # The recipe product itself has no stock of its own — no SALE_OUT.
+        self.assertFalse(StockMovement.objects.filter(product=self.sandwich).exists())
+
+    def test_recipe_sale_with_modifier_adds_cost_and_price(self):
+        resp = self._post_sale([{
+            'product': self.sandwich.id, 'qty': '1',
+            'modifier_option_ids': [self.cheese_option.id],
+        }])
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        sale = Sale.objects.get(sale_uuid=resp.json()['sale_uuid'])
+        item = sale.items.get(product=self.sandwich)
+
+        self.assertEqual(item.unit_cost, Decimal('22.00'))    # 16.00 + 40*0.15
+        self.assertEqual(item.price_each, Decimal('56.00'))   # 50.00 + 6.00
+
+        self.assertTrue(
+            SaleItemModifier.objects.filter(sale_item=item, option_name='Extra Cheese').exists()
+        )
+        cheese_mv = StockMovement.objects.get(
+            product=self.cheese, movement_type=StockMovement.MovementType.RECIPE_CONSUME,
+            source_document_id=sale.id,
+        )
+        self.assertEqual(cheese_mv.qty, Decimal('-40.000'))
+
+    def test_recipe_sale_with_variant_uses_variant_recipe_and_price(self):
+        large = ProductVariant.objects.create(
+            tenant=self.tenant, product=self.sandwich, name='Large', price=Decimal('70.00'),
+        )
+        large_recipe = Recipe.objects.create(tenant=self.tenant, product=self.sandwich, variant=large)
+        large_version = RecipeVersion.objects.create(
+            tenant=self.tenant, recipe=large_recipe, version_no=1,
+            status=RecipeVersion.Status.ACTIVE,
+        )
+        RecipeLine.objects.create(
+            tenant=self.tenant, recipe_version=large_version,
+            component_product=self.chicken, component_unit=self.chicken_unit,
+            entered_qty=Decimal('300'), qty_base=Decimal('300'),
+        )
+
+        resp = self._post_sale([{'product': self.sandwich.id, 'qty': '1', 'variant': large.id}])
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        sale = Sale.objects.get(sale_uuid=resp.json()['sale_uuid'])
+        item = sale.items.get(product=self.sandwich)
+
+        self.assertEqual(item.unit_cost, Decimal('30.00'))   # 300*0.10, NOT the base recipe
+        self.assertEqual(item.price_each, Decimal('70.00'))
+        self.assertEqual(item.variant_id, large.id)
+
+        chicken_mv = StockMovement.objects.get(
+            product=self.chicken, movement_type=StockMovement.MovementType.RECIPE_CONSUME,
+            source_document_id=sale.id,
+        )
+        self.assertEqual(chicken_mv.qty, Decimal('-300.000'))
+        # The base recipe's lettuce line must NOT fire — a variant's recipe
+        # is fully independent, not the base recipe plus a multiplier.
+        self.assertFalse(
+            StockMovement.objects.filter(
+                product=self.lettuce, movement_type=StockMovement.MovementType.RECIPE_CONSUME,
+                source_document_id=sale.id,
+            ).exists()
+        )
+
+    def test_branch_scoped_cost_in_real_sale(self):
+        resp_a = self._post_sale([{'product': self.sandwich.id, 'qty': '1'}], user=self.manager_a)
+        resp_b = self._post_sale([{'product': self.sandwich.id, 'qty': '1'}], user=self.manager_b)
+        self.assertEqual(resp_a.status_code, status.HTTP_201_CREATED, resp_a.content)
+        self.assertEqual(resp_b.status_code, status.HTTP_201_CREATED, resp_b.content)
+
+        item_a = Sale.objects.get(sale_uuid=resp_a.json()['sale_uuid']).items.get(product=self.sandwich)
+        item_b = Sale.objects.get(sale_uuid=resp_b.json()['sale_uuid']).items.get(product=self.sandwich)
+        self.assertEqual(item_a.unit_cost, Decimal('16.00'))  # branch A: chicken @ 0.10
+        self.assertEqual(item_b.unit_cost, Decimal('31.00'))  # branch B: chicken @ 0.20 -> 30.00 + 1.00
+
+    def test_snapshot_immutable_after_later_purchase_changes_average(self):
+        resp = self._post_sale([{'product': self.sandwich.id, 'qty': '1'}])
+        sale = Sale.objects.get(sale_uuid=resp.json()['sale_uuid'])
+        item = sale.items.get(product=self.sandwich)
+        original_cost = item.unit_cost
+        self.assertEqual(original_cost, Decimal('16.00'))
+
+        # A later purchase moves branch A's chicken average sharply.
+        pos_costing_svc.apply_purchase_receipt(
+            product=self.chicken, qty=Decimal('1'), unit_cost=Decimal('999.00'),
+            branch=self.branch_a, source_document_type='purchase_invoice',
+        )
+
+        item.refresh_from_db()
+        self.assertEqual(item.unit_cost, original_cost, 'a sale snapshot must never drift')
+        snapshot = SaleItemRecipeCostSnapshot.objects.get(sale_item=item)
+        self.assertEqual(snapshot.total_recipe_cost, original_cost)
+        chicken_line = snapshot.lines.get(component_product=self.chicken)
+        self.assertEqual(chicken_line.unit_cost, Decimal('0.1000'))
+
+    def test_oversell_recipe_ingredient_still_succeeds_with_warning(self):
+        self.chicken.stock = Decimal('10')  # far below the recipe's 150g requirement
+        self.chicken.save(update_fields=['stock'])
+
+        resp = self._post_sale([{'product': self.sandwich.id, 'qty': '1'}])
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        self.assertTrue(
+            any('Chicken' in w for w in resp.json().get('warnings', [])),
+            'oversold recipe ingredient must surface a warning',
+        )
+        self.chicken.refresh_from_db()
+        self.assertLess(self.chicken.stock, Decimal('0'))
+
+    def test_no_active_recipe_returns_clean_400(self):
+        unconfigured = Product.objects.create(
+            tenant=self.tenant, category=self.category,
+            name='Unconfigured Recipe Item', barcode='RS-UNCFG', sku='SKU-RS-UNCFG',
+            price=Decimal('30.00'), cost=Decimal('0.00'), stock=Decimal('0'),
+            product_type=ProductType.RECIPE_PRODUCT,
+        )
+        resp = self._post_sale([{'product': unconfigured.id, 'qty': '1'}])
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_dashboard_summary_cogs_reflects_recipe_sale_with_zero_new_code(self):
+        """Proves the Sprint 3/4 COGS pipeline works for recipe sales with
+        no changes to dashboard_summary itself — it just reads
+        SaleItem.unit_cost, which this batch now populates correctly for a
+        recipe line."""
+        resp = self._post_sale([{'product': self.sandwich.id, 'qty': '2'}])
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        sale = Sale.objects.get(sale_uuid=resp.json()['sale_uuid'])
+        item = sale.items.get(product=self.sandwich)
+        self.assertEqual(item.unit_cost, Decimal('16.00'))
+        self.assertEqual(item.qty, Decimal('2'))
+
+        today = sale.created_at.date().isoformat()
+        dash_resp = self.client.get(
+            reverse('dashboard-summary'), {'start_date': today, 'end_date': today},
+        )
+        self.assertEqual(dash_resp.status_code, status.HTTP_200_OK)
+        self.assertAlmostEqual(dash_resp.json()['kpis']['cogs'], 32.00, places=2)  # 16.00 * 2
+
+    def test_plain_stock_item_sale_unaffected(self):
+        """Sanity check alongside the full pos.tests regression run: a plain
+        stock-item line still uses Product.cost directly, never the recipe
+        path."""
+        water = Product.objects.create(
+            tenant=self.tenant, category=self.category,
+            name='Bottled Water', barcode='RS-WATER', sku='SKU-RS-WATER',
+            price=Decimal('10.00'), cost=Decimal('4.00'), stock=Decimal('100'),
+        )
+        resp = self._post_sale([{'product': water.id, 'qty': '1', 'price_each': '10.00'}])
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        sale = Sale.objects.get(sale_uuid=resp.json()['sale_uuid'])
+        item = sale.items.get(product=water)
+        self.assertEqual(item.unit_cost, Decimal('4.00'))
+        self.assertTrue(
+            StockMovement.objects.filter(
+                product=water, movement_type=StockMovement.MovementType.SALE_OUT,
+            ).exists()
+        )

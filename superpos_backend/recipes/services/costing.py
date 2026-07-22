@@ -21,6 +21,7 @@ from typing import Iterable, List, Optional
 from django.db import transaction
 from django.db.models import Q
 
+from pos.models import BranchWarehouse
 from pos.services import costing as pos_costing_svc
 from recipes.models import Recipe, RecipeVersion
 
@@ -195,8 +196,30 @@ def activate_recipe_version(version: RecipeVersion) -> RecipeVersion:
     return version
 
 
+def resolve_kitchen_warehouse(*, tenant, branch):
+    """The warehouse a `RECIPE_CONSUME` movement lands in for `branch` —
+    mirrors `pos.services.purchase_invoices._resolve_line_warehouse`'s
+    exact pattern: prefer the branch's active default `BranchWarehouse`
+    with `role=KITCHEN`, fall back to `role=SALES` (many small cafés won't
+    bother separating them), raise if neither is configured.
+    """
+    for role in (BranchWarehouse.Role.KITCHEN, BranchWarehouse.Role.SALES):
+        link = (
+            BranchWarehouse.objects
+            .filter(tenant=tenant, branch=branch, role=role, is_default=True, is_active=True)
+            .select_related('warehouse')
+            .first()
+        )
+        if link is not None and link.warehouse_id is not None:
+            return link.warehouse
+    raise RecipeError(
+        'no default kitchen or sales warehouse is configured for this branch — '
+        'recipe consumption has nowhere to deplete stock from',
+    )
+
+
 __all__ = [
     'RecipeError', 'RecipeCostLine', 'RecipeCostResult', 'MAX_RECIPE_DEPTH',
     'get_active_recipe', 'compute_recipe_cost', 'validate_recipe_lines',
-    'compute_modifier_deltas', 'activate_recipe_version',
+    'compute_modifier_deltas', 'activate_recipe_version', 'resolve_kitchen_warehouse',
 ]
