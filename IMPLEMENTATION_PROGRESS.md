@@ -2881,4 +2881,101 @@ signature/behavior unchanged (still used standalone elsewhere); only
 
 ---
 
+### Batch 5 Hotfix Follow-up — split snapshot lines for audit (2026-07-22, `s5/batch-5-hotfix-review`)
+
+**Goal:** owner follow-up question after the Batch 5 hotfix landed: does
+`compute_recipe_sale_lines()` keep base-recipe lines and modifier lines
+separate in `SaleItemRecipeCostSnapshotLine` (better for audit/debugging),
+or does it merge them into one netted row per component? It merged them
+whenever a component was touched by both the base recipe and a selected
+modifier. Owner's decision: split them — `SaleItemRecipeCostSnapshotLine`
+must keep every base recipe line and every modifier line as its own row
+(`is_modifier_line` as before), with **no netting inside the snapshot**.
+Netting happens **only** at the `RECIPE_CONSUME` stock-deduction stage,
+still rejecting any negative net exactly as before. A negative modifier
+delta keeps its real (negative) sign in the snapshot. Final rounding
+happens once on the total cost, not per line.
+
+**Files changed:**
+- `recipes/services/costing.py` — `compute_recipe_sale_lines()` rewritten:
+  - Still nets every component's quantity (base recipe lines + every
+    selected modifier's resolved consumption) to validate that no
+    component's net ever goes negative (`RecipeError` → 400), exactly as
+    before — this part of the netting logic is unchanged.
+  - The returned `.lines` are no longer built from that netted dict. They
+    are now built directly from the **unnetted sources**: one
+    `RecipeCostLine` per active `RecipeLine` (`is_modifier_line=False`)
+    and one per selected modifier's resolved `ModifierOptionConsumption`
+    row (`is_modifier_line=True`, `source_modifier_option_id` set) — even
+    when two lines share the same `component_product_id`. A modifier's
+    negative `qty_base` (and the resulting negative `line_cost`) is kept
+    as-is, never zeroed or dropped.
+  - `RecipeCostResult.total_cost` is now computed by summing every line's
+    **raw, unrounded** `qty_base * unit_cost` first, then quantizing to
+    money (2dp) exactly once — replacing the previous "quantize each line,
+    sum the rounded lines" approach, which could silently drift the total
+    on components whose raw cost wasn't already a clean 2dp value.
+  - Added a small per-call `unit_cost_cache` so a component appearing in
+    both a base line and a modifier line only triggers one
+    `get_cost_for_sale()` lookup, not two.
+  - `RecipeCostLine`'s dataclass docstring updated to state `line_cost` is
+    now the raw per-source value, not a pre-rounded one.
+- `pos/serializers.py` — `SaleSerializer._apply_stock()`'s recipe branch:
+  since `snapshot.lines` can now hold multiple rows for the same
+  component (one base + one or more modifier rows), the loop that used to
+  read `line.qty_base` directly (assuming one row per component) now nets
+  `snapshot.lines` by `component_product_id` first (`net_qty`/
+  `component_by_id` dicts), then writes exactly one `RECIPE_CONSUME`
+  movement per net-positive component — a `<=0` net is skipped (fully,
+  validly removed by a modifier), matching the prior single-movement
+  behavior. This net can never be negative in practice: `compute_recipe_
+  sale_lines()` already rejected that at sale-creation time and the
+  snapshot is immutable afterward. `create()` itself needed no change —
+  it already just persists whatever `RecipeCostLine`s the service returns.
+- `recipes/models.py` — `SaleItemRecipeCostSnapshotLine`'s docstring
+  rewritten to describe the new "one row per source, never netted" contract
+  and point at `_apply_stock` as the one place a net is derived, on read,
+  from the stored lines.
+- `recipes/test_recipes.py` — `test_modifier_reduces_recipe_line_to_valid_
+  zero_net` updated: previously asserted the onion component had **zero**
+  snapshot lines when its net was zero; now asserts **two** lines exist
+  (base `+20`, modifier `-20`, both with their real cost sign), matching
+  the new split-line design. Added a new test,
+  `test_recipe_and_modifier_lines_for_same_component_stay_separate_and_
+  total_rounds_once`: a component touched by both a base recipe line and a
+  modifier (each contributing a raw 0.126/g cost) proves (a) the snapshot
+  keeps two separate rows for that component rather than merging them, (b)
+  the item's total cost is `16.25` (sum-raw-then-round-once), not `16.26`
+  (what round-per-line-then-sum would have produced — an explicit
+  regression guard for the rounding-order fix), and (c) exactly one
+  `RECIPE_CONSUME` movement for the combined `2g` is written at the
+  stock-deduction stage.
+
+**Migrations:** none — pure service/serializer logic change, no model
+field added or removed. `manage.py makemigrations --check --dry-run`
+confirmed clean before and after.
+
+**Tests:** `recipes.test_recipes` grown by 1 new test method (43 in the
+file); one existing test's assertions updated to match the new contract
+(not a behavior regression — the old assertion tested the *old*
+merged-line design, which is exactly what this change replaces). Full
+suite: **742/742 passed** (741 baseline + 1 net new test).
+
+**Verification:** `manage.py check` clean. `manage.py makemigrations
+--check --dry-run` clean. Full suite green. Manual read-through confirmed
+`void_sale` (`pos/views.py`) needed no change — it already reverses
+`RECIPE_CONSUME` movements read directly from the `StockMovement` ledger,
+never from `SaleItemRecipeCostSnapshotLine`, so it is unaffected by the
+snapshot's internal row granularity either way.
+
+**Not touched:** Batch 6 (recipe/food-cost reporting) — still not
+started. No frontend file. No GL code. `compute_recipe_cost()` (the
+recipe-cost *preview* function, unrelated to a posted sale) and
+`compute_modifier_deltas()` (single-modifier preview) both keep their
+existing per-line-rounded behavior unchanged — this change is scoped to
+`compute_recipe_sale_lines()`, the one function that ever writes an
+immutable sale-item snapshot.
+
+---
+
 *(Later batches of Sprint 5 get their own entries here as they land.)*

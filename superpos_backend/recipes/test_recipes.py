@@ -1077,7 +1077,13 @@ class RecipeSalePostingTests(APITestCase):
         and no cost contribution for that component, and (the actual bug
         this hotfix fixes) the base recipe's own onion line must NOT still
         fire at its original quantity — the modifier must net against it,
-        not just be dropped from the cost total."""
+        not just be dropped from the cost total.
+
+        Post-Batch-6 review (split-snapshot-line redesign): a net of zero
+        does NOT mean the snapshot has zero rows for that component — the
+        base recipe's onion line (+20) and the modifier's removal line
+        (-20) both stay in the snapshot, unmerged, each with its own real
+        sign. Only the derived NET (used for stock deduction) is zero."""
         onion, onion_unit = self._add_onion_ingredient(name='Onion Zero', barcode='RS-ONI0')
         group = ModifierGroup.objects.create(tenant=self.tenant, name='Removals Zero')
         option = ModifierOption.objects.create(
@@ -1098,8 +1104,9 @@ class RecipeSalePostingTests(APITestCase):
         sale = Sale.objects.get(sale_uuid=resp.json()['sale_uuid'])
         item = sale.items.get(product=self.sandwich)
 
-        # Base recipe cost (chicken+lettuce only) unchanged — onion nets to
-        # zero, contributes nothing to cost, and is never actually consumed.
+        # Base recipe cost (chicken+lettuce only) unchanged — onion's two
+        # lines net to zero and contribute nothing to the total, and no
+        # stock actually moves for onion.
         self.assertEqual(item.unit_cost, Decimal('16.00'))
         self.assertFalse(
             StockMovement.objects.filter(
@@ -1108,7 +1115,91 @@ class RecipeSalePostingTests(APITestCase):
             ).exists()
         )
         snapshot = SaleItemRecipeCostSnapshot.objects.get(sale_item=item)
-        self.assertFalse(snapshot.lines.filter(component_product=onion).exists())
+        onion_lines = list(snapshot.lines.filter(component_product=onion))
+        self.assertEqual(len(onion_lines), 2)
+        base_line = next(l for l in onion_lines if not l.is_modifier_line)
+        modifier_line = next(l for l in onion_lines if l.is_modifier_line)
+        self.assertEqual(base_line.qty_base, Decimal('20'))
+        self.assertEqual(base_line.line_cost, Decimal('1.00'))
+        self.assertIsNone(base_line.source_modifier_option_id)
+        self.assertEqual(modifier_line.qty_base, Decimal('-20'))
+        self.assertEqual(modifier_line.line_cost, Decimal('-1.00'))
+        self.assertEqual(modifier_line.source_modifier_option_id, option.id)
+
+    def test_recipe_and_modifier_lines_for_same_component_stay_separate_and_total_rounds_once(self):
+        """Post-Batch-6 review — when a base recipe line and a modifier's
+        consumption BOTH touch the same component with a non-zero net, the
+        snapshot keeps them as two separate audit rows (never merged into
+        one netted line), and `total_recipe_cost` is computed by summing
+        every line's RAW cost and rounding ONCE at the end — not by
+        rounding each line first and summing already-rounded amounts,
+        which would silently drift the total for a component whose raw
+        cost isn't already a clean 2dp value."""
+        precise = Product.objects.create(
+            tenant=self.tenant, category=self.ingredients_cat,
+            name='Precise Ingredient', barcode='RS-PRECISE', sku='SKU-RS-PRECISE',
+            price=Decimal('0.00'), cost=Decimal('0.00'), stock=Decimal('0'),
+        )
+        precise_unit = ProductUnit.objects.create(
+            tenant=self.tenant, product=precise, unit=self.gram,
+            conversion_to_base=Decimal('1'), is_base=True,
+        )
+        pos_costing_svc.apply_purchase_receipt(
+            product=precise, qty=Decimal('1000'), unit_cost=Decimal('0.126'),
+            branch=self.branch_a, source_document_type='purchase_invoice',
+        )
+        stock_svc.record_stock_in(
+            product=precise, quantity=Decimal('1000'),
+            movement_type=StockMovement.MovementType.PURCHASE_IN,
+            branch=self.branch_a, warehouse=self.wh_a,
+            source_document_type='purchase_invoice',
+        )
+        RecipeLine.objects.create(
+            tenant=self.tenant, recipe_version=self.recipe_version,
+            component_product=precise, component_unit=precise_unit,
+            entered_qty=Decimal('1'), qty_base=Decimal('1'), sort_order=3,
+        )
+        group = ModifierGroup.objects.create(tenant=self.tenant, name='Precise Extras')
+        option = ModifierOption.objects.create(
+            tenant=self.tenant, modifier_group=group,
+            name='Extra Precise', price_delta=Decimal('0.00'),
+        )
+        ModifierOptionConsumption.objects.create(
+            tenant=self.tenant, modifier_option=option, variant=None,
+            component_product=precise, component_unit=precise_unit,
+            entered_qty=Decimal('1'), qty_base=Decimal('1'),
+        )
+
+        resp = self._post_sale([{
+            'product': self.sandwich.id, 'qty': '1',
+            'modifier_option_ids': [option.id],
+        }])
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        sale = Sale.objects.get(sale_uuid=resp.json()['sale_uuid'])
+        item = sale.items.get(product=self.sandwich)
+
+        # Base sandwich (16.00) + 1g*0.126 (base line) + 1g*0.126 (modifier
+        # line) = 16.252 raw, rounded ONCE -> 16.25. Rounding each 0.126
+        # line to 2dp first (0.13 each) before summing would have produced
+        # 16.26 — this assertion is the regression guard against that.
+        self.assertEqual(item.unit_cost, Decimal('16.25'))
+
+        snapshot = SaleItemRecipeCostSnapshot.objects.get(sale_item=item)
+        self.assertEqual(snapshot.total_recipe_cost, Decimal('16.25'))
+        precise_lines = list(snapshot.lines.filter(component_product=precise))
+        self.assertEqual(len(precise_lines), 2)
+        self.assertEqual({l.is_modifier_line for l in precise_lines}, {False, True})
+        for line in precise_lines:
+            self.assertEqual(line.qty_base, Decimal('1'))
+
+        # Netting happens only at stock-deduction time — one RECIPE_CONSUME
+        # movement for the combined 2g, not two separate movements.
+        precise_movements = StockMovement.objects.filter(
+            product=precise, movement_type=StockMovement.MovementType.RECIPE_CONSUME,
+            source_document_id=sale.id,
+        )
+        self.assertEqual(precise_movements.count(), 1)
+        self.assertEqual(precise_movements.first().qty, Decimal('-2.000'))
 
     def test_void_recipe_sale_restores_ingredient_stock(self):
         """Point 5/void-awareness — voiding a recipe-product sale must

@@ -1776,11 +1776,34 @@ class SaleSerializer(serializers.ModelSerializer):
                         )
                     except recipes_costing_svc.RecipeError as exc:
                         raise serializers.ValidationError({'items': [str(exc)]})
+                    # Snapshot-granularity review: `.lines` now stores one
+                    # row per SOURCE (a base recipe line, or one selected
+                    # modifier's consumption delta) — never merged, even
+                    # when two lines share the same component_product (see
+                    # `compute_recipe_sale_lines`'s docstring). Exactly one
+                    # `RECIPE_CONSUME` movement must exist per component
+                    # actually depleted, so we net the stored lines back
+                    # down to one quantity per component HERE, at the
+                    # stock-deduction boundary — not when the snapshot was
+                    # written. This net can never be negative:
+                    # `compute_recipe_sale_lines` already validated and
+                    # rejected any negative net at sale-creation time, and
+                    # the snapshot is immutable afterward, so a <=0 net
+                    # here only ever means "fully, validly removed by a
+                    # modifier" — nothing to deduct, not an error.
+                    net_qty: dict = {}
+                    component_by_id: dict = {}
                     for line in snapshot.lines.all():
                         component = line.component_product
                         if component is None:
                             continue
-                        qty_delta = line.qty_base
+                        net_qty[component.id] = net_qty.get(component.id, Decimal('0')) + line.qty_base
+                        component_by_id[component.id] = component
+
+                    for cid, qty_delta in net_qty.items():
+                        if qty_delta <= 0:
+                            continue  # fully removed by a modifier — nothing to deduct
+                        component = component_by_id[cid]
                         note = f'Sale #{sale.pk} — recipe consume for "{product.name}"'
                         try:
                             component.deduct_stock(qty_delta)

@@ -40,6 +40,16 @@ class RecipeError(Exception):
 
 @dataclass
 class RecipeCostLine:
+    """One per-source cost line. `qty_base`/`line_cost` are the raw,
+    unrounded values for that single source (a base `RecipeLine` or one
+    modifier's `ModifierOptionConsumption` row) — never netted against any
+    other line here. A modifier's removal delta (`qty_base < 0`) keeps its
+    real negative sign, both in `qty_base` and in the resulting
+    `line_cost`. Callers that need a per-component NET quantity (stock
+    deduction) or a rounded total (the sale-item cost snapshot) compute
+    that themselves from a list of these lines — see
+    `compute_recipe_sale_lines`'s docstring."""
+
     component_product_id: int
     component_name: str
     qty_base: Decimal
@@ -244,40 +254,74 @@ def compute_recipe_sale_lines(
     `compute_recipe_cost`/`compute_modifier_deltas`, a second time for an
     already-posted sale.
 
-    Unlike `compute_recipe_cost` (base recipe only) and
-    `compute_modifier_deltas` (one modifier in isolation), this function
-    **nets** the base recipe's per-component quantities against every
-    selected modifier's consumption delta for that same component —
-    required so a removal modifier (e.g. "No Onion", -20g) actually
-    reduces what the recipe's own onion line would otherwise consume,
-    rather than being silently dropped alongside it.
+    Post-review revision (pre-Batch-6 review, snapshot-granularity
+    question): the returned `.lines` are **NOT netted per component**.
+    Every active base `RecipeLine` becomes its own line
+    (`is_modifier_line=False`), and every selected modifier's resolved
+    `ModifierOptionConsumption` becomes its own line
+    (`is_modifier_line=True`) — even when a base line and a modifier line
+    touch the same `component_product_id`. A removal modifier's negative
+    `qty_base` (and the resulting negative `line_cost`) is preserved as-is.
+    This keeps the sale-item snapshot fully auditable: "the recipe called
+    for 20g onion; 'No Onion' removed 20g" is two visible rows, not one
+    silently-merged zero.
 
-    Business rule (confirmed): the net quantity for any component can
-    never go negative. If a modifier is configured to remove MORE of an
-    ingredient than the recipe (plus any other selected modifier) actually
-    provides — e.g. the recipe has 20g onion and "No Onion" is configured
-    to remove 40g — that is a data/configuration problem, not something to
-    silently floor to zero: this function raises `RecipeError` (the
-    caller turns it into a 400) instead of ever producing a negative
-    `RECIPE_CONSUME` quantity. A net of exactly zero (fully, validly
-    removed) is not an error — that component simply contributes no cost
-    and no stock movement.
+    Netting still happens, but only for two narrow purposes that need a
+    single per-component number, neither of which touches the stored
+    lines:
+
+    1. **Validation here, at sale-creation time.** The net quantity for
+       any component (Σ base lines + Σ selected modifier deltas for that
+       component) can never go negative — if a modifier is configured to
+       remove MORE of an ingredient than the recipe (plus any other
+       selected modifier) actually provides, that is a data/configuration
+       problem: this function raises `RecipeError` (the caller turns it
+       into a 400) instead of accepting a sale whose stock deduction could
+       never be satisfied without going negative. A net of exactly zero
+       (fully, validly removed) is not an error.
+    2. **Stock deduction, at `_apply_stock` time**, which nets the
+       *stored, unnetted* snapshot lines back down to one quantity per
+       component before writing a `RECIPE_CONSUME` movement — see that
+       function's own comment. It does not call this function again; it
+       re-derives the net from `.lines` directly, per the snapshot's
+       "sole source of truth" contract.
+
+    Rounding: each stored line's `.line_cost` is the raw, unrounded
+    `qty_base * unit_cost` (the DB column itself is `DecimalField(10,2)`
+    and rounds it on write — an incidental storage-precision effect, not a
+    deliberate per-line quantization). `RecipeCostResult.total_cost` is
+    computed by summing every line's *raw* cost first and quantizing to
+    money (2dp) exactly once at the end — not by summing already-rounded
+    per-line amounts — so the total never accumulates per-line rounding
+    drift across a recipe with many ingredients.
     """
     net_qty: dict = {}
     component_by_id: dict = {}
-    touched_by_modifier: set = set()
+    unit_cost_cache: dict = {}
 
-    for line in recipe_version.lines.filter(is_active=True).select_related('component_product'):
+    def _unit_cost(component):
+        cid = component.id
+        cost = unit_cost_cache.get(cid)
+        if cost is None:
+            cost = pos_costing_svc.get_cost_for_sale(component, branch=branch)
+            unit_cost_cache[cid] = cost
+        return cost
+
+    base_lines = list(
+        recipe_version.lines.filter(is_active=True).select_related('component_product'),
+    )
+    for line in base_lines:
         cid = line.component_product_id
         net_qty[cid] = net_qty.get(cid, Decimal('0')) + line.qty_base
         component_by_id[cid] = line.component_product
 
+    modifier_consumptions = []  # [(option, consumption), ...]
     for option in modifier_options:
         for consumption in _resolve_modifier_consumptions(option, variant):
             cid = consumption.component_product_id
             net_qty[cid] = net_qty.get(cid, Decimal('0')) + consumption.qty_base
             component_by_id[cid] = consumption.component_product
-            touched_by_modifier.add(cid)
+            modifier_consumptions.append((option, consumption))
 
     for cid, qty in net_qty.items():
         if qty < 0:
@@ -289,20 +333,30 @@ def compute_recipe_sale_lines(
             )
 
     lines = []
-    total = Decimal('0.00')
-    for cid, qty_base in net_qty.items():
-        if qty_base <= 0:
-            continue  # fully removed by a modifier — nothing consumed, nothing costed
-        component = component_by_id[cid]
-        unit_cost = pos_costing_svc.get_cost_for_sale(component, branch=branch)
-        line_cost = pos_costing_svc.quantize_money(qty_base * unit_cost)
-        total += line_cost
+    total_raw = Decimal('0')
+    for line in base_lines:
+        unit_cost = _unit_cost(line.component_product)
+        raw_cost = line.qty_base * unit_cost
+        total_raw += raw_cost
         lines.append(RecipeCostLine(
-            component_product_id=cid, component_name=component.name,
-            qty_base=qty_base, unit_cost=unit_cost, line_cost=line_cost,
-            is_modifier_line=cid in touched_by_modifier,
+            component_product_id=line.component_product_id,
+            component_name=line.component_product.name,
+            qty_base=line.qty_base, unit_cost=unit_cost, line_cost=raw_cost,
+            is_modifier_line=False,
         ))
-    return RecipeCostResult(total_cost=total, lines=lines)
+    for option, consumption in modifier_consumptions:
+        unit_cost = _unit_cost(consumption.component_product)
+        raw_cost = consumption.qty_base * unit_cost
+        total_raw += raw_cost
+        lines.append(RecipeCostLine(
+            component_product_id=consumption.component_product_id,
+            component_name=consumption.component_product.name,
+            qty_base=consumption.qty_base, unit_cost=unit_cost, line_cost=raw_cost,
+            is_modifier_line=True, source_modifier_option_id=option.id,
+        ))
+
+    total_cost = pos_costing_svc.quantize_money(total_raw)
+    return RecipeCostResult(total_cost=total_cost, lines=lines)
 
 
 @transaction.atomic

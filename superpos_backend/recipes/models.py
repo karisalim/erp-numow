@@ -430,12 +430,30 @@ class SaleItemRecipeCostSnapshot(models.Model):
 
 
 class SaleItemRecipeCostSnapshotLine(models.Model):
-    """One component's frozen cost contribution within a
-    `SaleItemRecipeCostSnapshot` — a base-recipe ingredient or a selected
-    modifier's consumption delta (`is_modifier_line` distinguishes them).
-    `component_name`/`unit_cost` are frozen text/values, independent of
-    whatever the component's live average cost is by the time anyone reads
-    this row later.
+    """One frozen cost line within a `SaleItemRecipeCostSnapshot` — a
+    single SOURCE (one base `RecipeLine`, or one selected modifier's
+    `ModifierOptionConsumption` row), `is_modifier_line` distinguishing
+    which. `component_name`/`unit_cost` are frozen text/values,
+    independent of whatever the component's live average cost is by the
+    time anyone reads this row later.
+
+    NOT netted per component (pre-Batch-6 review, snapshot-granularity
+    follow-up): a base recipe line and a modifier's consumption delta for
+    the SAME `component_product` are stored as two separate rows here,
+    never merged — this is deliberate, for audit/debugging (e.g. "recipe
+    called for 20g onion" + "'No Onion' removed 20g" stay two visible
+    rows, not a silently-collapsed zero). A removal modifier's negative
+    `qty_base` (and its resulting negative `line_cost`) keeps its real
+    sign here. Any caller that needs a single NET quantity per component —
+    today, only `pos.serializers.SaleSerializer._apply_stock` when it
+    writes `RECIPE_CONSUME` stock movements — sums `qty_base` across all
+    of a snapshot's lines sharing the same `component_product_id` itself,
+    at the point of use; that net is guaranteed non-negative because
+    `recipes.services.costing.compute_recipe_sale_lines` already validated
+    it at sale-creation time, before this snapshot was ever written.
+    `SaleItemRecipeCostSnapshot.total_recipe_cost` is likewise the sum of
+    every line's raw (unrounded) cost, quantized to money once at the
+    total — not a sum of already-rounded per-line amounts.
     """
 
     tenant = models.ForeignKey(
