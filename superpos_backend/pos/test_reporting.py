@@ -21,6 +21,8 @@ already writes for recipe-product sales. Pure reads; no new write-side code.
 from datetime import date, timedelta
 from decimal import Decimal
 
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -564,6 +566,42 @@ class RecipeProfitabilityReportTests(_Batch6ReportingTestBase):
         resp = self.client.get(reverse('recipe-profitability'))
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
+    def test_invalid_start_date_returns_400(self):
+        """Batch 7 verification — `_parse_report_window`'s error branches
+        were only ever exercised via `dashboard-summary`/`dashboard-trend`
+        in the test suite; this endpoint reuses the same helper but had
+        zero coverage of its own error path (measured via `coverage run`,
+        not assumed)."""
+        resp = self.client.get(reverse('recipe-profitability'), {'start_date': 'not-a-date'})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
+
+    def test_unknown_branch_id_returns_404(self):
+        resp = self.client.get(reverse('recipe-profitability'), {'branch_id': 999999})
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_non_numeric_branch_id_returns_400(self):
+        resp = self.client.get(reverse('recipe-profitability'), {'branch_id': 'not-a-number'})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
+
+    def test_query_count_does_not_scale_with_sale_row_count(self):
+        """Batch 7 verification (B7V-2) — measured: this view aggregates in
+        the database (`.values().annotate()`), so 10 sale lines across 2
+        products cost a fixed, small number of queries — not one per sale
+        line. Pins that shape so a future change (e.g. per-row Python
+        post-processing) doesn't silently turn this into an N+1."""
+        for _ in range(5):
+            self._make_sale([(self.sandwich, Decimal('1'), Decimal('50.00'), Decimal('16.00'))])
+            self._make_sale([(self.burger, Decimal('1'), Decimal('60.00'), Decimal('20.00'))])
+        with CaptureQueriesContext(connection) as ctx:
+            resp = self.client.get(reverse('recipe-profitability'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+        self.assertEqual(len(resp.json()['results']), 2)
+        self.assertLessEqual(
+            len(ctx.captured_queries), 5,
+            f'recipe-profitability query count scales with row count: '
+            f'{len(ctx.captured_queries)} queries for 10 sale lines across 2 products',
+        )
+
 
 class IngredientConsumptionReportTests(_Batch6ReportingTestBase):
     def test_aggregate_matches_hand_computed_figures(self):
@@ -655,3 +693,40 @@ class IngredientConsumptionReportTests(_Batch6ReportingTestBase):
         self.client.force_authenticate(user=self.cashier)
         resp = self.client.get(reverse('ingredient-consumption-report'))
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_invalid_start_date_returns_400(self):
+        resp = self.client.get(
+            reverse('ingredient-consumption-report'), {'start_date': 'not-a-date'},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
+
+    def test_unknown_branch_id_returns_404(self):
+        resp = self.client.get(reverse('ingredient-consumption-report'), {'branch_id': 999999})
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_non_numeric_branch_id_returns_400(self):
+        resp = self.client.get(
+            reverse('ingredient-consumption-report'), {'branch_id': 'not-a-number'},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
+
+    def test_query_count_does_not_scale_with_movement_row_count(self):
+        """Batch 7 verification (B7V-2) — measured: 10 `RECIPE_CONSUME`
+        movements sharing one `(product, branch)` pair cost 2 queries (one
+        `select_related` fetch for the movements, one cached `InventoryCost`
+        lookup), not 10+ — confirming `_unit_cost`'s per-request cache
+        actually prevents the N+1 this view's own docstring warns about."""
+        for _ in range(10):
+            self._make_recipe_movement(
+                product=self.chicken, branch=self.branch_a, qty=Decimal('1'),
+                avg_unit_cost=Decimal('0.10'),
+            )
+        with CaptureQueriesContext(connection) as ctx:
+            resp = self.client.get(reverse('ingredient-consumption-report'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+        self.assertEqual(len(resp.json()['results']), 1)
+        self.assertLessEqual(
+            len(ctx.captured_queries), 5,
+            f'ingredient report query count scales with row count: '
+            f'{len(ctx.captured_queries)} queries for 10 movements sharing 1 (product,branch)',
+        )

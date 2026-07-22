@@ -8,9 +8,10 @@ API-level CRUD/activation tests, mirroring the depth of coverage
 
 from decimal import Decimal
 
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
 from django.db.models import ProtectedError
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -605,6 +606,17 @@ class RecipeSalePostingTests(APITestCase):
         )
         _grant_default_routing(cls.tenant, cls.branch_a)
         _grant_default_routing(cls.tenant, cls.branch_b)
+
+        # Batch 7 verification: a branch with NO default kitchen/sales
+        # warehouse configured at all — exercises `resolve_kitchen_
+        # warehouse`'s RecipeError path (a real "new branch not fully set
+        # up yet" scenario), previously untested (0% coverage on that
+        # branch per `coverage run`).
+        cls.branch_c = Branch.objects.create(tenant=cls.tenant, name='Branch C (no kitchen)')
+        cls.manager_c = User.objects.create_user(
+            username='rsmgr_c', password='pw', role=User.Role.MANAGER,
+            tenant=cls.tenant, branch=cls.branch_c,
+        )
 
         cls.category = Category.objects.create(tenant=cls.tenant, name='Menu')
         cls.ingredients_cat = Category.objects.create(tenant=cls.tenant, name='Ingredients')
@@ -1304,3 +1316,175 @@ class RecipeSalePostingTests(APITestCase):
         self.assertFalse(
             StockMovement.objects.filter(sale=sale, product=self.sandwich).exists()
         )
+
+    def test_recipe_sale_rejected_when_branch_has_no_kitchen_or_sales_warehouse(self):
+        """Batch 7 verification — a branch with no default KITCHEN or SALES
+        `BranchWarehouse` configured has nowhere for `RECIPE_CONSUME` to
+        deplete stock from. `resolve_kitchen_warehouse` raises `RecipeError`;
+        `_apply_stock` must turn that into a clean 400 (not an unhandled
+        500), and the whole sale (including the already-created `Sale` row)
+        must roll back — this exercises the transaction boundary, not just
+        the exception translation."""
+        sales_before = Sale.objects.count()
+        resp = self._post_sale([{'product': self.sandwich.id, 'qty': '1'}], user=self.manager_c)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
+        self.assertIn('warehouse', str(resp.content).lower())
+        self.assertEqual(Sale.objects.count(), sales_before)
+        self.assertFalse(
+            StockMovement.objects.filter(
+                movement_type=StockMovement.MovementType.RECIPE_CONSUME,
+                branch=self.branch_c,
+            ).exists()
+        )
+
+    def test_recipe_sale_query_count_regression_guard(self):
+        """Batch 7 verification (B7V-2) — measured, not reasoned, via
+        `CaptureQueriesContext`. A sale of one recipe product with 2 base
+        recipe lines + 1 modifier line (3 distinct components) took 63
+        queries before this batch's `get_or_create_inventory_cost` fix
+        (every component paid 2 InventoryCost queries even when its row
+        already existed — the common case after a branch's first
+        purchase); 60 after. This test pins the number so a future N+1
+        regression on this hot path (called on every recipe sale) shows up
+        as a failing test with an exact delta, not a vague slowdown
+        someone has to notice separately."""
+        with CaptureQueriesContext(connection) as ctx:
+            resp = self._post_sale([{
+                'product': self.sandwich.id, 'qty': '1',
+                'modifier_option_ids': [self.cheese_option.id],
+            }])
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertLessEqual(
+            len(ctx.captured_queries), 60,
+            f'recipe sale query count regressed: {len(ctx.captured_queries)} > 60 '
+            f'(2 base recipe lines + 1 modifier line, 3 distinct components)',
+        )
+
+    def test_recipe_void_query_count_regression_guard(self):
+        """Batch 7 verification (B7V-2) — measured: voiding a 2-ingredient
+        recipe sale takes 31 queries (occasional manager action, not a hot
+        path — no optimization applied here, just a pinned ceiling so a
+        future change doesn't silently make void scale badly per
+        ingredient)."""
+        resp = self._post_sale([{'product': self.sandwich.id, 'qty': '1'}])
+        sale_uuid = resp.json()['sale_uuid']
+        with CaptureQueriesContext(connection) as ctx:
+            void_resp = self.client.post(
+                reverse('sale-void', kwargs={'sale_uuid': sale_uuid}), {}, format='json',
+            )
+        self.assertEqual(void_resp.status_code, 200, void_resp.content)
+        self.assertLessEqual(
+            len(ctx.captured_queries), 35,
+            f'recipe void query count regressed: {len(ctx.captured_queries)} > 35',
+        )
+
+    def test_end_to_end_data_integrity_sale_to_reports(self):
+        """Batch 7 verification (B7V-3) — a real recipe sale, posted
+        through the actual API at two branches with different branch-scoped
+        ingredient costs, must produce IDENTICAL numbers across every
+        downstream read surface: the SaleItem snapshot, the
+        RECIPE_CONSUME ledger, dashboard_summary's COGS, the
+        recipe-profitability report, and the ingredient-consumption
+        report. This is the strongest guard against the two pipelines
+        (Sprint 3/4's COGS math and Sprint 5's recipe costing) silently
+        drifting apart, since they're independently computed from
+        different tables (SaleItem vs StockMovement) but must reconcile.
+
+        Branch A: chicken@0.10, lettuce@0.02, cheese@0.15 -> recipe cost
+        150*0.10 + 50*0.02 + 40*0.15 = 22.00 (matches the existing
+        `test_recipe_sale_with_modifier_adds_cost_and_price` baseline).
+        Branch B: chicken@0.20 (only chicken differs by branch in this
+        fixture) -> 150*0.20 + 50*0.02 + 40*0.15 = 37.00.
+        Both sales price identically: 50.00 base + 6.00 modifier = 56.00.
+        """
+        resp_a = self._post_sale([{
+            'product': self.sandwich.id, 'qty': '1',
+            'modifier_option_ids': [self.cheese_option.id],
+        }], user=self.manager_a)
+        self.assertEqual(resp_a.status_code, status.HTTP_201_CREATED, resp_a.content)
+        resp_b = self._post_sale([{
+            'product': self.sandwich.id, 'qty': '1',
+            'modifier_option_ids': [self.cheese_option.id],
+        }], user=self.manager_b)
+        self.assertEqual(resp_b.status_code, status.HTTP_201_CREATED, resp_b.content)
+
+        sale_a = Sale.objects.get(sale_uuid=resp_a.json()['sale_uuid'])
+        sale_b = Sale.objects.get(sale_uuid=resp_b.json()['sale_uuid'])
+        item_a = sale_a.items.get(product=self.sandwich)
+        item_b = sale_b.items.get(product=self.sandwich)
+
+        # ── Layer 1: the SaleItem snapshot itself ──────────────────────
+        self.assertEqual(item_a.unit_cost, Decimal('22.00'))
+        self.assertEqual(item_b.unit_cost, Decimal('37.00'))
+        self.assertEqual(item_a.price_each, Decimal('56.00'))
+        self.assertEqual(item_b.price_each, Decimal('56.00'))
+
+        snap_a = SaleItemRecipeCostSnapshot.objects.get(sale_item=item_a)
+        snap_b = SaleItemRecipeCostSnapshot.objects.get(sale_item=item_b)
+        self.assertEqual(snap_a.total_recipe_cost, item_a.unit_cost)
+        self.assertEqual(snap_b.total_recipe_cost, item_b.unit_cost)
+
+        # ── Layer 2: the RECIPE_CONSUME ledger — net qty per ingredient
+        # per branch must match the recipe+modifier definition exactly ──
+        for sale, branch in ((sale_a, self.branch_a), (sale_b, self.branch_b)):
+            moves = {
+                mv.product_id: -mv.qty
+                for mv in StockMovement.objects.filter(
+                    sale=sale, movement_type=StockMovement.MovementType.RECIPE_CONSUME,
+                )
+            }
+            self.assertEqual(moves[self.chicken.id], Decimal('150.000'))
+            self.assertEqual(moves[self.lettuce.id], Decimal('50.000'))
+            self.assertEqual(moves[self.cheese.id], Decimal('40.000'))
+            self.assertTrue(all(mv.branch_id == branch.id for mv in StockMovement.objects.filter(
+                sale=sale, movement_type=StockMovement.MovementType.RECIPE_CONSUME,
+            )))
+
+        # ── Layer 3: dashboard_summary COGS, branch-filtered, must equal
+        # each sale's own unit_cost exactly (tax=0 in this fixture, so
+        # net_revenue == price_each) ──
+        for branch, item in ((self.branch_a, item_a), (self.branch_b, item_b)):
+            resp = self.client.get(reverse('dashboard-summary'), {'branch_id': branch.id})
+            kpis = resp.json()['kpis']
+            self.assertEqual(Decimal(str(kpis['cogs'])), item.unit_cost)
+            self.assertEqual(Decimal(str(kpis['net_revenue'])), item.price_each)
+
+        # Unfiltered dashboard COGS = sum of both branches' recipe cost.
+        resp_all = self.client.get(reverse('dashboard-summary'))
+        total_cogs = Decimal(str(resp_all.json()['kpis']['cogs']))
+        self.assertEqual(total_cogs, item_a.unit_cost + item_b.unit_cost)  # 22.00 + 37.00 = 59.00
+
+        # ── Layer 4: recipe-profitability report reconciles to the SAME
+        # total food_cost as dashboard_summary's COGS (independently
+        # computed: one groups SaleItem by product, the other aggregates
+        # the whole window) ──
+        resp_profit = self.client.get(reverse('recipe-profitability'))
+        rows = resp_profit.json()['results']
+        self.assertEqual(len(rows), 1)  # both sales are the same product+variant(None)
+        row = rows[0]
+        self.assertEqual(row['product_name'], 'Chicken Sandwich')
+        self.assertEqual(row['units_sold'], 2.0)
+        self.assertEqual(Decimal(str(row['food_cost'])), total_cogs)
+        self.assertEqual(Decimal(str(row['revenue'])), item_a.price_each + item_b.price_each)
+
+        # ── Layer 5: ingredient-consumption report — summing cost_consumed
+        # across every ingredient row must ALSO reconcile to the same
+        # total, even though this report is computed from a completely
+        # different table (StockMovement, not SaleItem) ──
+        resp_ingredients = self.client.get(reverse('ingredient-consumption-report'))
+        ing_rows = {r['product_name']: r for r in resp_ingredients.json()['results']}
+        self.assertEqual(ing_rows['Chicken']['qty_consumed'], 300.0)
+        self.assertEqual(Decimal(str(ing_rows['Chicken']['cost_consumed'])), Decimal('45.00'))
+        self.assertEqual(ing_rows['Lettuce']['qty_consumed'], 100.0)
+        self.assertEqual(Decimal(str(ing_rows['Lettuce']['cost_consumed'])), Decimal('2.00'))
+        self.assertEqual(ing_rows['Cheese']['qty_consumed'], 80.0)
+        self.assertEqual(Decimal(str(ing_rows['Cheese']['cost_consumed'])), Decimal('12.00'))
+
+        ingredient_cost_total = sum(
+            (Decimal(str(r['cost_consumed'])) for r in ing_rows.values()), Decimal('0'),
+        )
+        # The cross-pipeline reconciliation: ledger-derived ingredient
+        # cost (StockMovement) == sale-derived recipe cost (SaleItem) ==
+        # dashboard COGS. Three independent computations, one number.
+        self.assertEqual(ingredient_cost_total, total_cogs)
+        self.assertEqual(ingredient_cost_total, Decimal('59.00'))

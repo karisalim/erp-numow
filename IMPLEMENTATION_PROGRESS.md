@@ -3146,4 +3146,107 @@ the ledger classification, one input validation, and one insert batching.
 
 ---
 
+### Batch 7 Verification Pass — measured, not reasoned (2026-07-23, `s5/batch-7-production-readiness-gate`)
+
+**Goal:** the owner asked for a second pass over Batch 7's gate with real
+measurements instead of reasoning: a real regression audit, actual query-
+count measurement (N+1), an end-to-end data-integrity test from sale to
+every report, a documentation/API-contract sync check, and a
+`coverage.py`-measured (not guessed) test-gap review. Full results are
+appended as **Part E** of `SPRINT5_ARCHITECTURE_DECISIONS.md`; this entry is
+the execution-record summary.
+
+**Findings and fixes:**
+- **F-8 (P2, perf — new, found by measurement):** `costing.get_or_create_
+  inventory_cost` unconditionally ran a "tenant-wide seed" query before
+  ever checking whether the `(product, branch)` row it wants already
+  exists — 2 queries every call, even in the common case (a branch's
+  ingredient after its first purchase) where the row is already there.
+  Called once per recipe component on every recipe sale (the revenue hot
+  path). **Fixed:** try the plain lookup first; only pay the seed-
+  resolution queries on the genuine cold-start path. Measured effect: a
+  sale with 3 distinct components (2 recipe lines + 1 modifier line) went
+  from 63 to 60 queries. Confirms the first pass's F-5/R-2 reasoning was
+  right in spirit; the actual fix was smaller ("look before you seed")
+  than the batch-resolve rewrite originally proposed.
+- **Two real coverage gaps closed** (found via `coverage run`, not
+  reasoned about): `resolve_kitchen_warehouse`'s `RecipeError` path (a
+  branch with no configured kitchen/sales warehouse — a plausible
+  "new branch not fully set up" production scenario) had zero test
+  coverage of the exception reaching a clean 400 and the whole sale
+  rolling back; `_parse_report_window`'s error branches had zero coverage
+  as reached through the two Batch 6 report endpoints specifically (only
+  `dashboard-summary`/`dashboard-trend` were tested). Both closed with new
+  tests.
+- **End-to-end reconciliation proven, not assumed:** a new test posts two
+  real recipe sales (via the actual `/sales/` API) across two branches with
+  different branch-scoped ingredient costs, then verifies the exact same
+  number (59.00) falls out of five independently-computed layers:
+  `SaleItem.unit_cost`, the `RECIPE_CONSUME` ledger, `dashboard_summary`'s
+  COGS, `recipe_profitability`'s `food_cost`, and `ingredient_consumption_
+  report`'s summed `cost_consumed` (the last one reads a completely
+  different table — `StockMovement`, not `SaleItem`).
+- **Documentation sync:** confirmed `IMPLEMENTATION_PROGRESS.md` and
+  `ARCHITECTURE_DECISIONS_REQUIRED.md` (the two living docs) are current.
+  Confirmed `API_CONTRACT.md`/`API_AND_MODEL_INVENTORY.md`/
+  `TARGET_BOUNDARIES.md`/`IMPLEMENTATION_ROADMAP.md`/`SOURCE_OF_TRUTH.md`/
+  `INDEX.md` are a frozen, numbered "read-only architecture audit — N of 7"
+  series predating Sprint 1 — point-in-time snapshots by design, not living
+  trackers; editing them would misrepresent what they are, so none were
+  touched. Compared the actual Sprint 5 schema against `TARGET_BOUNDARIES.md`
+  §6's proposed target model: confirmed §6.13's profitability terminology
+  matches Batch 6's report fields exactly (term-for-term), and confirmed
+  every schema divergence found (`RecipeVersion`'s simpler 3-stage status
+  vs. the target's 4-stage + date-effective window; `RecipeLine` missing a
+  per-line yield/loss factor and per-line warehouse) is the direct,
+  already-documented consequence of the "no Production Orders this sprint"
+  scope decision — not a new gap.
+- **Query-count regression guards added** (measured ceilings, not
+  estimates) for all four Sprint-5 hot/report paths: recipe sale creation
+  (≤60 queries), recipe sale void (≤35), `recipe-profitability` (≤5
+  regardless of row count — confirmed DB-side aggregation, not per-row
+  Python work), `ingredient-consumption-report` (≤5 regardless of row
+  count — confirmed the per-request cost cache actually prevents the N+1
+  the view's own docstring warns about).
+
+**Files changed:**
+- `pos/services/costing.py` — `get_or_create_inventory_cost` tries the
+  plain `(product, branch)` lookup before the seed-resolution queries.
+- `recipes/test_recipes.py` — 6 new tests on `RecipeSalePostingTests`:
+  the no-kitchen-warehouse rejection, the recipe-sale and recipe-void
+  query-count guards, and the end-to-end reconciliation test (plus a new
+  `branch_c`/`manager_c` fixture with no configured warehouse).
+- `pos/test_reporting.py` — 6 new tests across `RecipeProfitabilityReportTests`
+  / `IngredientConsumptionReportTests`: invalid-date/branch_id validation
+  (×2 endpoints) and the two query-count-doesn't-scale-with-rows guards.
+- `SPRINT5_ARCHITECTURE_DECISIONS.md` — new **Part E** with the full
+  measured results; the stale F-5 row in the original findings table now
+  points to Part E instead of restating superseded reasoning.
+
+**Migrations:** none — logic and tests only. `makemigrations --check
+--dry-run` clean before and after.
+
+**Tests:** full suite **771/771 passed** (759 baseline + 12 new). Coverage
+(via `coverage.py`, added to the dev venv only — not `requirements.txt`,
+since it's a measurement tool, not a runtime dependency): Sprint-5-relevant
+modules (`recipes/`, `pos/services/costing.py`, `pos/services/stock_
+movements.py`) stayed at 91% with both real gaps closed and every
+remaining uncovered branch verified to be defensive/unreachable or
+consistent with the rest of the codebase's own CRUD-boilerplate coverage
+level (not a Sprint-5-introduced risk).
+
+**Verification:** `manage.py check` clean. `manage.py makemigrations
+--check --dry-run` clean. Full suite green.
+
+**Gate decision (reaffirmed):** Sprint 5 backend stays cleared for the
+frontend batches (8–10). The verification pass found one additional real
+perf issue (fixed) and closed two real coverage gaps — no new correctness
+defect surfaced, and the end-to-end reconciliation test is the strongest
+data-integrity guarantee this gate can offer short of production traffic.
+
+**Not touched:** Batches 8-10 (frontend) — still not started. No GL code.
+No change to the AVCO formula, recipe cost roll-up, or snapshot semantics.
+
+---
+
 *(Later batches of Sprint 5 get their own entries here as they land.)*

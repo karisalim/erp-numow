@@ -119,7 +119,21 @@ def get_or_create_inventory_cost(product: Product, branch=None) -> InventoryCost
     (`branch=None`) row's average when one exists, else from `Product.cost`
     — a branch's first-ever purchase gets a sane opening value instead of
     starting blind at zero.
+
+    Batch 7 verification (measured via `CaptureQueriesContext`, not
+    reasoned): the common case — the `(product, branch)` row already
+    exists, true for every recipe-sale component after that branch's first
+    purchase — used to cost 2 queries every time (an unconditional
+    tenant-wide seed lookup, then `get_or_create`'s own SELECT), on a
+    function called once per recipe component on every single sale. Try
+    the plain lookup FIRST; only pay for the seed-resolution queries on
+    the genuine cold-start path (a product/branch combination with no row
+    yet), which happens at most once per `(product, branch)` ever.
     """
+    row = InventoryCost.objects.filter(product=product, branch=branch).first()
+    if row is not None:
+        return row
+
     if branch is not None:
         tenant_wide = InventoryCost.objects.filter(product=product, branch=None).first()
         seed = tenant_wide.avg_unit_cost if tenant_wide is not None else quantize_cost(product.cost)
