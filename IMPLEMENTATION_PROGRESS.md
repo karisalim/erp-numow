@@ -2288,4 +2288,131 @@ branch/warehouse dimension added anywhere to `InventoryCost`/
 
 ---
 
-*(Later sprints get their own sections here after their pre-sprint audits.)*
+## Sprint 5 — Recipes, Size Variants, Dynamic Modifiers & Branch-Scoped Costing
+
+Full plan (Context, Scope, Phase 0, Batches 1-11) recorded in the session's
+planning artifact before implementation began. Recipes/Variants/Modifiers
+land in a new, separate `recipes` Django app (registered in
+`INSTALLED_APPS`); changes to already-existing models (`InventoryCost`,
+`StockMovement`, `SaleItem`, the sale-posting path) stay in `pos`, since
+they're extensions of that app's own models, not new domain concepts.
+
+### Phase 0 — Governance closure (2026-07-22)
+
+`ARCHITECTURE_DECISIONS_REQUIRED.md`: **D-09 reopened** from "Selected:
+Option A (tenant-wide)" to "Selected: Option B (branch-wide)" — the
+Business Owner authorized the branch-level upgrade directly, ahead of the
+original "WarehouseTransfer maturity" trigger (WarehouseTransfer stays
+explicitly out of scope this sprint). Closed the **G4 MVP subset**
+(D-23, D-24, D-26, D-27, D-28-theoretical-half, D-34) via a new sign-off
+row, distinct from the still-fully-Open `G4` row. D-06/D-29/D-30/D-33
+(Production Orders / MO / WIP / yield-loss) confirmed **explicitly out of
+scope** by the owner's own words, not silently deferred — remain Open.
+No code, no migrations — §3.5 (append) and §4 (append one row + update the
+D-09 row's status cell) only.
+
+### Batch 1 — Branch-scoped AVCO costing upgrade (backend)
+
+**Goal:** implement the D-09 upgrade — `InventoryCost` becomes one row per
+`(product, branch)` instead of one per product — with zero behavior change
+for any call site that doesn't resolve a branch.
+
+**Files changed:**
+- `pos/models.py` — `InventoryCost.product`: `OneToOneField` →
+  `ForeignKey` (`related_name` `inventory_cost` → `inventory_costs`,
+  confirmed unused as a reverse accessor anywhere in the codebase before
+  renaming). New nullable `branch` FK. Replaced the implicit one-per-product
+  uniqueness with two constraints: `UniqueConstraint(product, branch)` +
+  a partial `UniqueConstraint(product)` where `branch IS NULL` (same paired
+  pattern `SalesCategory`/`InventoryCategory` already use for their
+  "unique root name where parent IS NULL" rule) — `branch=NULL` stays the
+  single tenant-wide fallback row.
+- `pos/migrations/0029_branch_scoped_inventory_cost.py` — `AddField` +
+  `AlterField` (cardinality only, no data) + 2 `AddConstraint`s. Every
+  pre-existing row keeps `branch=NULL` — zero backfill needed for existing
+  data to keep working exactly as before.
+- `pos/services/costing.py` — every function gained an optional
+  `branch=None` keyword: `get_or_create_inventory_cost`,
+  `apply_purchase_receipt`, `update_cost_from_adjustment`,
+  `get_cost_for_sale`, `get_cost_for_return`. `branch=None` behaves
+  byte-for-byte as before (same query, blends against `Product.stock`). A
+  real `branch` blends against
+  `stock_movements.get_branch_stock_balance(product, branch)` instead and
+  reads/writes that branch's own row; a branch's first-ever write seeds
+  from the tenant-wide row's average (or `Product.cost` if neither exists)
+  instead of starting blind at zero. `Product.cost` (2dp mirror) still
+  syncs unconditionally on every call — documented as "mirrors whichever
+  branch/tenant-wide row last transacted," not a partitioned per-branch
+  truth. `initialize_inventory_cost` (product-CREATE time) now explicitly
+  scopes its `get_or_create` to `branch=None` — without that fix it would
+  raise `MultipleObjectsReturned` once a product has any branch-scoped rows
+  alongside its tenant-wide one.
+- `pos/services/stock_movements.py` — new
+  `get_branch_stock_balance(product, branch) -> Decimal`: sums
+  `WarehouseStock.quantity` across every warehouse actively linked to the
+  branch (any `BranchWarehouse` role), defaults to 0 for an untouched
+  branch.
+- `pos/services/purchase_invoices.py` — `post_purchase_invoice` now passes
+  `branch=branch` into `costing_svc.apply_purchase_receipt` (the function
+  already had `branch` in scope — one-line change). Every purchase invoice
+  from here on blends into its own branch's average, not a tenant-wide one.
+  Module docstring updated to describe this.
+- `pos/management/commands/seed_inventory_costs.py` — fixed for the new FK
+  shape: dropped the now-invalid `select_related('inventory_cost')`
+  (reverse accessor renamed and no longer to-one), scoped its
+  `get_or_create` to `branch=None` explicitly (same
+  `MultipleObjectsReturned` fix as `initialize_inventory_cost`).
+- New `pos/management/commands/backfill_branch_inventory_cost.py` — mirrors
+  `seed_inventory_costs`'s `--dry-run`/`--apply`/`--tenant` shape. For every
+  product with a tenant-wide row and every active branch, seeds a
+  branch-scoped row from the tenant-wide average (skips products with no
+  tenant-wide row yet, skips inactive branches, never overwrites an
+  existing branch row). Not required for correctness (the lazy
+  `get_or_create_inventory_cost` fallback already handles a branch's first
+  transaction) — exists so a "cost by branch" view has visible data
+  immediately after upgrading, before any new purchase happens.
+
+**Regression found and fixed (not a design flaw — the exact "unassigned-
+warehouse legacy stock" risk flagged in the plan before writing code):**
+`PurchaseInvoicePostingTests`'s shared fixture creates `Product(stock=100)`
+directly with no matching `WarehouseStock` row (simulating pre-existing
+stock recorded before any warehouse-aware movement). Branch-scoped costing
+correctly reads that as 0 branch stock, changing
+`test_cash_purchase_increases_stock_updates_cost_decreases_cashbox`'s
+expected moving average from `7.00` to `9.00`. Fixed by seeding a matching
+`WarehouseStock` row **locally in that one test** (not in the shared
+class fixture — an earlier attempt to fix it at the class level broke a
+sibling test, `WarehouseStockPurchaseTests`, that specifically asserts a
+warehouse balance starts at zero). No other test's assertions changed.
+
+**Tests:** extended `pos/test_costing.py` — `InventoryCostModelTests`'s
+uniqueness test rewritten for the new `(product, branch)` constraint shape
+plus a new test proving a product can hold a `branch=None` row and N
+per-branch rows simultaneously; new `GetBranchStockBalanceTests` (4 tests:
+zero for untouched branch, sums two warehouses on one branch, excludes a
+warehouse linked to a different branch, excludes an inactive
+`BranchWarehouse` link); new `BranchScopedCostingServiceTests` (6 tests:
+two branches blend independently and don't leak into each other or the
+tenant-wide row, first-purchase seeding from the tenant-wide row when
+present vs. from `Product.cost` when absent, the `branch=None` path proven
+byte-for-byte unchanged, `update_cost_from_adjustment` and
+`get_cost_for_sale` branch-scoped); new
+`BackfillBranchInventoryCostCommandTests` (6 tests: dry-run/apply,
+active-branches-only, skip-no-base-row, idempotency, never-overwrite,
+tenant scoping).
+
+**Verification:** `manage.py check` clean. `manage.py makemigrations
+--check --dry-run` clean (exactly the one expected migration, additive
+only — zero `RemoveField`, zero data mutation). Full suite: **684/684
+passed** (up from the Sprint 4 close-out baseline of 667 + this batch's 17
+new tests). `backfill_branch_inventory_cost` dry-run verified against the
+real local dev database (correctly proposed one row per active branch per
+already-tracked product, skipped nothing unexpectedly).
+
+**Not touched:** `recipes` app (created and registered this batch as an
+empty scaffold only — no models/migrations yet, that starts at Batch 2),
+sale-posting path, any frontend file, any GL code.
+
+---
+
+*(Later batches of Sprint 5 get their own entries here as they land.)*

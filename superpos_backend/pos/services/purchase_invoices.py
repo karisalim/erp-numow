@@ -10,7 +10,11 @@ transaction performs every effect; any failure rolls all of them back:
            — the moving-average math itself, and its `InventoryCost` /
            `InventoryCostMovement` home, live there now; this module no
            longer inlines the formula. `Product.cost` is kept in sync as a
-           2dp display mirror by that call (D-07).
+           2dp display mirror by that call (D-07). Blended into the
+           invoice's own `branch` (Sprint 5 Batch 1, D-09 reopened to
+           Option B) — every purchase invoice already requires a branch,
+           so every purchase from here on updates that branch's own
+           average, not a tenant-wide one.
          * StockMovement PURCHASE_IN via `pos.services.stock_movements`,
            warehouse-aware, linked by source_document_type='purchase_invoice'.
     3. If paid_amount > 0: FinancialAccountMovement CREDIT on the source
@@ -315,6 +319,7 @@ def post_purchase_invoice(
         # blending anything else in would corrupt it.
         costing_svc.apply_purchase_receipt(
             product=p['product'], qty=p['qty'], unit_cost=p['moving_avg_unit_cost'],
+            branch=branch,
             source_document_type='purchase_invoice', source_document_id=invoice.id,
             actor_user=actor_user,
         )

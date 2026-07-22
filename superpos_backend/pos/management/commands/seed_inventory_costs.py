@@ -107,14 +107,15 @@ class Command(BaseCommand):
 
     def _seed_tenant(self, tenant):
         self._say(f'Tenant id={tenant.id} "{tenant.name}"')
-        products = (
-            Product.objects.filter(tenant=tenant)
-            .select_related('inventory_cost')
-            .order_by('id')
-        )
+        # Sprint 5 Batch 1: InventoryCost.product is now a plain FK (a
+        # product can have several rows, one per branch), so the reverse
+        # relation is no longer select_related-able the way the old
+        # OneToOneField was — this command only ever seeds the tenant-wide
+        # (branch=None) opening row, so no prefetch is needed for its shape.
+        products = Product.objects.filter(tenant=tenant).order_by('id')
         for product in products.iterator():
             _, created = InventoryCost.objects.get_or_create(
-                product=product,
+                product=product, branch=None,
                 defaults={'tenant': tenant, 'avg_unit_cost': product.cost},
             )
             if created:

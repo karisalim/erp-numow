@@ -30,9 +30,11 @@ from rest_framework.test import APITestCase
 
 from accounts.models import Branch, FinancialAccountMovement, Tenant, User
 from pos.models import (
-    Category, InventoryCost, InventoryCostMovement, Product, Sale, SaleItem,
+    BranchWarehouse, Category, InventoryCost, InventoryCostMovement, Product,
+    Sale, SaleItem, Warehouse, WarehouseStock,
 )
 from pos.services import costing as costing_svc
+from pos.services import stock_movements as stock_svc
 
 
 class InventoryCostModelTests(TestCase):
@@ -54,16 +56,42 @@ class InventoryCostModelTests(TestCase):
         )
         self.assertEqual(row.avg_unit_cost, Decimal('500.0000'))
 
-    def test_product_uniqueness_enforced(self):
-        """OneToOneField(Product) — a second row for the same product must
-        fail at the DB level (D-35: one average per product)."""
+    def test_product_branch_uniqueness_enforced(self):
+        """`(product, branch)` unique constraint (Sprint 5 Batch 1, D-09
+        Option B) — a second row for the same `(product, branch)` pair must
+        fail at the DB level, including the `branch=None` (tenant-wide)
+        pair specifically, via the paired partial-unique index."""
         InventoryCost.objects.create(
-            tenant=self.tenant, product=self.coffee, avg_unit_cost=Decimal('500'),
+            tenant=self.tenant, product=self.coffee, branch=None, avg_unit_cost=Decimal('500'),
         )
         with self.assertRaises(IntegrityError):
             with transaction.atomic():
                 InventoryCost.objects.create(
-                    tenant=self.tenant, product=self.coffee, avg_unit_cost=Decimal('600'),
+                    tenant=self.tenant, product=self.coffee, branch=None, avg_unit_cost=Decimal('600'),
+                )
+
+    def test_product_can_have_one_row_per_branch(self):
+        """A product may have a `branch=None` row AND one row per real
+        branch simultaneously — this is the whole point of the Sprint 5
+        Batch 1 upgrade."""
+        branch_a = Branch.objects.create(tenant=self.tenant, name='Branch A')
+        branch_b = Branch.objects.create(tenant=self.tenant, name='Branch B')
+        InventoryCost.objects.create(
+            tenant=self.tenant, product=self.coffee, branch=None, avg_unit_cost=Decimal('500'),
+        )
+        InventoryCost.objects.create(
+            tenant=self.tenant, product=self.coffee, branch=branch_a, avg_unit_cost=Decimal('510'),
+        )
+        InventoryCost.objects.create(
+            tenant=self.tenant, product=self.coffee, branch=branch_b, avg_unit_cost=Decimal('520'),
+        )
+        self.assertEqual(InventoryCost.objects.filter(product=self.coffee).count(), 3)
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                InventoryCost.objects.create(
+                    tenant=self.tenant, product=self.coffee, branch=branch_a,
+                    avg_unit_cost=Decimal('999'),
                 )
 
     def test_avg_unit_cost_stores_4dp(self):
@@ -435,6 +463,294 @@ class CostingServiceTests(TestCase):
         self.assertFalse(InventoryCost.objects.filter(product=bare_product).exists())
         cost = costing_svc.get_cost_for_sale(bare_product)
         self.assertEqual(cost, Decimal('30.0000'))
+
+
+# ── Sprint 5 Batch 1: branch-scoped AVCO costing (D-09 reopened) ───────────
+
+class GetBranchStockBalanceTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.tenant = Tenant.objects.create(name='Branch Stock Balance Tenant')
+        cls.category = Category.objects.create(tenant=cls.tenant, name='Grocery')
+        cls.branch_a = Branch.objects.create(tenant=cls.tenant, name='Branch A')
+        cls.branch_b = Branch.objects.create(tenant=cls.tenant, name='Branch B')
+        cls.wh1 = Warehouse.objects.create(tenant=cls.tenant, code='WH1', name='A Main')
+        cls.wh2 = Warehouse.objects.create(tenant=cls.tenant, code='WH2', name='A Kitchen')
+        cls.wh_b = Warehouse.objects.create(tenant=cls.tenant, code='WHB', name='B Main')
+        BranchWarehouse.objects.create(
+            tenant=cls.tenant, branch=cls.branch_a, warehouse=cls.wh1,
+            role=BranchWarehouse.Role.SALES, is_active=True,
+        )
+        BranchWarehouse.objects.create(
+            tenant=cls.tenant, branch=cls.branch_a, warehouse=cls.wh2,
+            role=BranchWarehouse.Role.KITCHEN, is_active=True,
+        )
+        BranchWarehouse.objects.create(
+            tenant=cls.tenant, branch=cls.branch_b, warehouse=cls.wh_b,
+            role=BranchWarehouse.Role.SALES, is_active=True,
+        )
+        cls.product = Product.objects.create(
+            tenant=cls.tenant, category=cls.category,
+            name='Widget', barcode='GBSB-1', sku='SKU-GBSB-1',
+            price=Decimal('10.00'), cost=Decimal('0.00'), stock=Decimal('0'),
+        )
+
+    def test_zero_for_untouched_branch(self):
+        self.assertEqual(
+            stock_svc.get_branch_stock_balance(self.product, self.branch_a),
+            Decimal('0'),
+        )
+
+    def test_sums_across_two_warehouses_same_branch(self):
+        WarehouseStock.objects.create(
+            tenant=self.tenant, product=self.product, warehouse=self.wh1,
+            quantity=Decimal('30'),
+        )
+        WarehouseStock.objects.create(
+            tenant=self.tenant, product=self.product, warehouse=self.wh2,
+            quantity=Decimal('12'),
+        )
+        self.assertEqual(
+            stock_svc.get_branch_stock_balance(self.product, self.branch_a),
+            Decimal('42'),
+        )
+
+    def test_excludes_warehouse_linked_to_a_different_branch(self):
+        WarehouseStock.objects.create(
+            tenant=self.tenant, product=self.product, warehouse=self.wh1,
+            quantity=Decimal('30'),
+        )
+        WarehouseStock.objects.create(
+            tenant=self.tenant, product=self.product, warehouse=self.wh_b,
+            quantity=Decimal('999'),
+        )
+        self.assertEqual(
+            stock_svc.get_branch_stock_balance(self.product, self.branch_a),
+            Decimal('30'),
+        )
+
+    def test_excludes_inactive_branch_warehouse_link(self):
+        wh3 = Warehouse.objects.create(tenant=self.tenant, code='WH3', name='A Damaged')
+        BranchWarehouse.objects.create(
+            tenant=self.tenant, branch=self.branch_a, warehouse=wh3,
+            role=BranchWarehouse.Role.DAMAGED, is_active=False,
+        )
+        WarehouseStock.objects.create(
+            tenant=self.tenant, product=self.product, warehouse=wh3,
+            quantity=Decimal('50'),
+        )
+        self.assertEqual(
+            stock_svc.get_branch_stock_balance(self.product, self.branch_a),
+            Decimal('0'),
+        )
+
+
+class BranchScopedCostingServiceTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.tenant = Tenant.objects.create(name='Branch Scoped Costing Tenant')
+        cls.category = Category.objects.create(tenant=cls.tenant, name='Grocery')
+        cls.branch_a = Branch.objects.create(tenant=cls.tenant, name='Branch A')
+        cls.branch_b = Branch.objects.create(tenant=cls.tenant, name='Branch B')
+        cls.wh_a = Warehouse.objects.create(tenant=cls.tenant, code='BWA', name='A Store')
+        cls.wh_b = Warehouse.objects.create(tenant=cls.tenant, code='BWB', name='B Store')
+        BranchWarehouse.objects.create(
+            tenant=cls.tenant, branch=cls.branch_a, warehouse=cls.wh_a,
+            role=BranchWarehouse.Role.SALES, is_active=True,
+        )
+        BranchWarehouse.objects.create(
+            tenant=cls.tenant, branch=cls.branch_b, warehouse=cls.wh_b,
+            role=BranchWarehouse.Role.SALES, is_active=True,
+        )
+        cls.coffee = Product.objects.create(
+            tenant=cls.tenant, category=cls.category,
+            name='Coffee', barcode='BSCS-1', sku='SKU-BSCS-1',
+            price=Decimal('700.00'), cost=Decimal('0.00'), stock=Decimal('0'),
+        )
+
+    def _receive(self, branch, warehouse, qty, unit_cost, source_document_id):
+        """Mirrors what post_purchase_invoice does per line: blend the
+        branch-scoped average, then apply the stock effect (Product.stock
+        + WarehouseStock) — same ordering the real posting service uses."""
+        costing_svc.apply_purchase_receipt(
+            product=self.coffee, qty=qty, unit_cost=unit_cost, branch=branch,
+            source_document_type='purchase_invoice', source_document_id=source_document_id,
+        )
+        stock_svc.record_stock_in(
+            product=self.coffee, quantity=qty,
+            movement_type=stock_svc.StockMovement.MovementType.PURCHASE_IN,
+            branch=branch, warehouse=warehouse,
+            source_document_type='purchase_invoice', source_document_id=source_document_id,
+        )
+        self.coffee.refresh_from_db()
+
+    def test_two_branches_blend_independently(self):
+        self._receive(self.branch_a, self.wh_a, Decimal('10'), Decimal('500'), 1)
+        self._receive(self.branch_b, self.wh_b, Decimal('10'), Decimal('600'), 2)
+
+        inv_a = InventoryCost.objects.get(product=self.coffee, branch=self.branch_a)
+        inv_b = InventoryCost.objects.get(product=self.coffee, branch=self.branch_b)
+        self.assertEqual(inv_a.avg_unit_cost, Decimal('500.0000'))
+        self.assertEqual(inv_b.avg_unit_cost, Decimal('600.0000'))
+        # The tenant-wide (branch=None) row is untouched by either purchase.
+        self.assertFalse(
+            InventoryCost.objects.filter(product=self.coffee, branch=None).exists()
+        )
+
+        # A second purchase into branch A blends against branch A's own
+        # stock (10 units), not branch B's or the tenant total.
+        self._receive(self.branch_a, self.wh_a, Decimal('10'), Decimal('700'), 3)
+        inv_a.refresh_from_db()
+        # (10*500 + 10*700) / 20 = 600.0000
+        self.assertEqual(inv_a.avg_unit_cost, Decimal('600.0000'))
+        inv_b.refresh_from_db()
+        self.assertEqual(inv_b.avg_unit_cost, Decimal('600.0000'), 'branch B must be unaffected')
+
+    def test_branch_first_purchase_seeds_from_tenant_wide_row_when_present(self):
+        # A tenant-wide row already exists (e.g. from before this upgrade,
+        # or from a legacy branch=None call site).
+        InventoryCost.objects.create(
+            tenant=self.tenant, product=self.coffee, branch=None,
+            avg_unit_cost=Decimal('123.4500'),
+        )
+        row = costing_svc.get_or_create_inventory_cost(self.coffee, branch=self.branch_a)
+        self.assertEqual(row.avg_unit_cost, Decimal('123.4500'))
+
+    def test_branch_first_purchase_seeds_from_product_cost_when_no_tenant_wide_row(self):
+        self.coffee.cost = Decimal('42.00')
+        self.coffee.save(update_fields=['cost'])
+        self.assertFalse(InventoryCost.objects.filter(product=self.coffee, branch=None).exists())
+        row = costing_svc.get_or_create_inventory_cost(self.coffee, branch=self.branch_a)
+        self.assertEqual(row.avg_unit_cost, Decimal('42.0000'))
+
+    def test_branch_none_path_is_byte_for_byte_unchanged(self):
+        """The regression guarantee this whole batch depends on: a caller
+        that never passes `branch` gets exactly the pre-Sprint-5 behavior
+        (blends against Product.stock, writes the branch=None row)."""
+        self.coffee.stock = Decimal('10')
+        self.coffee.save(update_fields=['stock'])
+        costing_svc.apply_purchase_receipt(
+            product=self.coffee, qty=Decimal('10'), unit_cost=Decimal('900'),
+            source_document_type='purchase_invoice',
+        )
+        inv = InventoryCost.objects.get(product=self.coffee, branch=None)
+        # (10*0 + 10*900) / 20 = 450.0000 — uses Product.stock (10), not any
+        # WarehouseStock/branch balance.
+        self.assertEqual(inv.avg_unit_cost, Decimal('450.0000'))
+
+    def test_update_cost_from_adjustment_branch_scoped(self):
+        self._receive(self.branch_a, self.wh_a, Decimal('10'), Decimal('500'), 1)
+        costing_svc.update_cost_from_adjustment(
+            product=self.coffee, qty=Decimal('5'), adjustment_cost=Decimal('800'),
+            branch=self.branch_a, source_document_type='stock_adjustment',
+        )
+        inv_a = InventoryCost.objects.get(product=self.coffee, branch=self.branch_a)
+        # (10*500 + 5*800) / 15 = 600.0000 — against branch A's own 10 units.
+        self.assertEqual(inv_a.avg_unit_cost, Decimal('600.0000'))
+
+    def test_get_cost_for_sale_branch_scoped(self):
+        self._receive(self.branch_a, self.wh_a, Decimal('10'), Decimal('500'), 1)
+        self._receive(self.branch_b, self.wh_b, Decimal('10'), Decimal('600'), 2)
+        self.assertEqual(
+            costing_svc.get_cost_for_sale(self.coffee, branch=self.branch_a),
+            Decimal('500.0000'),
+        )
+        self.assertEqual(
+            costing_svc.get_cost_for_sale(self.coffee, branch=self.branch_b),
+            Decimal('600.0000'),
+        )
+
+
+class BackfillBranchInventoryCostCommandTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.tenant = Tenant.objects.create(name='Backfill Branch Tenant')
+        cls.category = Category.objects.create(tenant=cls.tenant, name='Grocery')
+        cls.branch_a = Branch.objects.create(tenant=cls.tenant, name='Branch A', active=True)
+        cls.branch_b = Branch.objects.create(tenant=cls.tenant, name='Branch B', active=True)
+        cls.inactive_branch = Branch.objects.create(
+            tenant=cls.tenant, name='Closed Branch', active=False,
+        )
+        cls.coffee = Product.objects.create(
+            tenant=cls.tenant, category=cls.category,
+            name='Coffee', barcode='BBIC-1', sku='SKU-BBIC-1',
+            price=Decimal('700.00'), cost=Decimal('55.00'), stock=Decimal('0'),
+        )
+        cls.untouched = Product.objects.create(
+            tenant=cls.tenant, category=cls.category,
+            name='No Base Row Yet', barcode='BBIC-2', sku='SKU-BBIC-2',
+            price=Decimal('20.00'), cost=Decimal('5.00'), stock=Decimal('0'),
+        )
+        InventoryCost.objects.create(
+            tenant=cls.tenant, product=cls.coffee, branch=None,
+            avg_unit_cost=Decimal('55.0000'),
+        )
+        # `untouched` deliberately has no branch=None row — it must be
+        # skipped, not crash the command.
+
+    def test_dry_run_does_not_write(self):
+        out = StringIO()
+        call_command('backfill_branch_inventory_cost', stdout=out)
+        self.assertEqual(
+            InventoryCost.objects.filter(product=self.coffee, branch__isnull=False).count(), 0,
+        )
+        self.assertIn('DRY-RUN', out.getvalue())
+
+    def test_apply_creates_one_row_per_active_branch_only(self):
+        out = StringIO()
+        call_command('backfill_branch_inventory_cost', '--apply', stdout=out)
+        self.assertTrue(
+            InventoryCost.objects.filter(product=self.coffee, branch=self.branch_a).exists()
+        )
+        self.assertTrue(
+            InventoryCost.objects.filter(product=self.coffee, branch=self.branch_b).exists()
+        )
+        self.assertFalse(
+            InventoryCost.objects.filter(product=self.coffee, branch=self.inactive_branch).exists(),
+            'an inactive branch must not get a backfilled row',
+        )
+        row_a = InventoryCost.objects.get(product=self.coffee, branch=self.branch_a)
+        self.assertEqual(row_a.avg_unit_cost, Decimal('55.0000'))
+
+    def test_apply_skips_product_with_no_tenant_wide_row(self):
+        call_command('backfill_branch_inventory_cost', '--apply', stdout=StringIO())
+        self.assertFalse(
+            InventoryCost.objects.filter(product=self.untouched).exists(),
+            'a product with no branch=None row has nothing to seed branch rows from',
+        )
+
+    def test_apply_is_idempotent(self):
+        call_command('backfill_branch_inventory_cost', '--apply', stdout=StringIO())
+        count_after_first = InventoryCost.objects.count()
+        call_command('backfill_branch_inventory_cost', '--apply', stdout=StringIO())
+        self.assertEqual(InventoryCost.objects.count(), count_after_first)
+
+    def test_apply_never_overwrites_existing_branch_row(self):
+        InventoryCost.objects.create(
+            tenant=self.tenant, product=self.coffee, branch=self.branch_a,
+            avg_unit_cost=Decimal('999.0000'),
+        )
+        call_command('backfill_branch_inventory_cost', '--apply', stdout=StringIO())
+        row_a = InventoryCost.objects.get(product=self.coffee, branch=self.branch_a)
+        self.assertEqual(row_a.avg_unit_cost, Decimal('999.0000'))
+
+    def test_tenant_scoping(self):
+        other_tenant = Tenant.objects.create(name='Other Backfill Tenant')
+        other_branch = Branch.objects.create(tenant=other_tenant, name='Other Branch', active=True)
+        other_category = Category.objects.create(tenant=other_tenant, name='Other')
+        other_product = Product.objects.create(
+            tenant=other_tenant, category=other_category,
+            name='Other Product', barcode='BBIC-3', sku='SKU-BBIC-3',
+            price=Decimal('10.00'), cost=Decimal('1.00'), stock=Decimal('0'),
+        )
+        InventoryCost.objects.create(
+            tenant=other_tenant, product=other_product, branch=None,
+            avg_unit_cost=Decimal('1.0000'),
+        )
+        call_command('backfill_branch_inventory_cost', f'--tenant={self.tenant.id}', '--apply', stdout=StringIO())
+        self.assertFalse(
+            InventoryCost.objects.filter(product=other_product, branch=other_branch).exists(),
+        )
 
 
 # ── Batch 3: close the uncoordinated cost-write paths (API level) ──────────

@@ -701,6 +701,17 @@ class PurchaseInvoicePostingTests(_PurchaseInvoiceTestBase):
         self.client.force_authenticate(user=self.manager)
 
     def test_cash_purchase_increases_stock_updates_cost_decreases_cashbox(self):
+        # Sprint 5 Batch 1: branch-scoped AVCO blends against branch stock
+        # (sum of WarehouseStock for the branch's warehouses), not the bare
+        # Product.stock counter — this test's fixture product already has
+        # 100 units (set directly on Product.stock by setUpTestData, not
+        # via a warehouse-attributed movement), so it needs a matching
+        # WarehouseStock row for the moving-average math below to see it,
+        # exactly as a real purchase would have recorded it.
+        WarehouseStock.objects.create(
+            tenant=self.tenant, product=self.product, warehouse=self.warehouse,
+            quantity=Decimal('100'),
+        )
         body = self._body(
             paid_amount='450.00', source_account=self.cashbox.id,
             payment_method=self.cash_method.id,

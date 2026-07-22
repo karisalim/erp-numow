@@ -43,7 +43,7 @@ from typing import Optional
 from django.db import models as db_models, transaction
 from django.db.models import QuerySet, Sum
 
-from pos.models import Product, StockMovement, WarehouseStock
+from pos.models import BranchWarehouse, Product, StockMovement, WarehouseStock
 
 
 class StockMovementError(Exception):
@@ -123,6 +123,29 @@ def apply_warehouse_delta(*, product: Product, warehouse, delta) -> Optional[War
     row.quantity = (row.quantity or Decimal('0')) + Decimal(str(delta))
     row.save(update_fields=['quantity', 'updated_at'])
     return row
+
+
+def get_branch_stock_balance(product: Product, branch) -> Decimal:
+    """Sum of `WarehouseStock.quantity` across every warehouse actively
+    linked to `branch` (any role) for `product` (Sprint 5 Batch 1) — the
+    branch-level stock figure the branch-scoped AVCO blend
+    (`pos.services.costing`) uses as its `current_stock` input, now that
+    D-09 tracks average cost per branch while quantity stays per warehouse.
+    Defaults to zero for a branch with no stock history yet for this
+    product — a brand-new branch correctly starts from zero, not an error.
+    """
+    warehouse_ids = (
+        BranchWarehouse.objects
+        .filter(tenant=product.tenant, branch=branch, is_active=True)
+        .values_list('warehouse_id', flat=True)
+        .distinct()
+    )
+    total = (
+        WarehouseStock.objects
+        .filter(product=product, warehouse_id__in=warehouse_ids)
+        .aggregate(total=Sum('quantity'))['total']
+    )
+    return total or Decimal('0')
 
 
 def _latest_quantity_after(product: Product) -> Optional[Decimal]:

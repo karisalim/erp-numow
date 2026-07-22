@@ -108,7 +108,7 @@ gate's promotion completes** (R-M).
 
 | ID | Decision | Current behavior / context | Options | Recommendation + trade-offs | Owner | Blocks | Status |
 |---|---|---|---|---|---|---|---|
-| D-09 | **Moving-average cost scope** | Single tenant-wide average implied by `Product.cost`; no transfers exist yet | (a) **tenant-wide**; (b) branch-wide; (c) warehouse-specific | **(a) tenant-wide for MVP** — matches current mechanics, zero transfer-pricing complexity, one average to audit. Trade-offs: (a) blurs branch P&L when purchase prices differ per branch; (b) branch P&L accuracy but needs inter-branch transfer costing; (c) most precise (damage/production bins) but thin per-warehouse data → volatile averages + heavy transfer logic. **Upgrade trigger:** revisit to (b) when WarehouseTransfer documents land. **Consultation (2026-07-05):** one tenant/company-wide moving-average per product for MVP; **branch profitability must still be reported separately**, and the consolidated company report combines all branches **without hiding a losing branch inside company totals**. Upgrade trigger to branch-level costing remains WarehouseTransfer maturity. | FA | 6, 7, 11 | **Selected: Option A for MVP (2026-07-05 consultation). Gate G3 Open.** |
+| D-09 | **Moving-average cost scope** | Single tenant-wide average implied by `Product.cost`; no transfers exist yet | (a) tenant-wide; (b) **branch-wide (selected 2026-07-22)**; (c) warehouse-specific | **(a) tenant-wide for MVP** — matches current mechanics, zero transfer-pricing complexity, one average to audit. Trade-offs: (a) blurs branch P&L when purchase prices differ per branch; (b) branch P&L accuracy but needs inter-branch transfer costing; (c) most precise (damage/production bins) but thin per-warehouse data → volatile averages + heavy transfer logic. **Upgrade trigger:** revisit to (b) when WarehouseTransfer documents land. **Consultation (2026-07-05):** one tenant/company-wide moving-average per product for MVP; **branch profitability must still be reported separately**, and the consolidated company report combines all branches **without hiding a losing branch inside company totals**. Upgrade trigger to branch-level costing remains WarehouseTransfer maturity. | FA | 6, 7, 11 | **Selected: Option A for MVP (2026-07-05 consultation).** **Reopened 2026-07-22 (Sprint 5 planning session): upgraded to Option B (branch-wide)** — the Business Owner authorized the upgrade directly (session directive) ahead of the original trigger (WarehouseTransfer, which stays explicitly out of scope for Sprint 5); implements the upgrade path already documented on `InventoryCost` (nullable `branch` FK, uniqueness broadened to `(tenant, product, branch)`, `NULL` retained as the tenant-wide fallback for legacy/unresolvable-branch writes). Stock *quantity* stays warehouse-level (`WarehouseStock`, unchanged) — only the *average cost* dimension moved to branch. Gate G3's costing-engine subset stays closed as recorded 2026-07-16 (§3.5); this reopening is authorized under Gate **G4**'s MVP subsection (see §3.5 2026-07-22 entry and §4). |
 | D-10 | Tax inclusive vs exclusive pricing | **Exclusive today**: `total = subtotal + tax − discount` ([pos/serializers.py:675-693](superpos_backend/pos/serializers.py#L675-L693)); `Product.tax_rate` default 10% (Egypt standard VAT is 14%) | (a) exclusive storage + exclusive display; (b) **exclusive storage + optional inclusive display**; (c) inclusive storage | **(b)** — keeps ledger math clean while menus can show inclusive prices (Egyptian retail norm). Trade-off: display-rounding reconciliation. Also fix default tax rate per tenant. **Consultation (2026-07-05):** store net/tax-exclusive values separately and allow customer-facing menu/display prices to be tax-inclusive; **do not hardcode 14% globally — tax stays configurable through tax profiles.** | FA+BO | 7, 13 | **Selected: Option B (2026-07-05 consultation). Gate G3 Open.** |
 | D-11 | Discount before or after tax | **After tax today** — percent discount computed on subtotal and subtracted from `subtotal + tax`, so the **tax base is NOT reduced by the discount** ([pos/serializers.py:686-693](superpos_backend/pos/serializers.py#L686-L693)) | (a) keep discount-after-tax; (b) **discount-before-tax (reduce taxable base)** | **(b)** — VAT should be levied on the actual consideration; current behavior over-collects VAT on discounted sales and would fail ETA validation. Trade-off: behavior change needs a dated cutover + FE mirror update. **Consultation (2026-07-05):** discount reduces the taxable base **first**, then tax is calculated on the net amount — **Finance-approved by the accountant. Regulatory/ETA (RC) confirmation remains pending; do NOT treat D-11 as fully ratified until RC approval is recorded.** | FA+RC | 7, 13 | **Selected: Option B — Finance-approved (2026-07-05); Regulatory/ETA (RC) approval PENDING → NOT fully ratified. Gate G3 Open.** |
 | D-12 | Rounding policy | Inconsistent: purchases quantize `ROUND_HALF_UP` to 0.01 ([purchase_invoices.py:56](superpos_backend/pos/services/purchase_invoices.py#L56)); sale math carries raw Decimals to the DB layer | (a) round at line level then sum (**HALF_UP**); (b) round only totals; (c) banker's rounding | **(a)** — line-level HALF_UP 2dp, totals = Σ rounded lines; matches purchase service and e-invoice line-item validation. Trade-off: 1-piaster differences vs current sale outputs at cutover. | FA+EN | 6, 7, 13 | Open |
@@ -256,6 +256,55 @@ gate's promotion completes** (R-M).
   only. ADR promotion has not happened yet (R-M) — a separate follow-up
   documentation task, same as G1/G2.
 
+**2026-07-22 — Owner authorization to reopen D-09 and close the MVP subset
+of G4 (Sprint 5 planning session)**
+- Participant: Business Owner (session authorization).
+- **D-09 reopened: Option A (tenant-wide) → Option B (branch-wide).**
+  Matches the upgrade path already documented on `InventoryCost`
+  (`pos/models.py`) — nullable `branch` FK, uniqueness broadened to
+  `(tenant, product, branch)`, `NULL` retained as the tenant-wide fallback
+  for legacy/unresolvable-branch writes. Stock *quantity* stays
+  warehouse-level (`WarehouseStock`, unchanged) — only the *average cost*
+  dimension moves to branch. The upgrade trigger was originally
+  "WarehouseTransfer maturity"; the owner is authorizing the upgrade
+  directly instead, without WarehouseTransfer existing (WarehouseTransfer
+  stays explicitly out of scope for Sprint 5 — see Sprint 5 plan's Scope
+  table).
+- **D-24** (size variants): confirmed **"variant-of-one-product"** —
+  `ProductVariant` (parent + name + own price + own Recipe), no barcode,
+  never routed through `ProductBarcodeUnit`.
+- **D-23** (modifier price/cost ownership): confirmed — price lives on
+  `ModifierOption` (a flat delta; no per-size price override this sprint,
+  since the owner's examples show flat modifier pricing), cost is always
+  derived from the modifier's own per-variant consumption delta, never
+  hand-entered.
+- **D-26** (sub-recipe nesting depth): confirmed **depth 2** (recipe →
+  sub-recipe → raw ingredient), enforced at Recipe save time.
+- **D-27** (circular-recipe prevention): confirmed **DAG validation at save
+  time** (reject a cycle immediately; cheap given the depth-2 cap).
+- **D-28** (theoretical vs actual consumption): confirmed
+  **theoretical-only this sprint** — depletion posts in real time from the
+  recipe's immutable snapshot; periodic-count variance reporting is not
+  built now.
+- **D-34** (free/comp modifier COGS): confirmed **Option (a)** — a
+  zero-price modifier (e.g. free extra sauce) still consumes inventory and
+  its cost still counts in the item's COGS/food-cost %.
+- **D-06, D-29, D-30, D-33 (Production Orders and everything under them):
+  confirmed out of scope, explicitly.** Not merely deferred silently — the
+  owner named Production Orders/Manufacturing Orders/WIP/yield-loss by name
+  and excluded them from Sprint 5. Every ingredient, including a sub-recipe
+  like a prep sauce, is consumed directly by a Recipe via `RECIPE_CONSUME`
+  at sale time — no batch-production document, no yield/variance
+  accounting. Remain **Open** under G4 for a possible future Production
+  slice.
+- **Gate impact: G4 is NOT fully exited.** D-06, D-29, D-30, D-33 remain
+  **Open**. The MVP subset above (D-23, D-24, D-26, D-27, D-28-theoretical-
+  half, D-34) is authorized to proceed to implementation. D-09 formally
+  moves from "Selected: Option A" to "Selected: Option B (branch-wide),
+  2026-07-22" (recorded on the D-09 row in §3.2). ADR promotion has not
+  happened yet (R-M) — a separate follow-up documentation task, same as
+  G1/G2/G3.
+
 ## 4. Sign-off — per gate (R-M)
 
 > **Decision selections recorded 2026-07-05 (§3.5) are NOT gate sign-off.**
@@ -272,6 +321,7 @@ gate's promotion completes** (R-M).
 | G3 | Costing & GL (D-02, D-07…D-12, D-16, D-17, D-22, D-31, D-35) | | | | | |
 | G3 (costing-engine scope only) | D-07, D-09, D-12, D-13 (avg-cost half), D-31 (costing-ledger scope), D-35 | Owner (session directive) | n/a | n/a | n/a | 2026-07-16 |
 | G4 | Recipe / variants / production (D-06, D-23, D-24, D-26…D-30, D-33, D-34) | | | | n/a | |
+| G4 (MVP subset: recipes/variants/modifiers, no production orders) | D-23, D-24, D-26, D-27, D-28 (theoretical half), D-34 | Owner (session directive) | n/a | n/a | n/a | 2026-07-22 |
 | G5a | Delivery (D-03) | | | | | |
 | G5b | ETA / Compliance (D-05; + D-18 only if service charge enabled) | | | | | |
 | G5c | Tables / Payments (D-20, D-18) | | | | n/a | |

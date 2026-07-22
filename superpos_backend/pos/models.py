@@ -429,23 +429,30 @@ class StockMovement(models.Model):
 
 
 class InventoryCost(models.Model):
-    """The tenant-wide moving-average (AVCO) cost of one product's base unit
-    (Sprint 3 Batch 1, per D-35 Option B).
+    """The moving-average (AVCO) cost of one product's base unit, scoped per
+    branch (Sprint 3 Batch 1 introduced this per D-35 Option B; Sprint 5
+    Batch 1 upgraded the scope per the reopened D-09 Option B).
 
     A dedicated valuation record rather than a field bolted onto
     `ProductUnit` — `ProductUnit` stays a pure conversion table (R-B);
     conversion units never carry an independent average, only the base
     unit's cost lives here. `Product.cost` is kept as a synced 2dp display
-    mirror during the transition (D-07); this record is the source of
-    truth going forward, tracked at 4dp internal precision (D-13) so
+    mirror (D-07) — it reflects whichever branch/tenant-wide row last
+    transacted; read the branch-scoped row directly for authoritative
+    per-branch cost. Tracked at 4dp internal precision (D-13) so
     small-quantity ingredients (e.g. grams of an expensive spice) don't
     drift under repeated rounding.
 
-    One row per product (D-09 Option A — tenant-wide, not per-branch/
-    warehouse, for MVP). Upgrade path when WarehouseTransfer lands: add a
-    nullable `branch` FK and broaden the uniqueness to
-    `(tenant, product, branch)` with NULL meaning tenant-wide — an additive
-    migration, not a redesign.
+    One row per `(product, branch)` (D-09 Option B, reopened 2026-07-22 —
+    branch-wide, not tenant-wide, not warehouse-specific). `branch=NULL` is
+    the tenant-wide fallback row, used by call sites that can't resolve a
+    branch (the legacy `/inventory/purchase/` endpoint, CSV import) — every
+    existing row from before this upgrade has `branch=NULL` and keeps
+    working exactly as before. Stock *quantity* stays tracked per warehouse
+    (`WarehouseStock`, unaffected by this upgrade) — only the *average
+    cost* dimension moved to branch; `pos.services.stock_movements
+    .get_branch_stock_balance()` sums a branch's warehouses for the AVCO
+    blend's `current_stock` input.
 
     Written only through `pos.services.costing` — never assign
     `avg_unit_cost` directly from a view/serializer.
@@ -455,15 +462,42 @@ class InventoryCost(models.Model):
         'accounts.Tenant', on_delete=models.CASCADE,
         related_name='inventory_costs', db_index=True,
     )
-    product = models.OneToOneField(
-        Product, on_delete=models.CASCADE, related_name='inventory_cost',
+    product = models.ForeignKey(
+        Product, on_delete=models.CASCADE, related_name='inventory_costs',
+    )
+    # NULL = tenant-wide fallback row (pre-Sprint-5 behavior, and the
+    # landing spot for call sites that don't resolve a branch).
+    branch = models.ForeignKey(
+        'accounts.Branch', on_delete=models.CASCADE,
+        null=True, blank=True, related_name='inventory_costs',
     )
     avg_unit_cost = models.DecimalField(max_digits=14, decimal_places=4, default=0)
     updated_at = models.DateTimeField(auto_now=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['product', 'branch'],
+                name='pos_invcost_product_branch_uniq',
+            ),
+            # Postgres treats NULL as distinct per row, so the constraint
+            # above alone would allow multiple branch=NULL rows for the
+            # same product — this partial index caps it at one, mirroring
+            # SalesCategory/InventoryCategory's "unique root name where
+            # parent IS NULL" pattern.
+            models.UniqueConstraint(
+                fields=['product'],
+                condition=models.Q(branch__isnull=True),
+                name='pos_invcost_product_null_branch_uniq',
+            ),
+        ]
+
     def __str__(self):
-        return f'InventoryCost product={self.product_id} avg={self.avg_unit_cost}'
+        return (
+            f'InventoryCost product={self.product_id} branch={self.branch_id} '
+            f'avg={self.avg_unit_cost}'
+        )
 
 
 class InventoryCostMovement(models.Model):
