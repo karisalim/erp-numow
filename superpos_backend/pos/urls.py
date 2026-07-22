@@ -106,4 +106,8 @@ urlpatterns = [
     path('dashboard/top-products/', views.dashboard_top_products, name='dashboard-top-products'),
     path('dashboard/low-stock/',    views.dashboard_low_stock,    name='dashboard-low-stock'),
     path('dashboard/daily-stats/',  views.dashboard_daily_stats,  name='dashboard-daily-stats'),
+
+    # Recipe / food-cost reporting (Sprint 5 Batch 6)
+    path('reports/recipe-profitability/',   views.recipe_profitability,          name='recipe-profitability'),
+    path('reports/ingredient-consumption/', views.ingredient_consumption_report, name='ingredient-consumption-report'),
 ]

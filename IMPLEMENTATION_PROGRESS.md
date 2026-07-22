@@ -2978,4 +2978,94 @@ immutable sale-item snapshot.
 
 ---
 
+### Batch 6 — Recipe & food-cost reporting (2026-07-23, `s5/batch-6-recipe-reporting`)
+
+**Goal:** the two backend reports named in the Sprint 5 plan — "best/worst
+margin" per recipe product, and "most-consumed ingredients" — as pure
+reads over data Batch 5 already writes. No new write-side code, no GL
+posting, no frontend file (backend-only batch, matching the sprint's own
+"backend batches 1-6, frontend batches 8-10" discipline).
+
+**Files changed:**
+- `pos/views.py`:
+  - `_parse_report_window(request, tenant)` — small private helper shared
+    by the two views below: identical `start_date`/`end_date`/`branch_id`
+    parsing semantics to `dashboard_summary`'s own inline logic (range
+    defaults to today, an inverted range is swapped, `branch_id` is
+    tenant-scoped and 404s if unknown). Factored out only because both new
+    views need it verbatim.
+  - `recipe_profitability(request)` (`GET /reports/recipe-profitability/`,
+    `IsManagerOrAbove`) — groups `SaleItem` rows for
+    `product__product_type=RECIPE_PRODUCT` sales in the window by
+    `(product, product_name, variant, variant_name)` (the name snapshot
+    fields, so a row reflects names as they were sold — same known
+    limitation `top_products` already has for mid-window renames). Reads
+    `SaleItem.unit_cost` (the branch-scoped recipe cost snapshot Batch 5
+    already writes) for `food_cost` — never recomputes a recipe's cost.
+    Returns `units_sold`, `revenue`, `food_cost`, `gross_profit`,
+    `gross_margin_pct`, `food_cost_pct` per row. `?ordering=` (with an
+    optional `-` prefix) sorts by any of those five fields in Python,
+    defaulting to `-revenue`; an unrecognized value falls back to the
+    default rather than 400ing.
+  - `ingredient_consumption_report(request)`
+    (`GET /reports/ingredient-consumption/`, `IsManagerOrAbove`) — reads
+    the `RECIPE_CONSUME` `StockMovement` ledger directly (never recomputes
+    from a live recipe definition — the same "the ledger is the source of
+    truth" rule `void_sale`'s own `RECIPE_CONSUME` reversal already
+    follows), grouped by `product`. Since a stock movement carries no cost
+    snapshot of its own (unlike `SaleItem.unit_cost`), `cost_consumed` is
+    derived per movement from that movement's own `(product, branch)`
+    branch-scoped `InventoryCost` (D-09) — read fresh, not frozen at
+    consumption time, so this is a live report, not an immutable snapshot.
+    A small per-request `unit_cost_cache` avoids one `InventoryCost`
+    lookup per movement row when many rows share the same `(product,
+    branch)`. Per-product totals accumulate the *raw* `qty * unit_cost`
+    across movements and quantize to money once at the end — the same
+    "sum raw, round once" discipline the split-snapshot-line change above
+    just established, applied here for the identical reason.
+  - Both views clear `SaleItem`/`StockMovement`'s default `Meta.ordering`
+    (`.order_by()` / iterating raw rows instead of `.values().annotate()`)
+    to avoid Django folding an ordering column into `GROUP BY` — the same
+    gotcha every other aggregation view in this file already works around.
+  - New import: `from .services.product_types import ProductType`.
+- `pos/urls.py` — two new routes:
+  `reports/recipe-profitability/` (`recipe-profitability`),
+  `reports/ingredient-consumption/` (`ingredient-consumption-report`).
+- `pos/test_reporting.py` — 15 new tests across two new classes
+  (`RecipeProfitabilityReportTests`, `IngredientConsumptionReportTests`),
+  both built on a new `_Batch6ReportingTestBase(_Sprint4ReportingTestBase)`
+  fixture (two `RECIPE_PRODUCT`-typed products, one raw ingredient, a
+  `_make_recipe_movement()` helper that writes a `RECIPE_CONSUME`
+  movement + its branch-scoped `InventoryCost` row directly, bypassing a
+  real recipe sale — the recipe *posting* flow itself is already covered
+  end-to-end in `recipes/test_recipes.py`). Coverage: hand-computed
+  aggregate figures for both reports; stock-item products excluded from
+  `recipe_profitability`; branch filter narrows both reports; D-09
+  branch-scoped cost is read per movement, not one global figure, when
+  the same ingredient has different average costs per branch; voided
+  sales excluded; a non-`RECIPE_CONSUME` movement excluded from the
+  ingredient report; zero-results-in-window returns an empty list, not an
+  error; `?ordering=` sorts correctly and an invalid value falls back
+  cleanly; Cashier → 403 on both.
+
+**Migrations:** none — pure view/URL addition, no model change.
+`manage.py makemigrations --check --dry-run` confirmed clean before and
+after.
+
+**Tests:** `pos.test_reporting` alone: 39/39 passed (24 baseline + 15
+new). Full suite: **757/757 passed** (742 baseline + 15 new).
+
+**Verification:** `manage.py check` clean. `manage.py makemigrations
+--check --dry-run` clean. Full suite green.
+
+**Not touched:** Batch 7 (backend regression/documentation checkpoint)
+and Batches 8-10 (frontend) — not started. No GL code (no
+`FinancialAccountMovement` write, matching Batch 4's own negative-GL-
+assertion discipline, though this batch didn't add a dedicated test for
+it since it writes nothing at all — read-only views). No change to
+`recipes/services/costing.py`, `SaleSerializer`, or any recipe-posting
+code — this batch is a pure consumer of data those already produce.
+
+---
+
 *(Later batches of Sprint 5 get their own entries here as they land.)*

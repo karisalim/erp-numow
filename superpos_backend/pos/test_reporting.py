@@ -11,6 +11,11 @@ end_date=&source_document_type=` filtering on `GET
 Batch 4: `GET /products/{pk}/cost-movements/export/?export_format=csv|xlsx|pdf`
 — the same audit trail as a downloadable file. (Named `export_format`, not
 `format` — the latter is reserved by DRF's content negotiation.)
+
+Sprint 5 Batch 6: `GET /reports/recipe-profitability/` and `GET
+/reports/ingredient-consumption/` — food-cost/margin reporting over the
+RECIPE_CONSUME ledger and the SaleItem.unit_cost snapshot Sprint 5 Batch 5
+already writes for recipe-product sales. Pure reads; no new write-side code.
 """
 
 from datetime import date, timedelta
@@ -23,7 +28,9 @@ from rest_framework.test import APITestCase
 from accounts.models import Branch, Tenant, User
 from pos.models import (
     Category, InventoryCost, InventoryCostMovement, Product, Sale, SaleItem,
+    StockMovement,
 )
+from pos.services.product_types import ProductType
 
 
 class _Sprint4ReportingTestBase(APITestCase):
@@ -428,4 +435,223 @@ class CostHistoryExportTests(_Sprint4ReportingTestBase):
             reverse('product-cost-movements-export', args=[self.coffee.id]),
             {'export_format': 'csv'},
         )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+
+# ── Sprint 5 Batch 6 — Recipe & food-cost reporting ─────────────────────────
+
+class _Batch6ReportingTestBase(_Sprint4ReportingTestBase):
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.sandwich = Product.objects.create(
+            tenant=cls.tenant, category=cls.category,
+            name='Chicken Sandwich', barcode='S6-SW', sku='SKU-S6-SW',
+            price=Decimal('50.00'), cost=Decimal('0.00'), stock=Decimal('0'),
+            product_type=ProductType.RECIPE_PRODUCT,
+        )
+        cls.burger = Product.objects.create(
+            tenant=cls.tenant, category=cls.category,
+            name='Beef Burger', barcode='S6-BG', sku='SKU-S6-BG',
+            price=Decimal('60.00'), cost=Decimal('0.00'), stock=Decimal('0'),
+            product_type=ProductType.RECIPE_PRODUCT,
+        )
+        cls.chicken = Product.objects.create(
+            tenant=cls.tenant, category=cls.category,
+            name='Chicken', barcode='S6-CHK', sku='SKU-S6-CHK',
+            price=Decimal('0.00'), cost=Decimal('0.00'), stock=Decimal('0'),
+        )
+
+    def _make_recipe_movement(self, *, product, branch, qty,
+                               avg_unit_cost=Decimal('0.1000'), on_date=None):
+        """A `RECIPE_CONSUME` stock movement plus the branch-scoped
+        `InventoryCost` row `ingredient_consumption_report` reads to price
+        it — mirrors how `SaleSerializer._apply_stock` writes these rows
+        (qty stored negative), without going through a real recipe sale."""
+        InventoryCost.objects.update_or_create(
+            tenant=self.tenant, product=product, branch=branch,
+            defaults={'avg_unit_cost': avg_unit_cost},
+        )
+        mv = StockMovement.objects.create(
+            tenant=self.tenant, product=product, branch=branch,
+            qty=-qty, movement_type=StockMovement.MovementType.RECIPE_CONSUME,
+            source_document_type='sale',
+        )
+        if on_date:
+            StockMovement.objects.filter(pk=mv.pk).update(created_at=timezone_aware(on_date))
+            mv.refresh_from_db()
+        return mv
+
+
+class RecipeProfitabilityReportTests(_Batch6ReportingTestBase):
+    def test_per_product_aggregate_matches_hand_computed_figures(self):
+        self._make_sale([(self.sandwich, Decimal('2'), Decimal('50.00'), Decimal('16.00'))])
+        self._make_sale([(self.sandwich, Decimal('1'), Decimal('50.00'), Decimal('16.00'))])
+        self._make_sale([(self.burger, Decimal('3'), Decimal('60.00'), Decimal('20.00'))])
+
+        resp = self.client.get(reverse('recipe-profitability'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+        rows = {r['product_name']: r for r in resp.json()['results']}
+        self.assertEqual(set(rows), {'Chicken Sandwich', 'Beef Burger'})
+
+        sw = rows['Chicken Sandwich']
+        self.assertEqual(sw['units_sold'], 3.0)
+        self.assertEqual(sw['revenue'], 150.0)           # 3 * 50
+        self.assertEqual(sw['food_cost'], 48.0)           # 3 * 16
+        self.assertEqual(sw['gross_profit'], 102.0)
+        self.assertEqual(sw['gross_margin_pct'], 68.0)    # 102/150*100
+        self.assertEqual(sw['food_cost_pct'], 32.0)       # 48/150*100
+
+        bg = rows['Beef Burger']
+        self.assertEqual(bg['units_sold'], 3.0)
+        self.assertEqual(bg['revenue'], 180.0)
+        self.assertEqual(bg['food_cost'], 60.0)
+        self.assertEqual(bg['gross_profit'], 120.0)
+        self.assertEqual(bg['gross_margin_pct'], 66.7)    # round(120/180*100, 1)
+        self.assertEqual(bg['food_cost_pct'], 33.3)       # round(60/180*100, 1)
+
+    def test_stock_item_products_excluded(self):
+        """Only RECIPE_PRODUCT-typed sale lines appear — a regular stock
+        item (Coffee, from the shared Sprint 4 fixture) must never show up
+        in a food-cost report."""
+        self._make_sale([(self.coffee, Decimal('5'), Decimal('700.00'), Decimal('500.00'))])
+        self._make_sale([(self.sandwich, Decimal('1'), Decimal('50.00'), Decimal('16.00'))])
+        resp = self.client.get(reverse('recipe-profitability'))
+        names = {r['product_name'] for r in resp.json()['results']}
+        self.assertEqual(names, {'Chicken Sandwich'})
+
+    def test_branch_filter_narrows(self):
+        self._make_sale(
+            [(self.sandwich, Decimal('1'), Decimal('50.00'), Decimal('16.00'))], branch=self.branch_a,
+        )
+        self._make_sale(
+            [(self.burger, Decimal('1'), Decimal('60.00'), Decimal('20.00'))], branch=self.branch_b,
+        )
+        resp = self.client.get(reverse('recipe-profitability'), {'branch_id': self.branch_a.pk})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+        names = {r['product_name'] for r in resp.json()['results']}
+        self.assertEqual(names, {'Chicken Sandwich'})
+
+    def test_voided_sale_excluded(self):
+        self._make_sale(
+            [(self.sandwich, Decimal('1'), Decimal('50.00'), Decimal('16.00'))],
+            sale_status=Sale.Status.VOIDED,
+        )
+        resp = self.client.get(reverse('recipe-profitability'))
+        self.assertEqual(resp.json()['results'], [])
+
+    def test_zero_sales_in_window_returns_empty_not_error(self):
+        resp = self.client.get(reverse('recipe-profitability'), {
+            'start_date': '2020-01-01', 'end_date': '2020-01-02',
+        })
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+        self.assertEqual(resp.json()['results'], [])
+
+    def test_ordering_param_ascending_margin(self):
+        self._make_sale([(self.sandwich, Decimal('1'), Decimal('50.00'), Decimal('16.00'))])  # 68.0%
+        self._make_sale([(self.burger, Decimal('1'), Decimal('60.00'), Decimal('55.00'))])     # low margin
+        resp = self.client.get(reverse('recipe-profitability'), {'ordering': 'gross_margin_pct'})
+        names = [r['product_name'] for r in resp.json()['results']]
+        self.assertEqual(names, ['Beef Burger', 'Chicken Sandwich'])
+
+    def test_invalid_ordering_falls_back_to_default(self):
+        self._make_sale([(self.sandwich, Decimal('1'), Decimal('50.00'), Decimal('16.00'))])
+        resp = self.client.get(reverse('recipe-profitability'), {'ordering': 'not_a_real_field'})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+
+    def test_cashier_forbidden(self):
+        self.client.force_authenticate(user=self.cashier)
+        resp = self.client.get(reverse('recipe-profitability'))
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class IngredientConsumptionReportTests(_Batch6ReportingTestBase):
+    def test_aggregate_matches_hand_computed_figures(self):
+        self._make_recipe_movement(
+            product=self.chicken, branch=self.branch_a, qty=Decimal('150'),
+            avg_unit_cost=Decimal('0.1000'),
+        )
+        self._make_recipe_movement(
+            product=self.chicken, branch=self.branch_a, qty=Decimal('50'),
+            avg_unit_cost=Decimal('0.1000'),
+        )
+        resp = self.client.get(reverse('ingredient-consumption-report'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+        rows = resp.json()['results']
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row['product_name'], 'Chicken')
+        self.assertEqual(row['qty_consumed'], 200.0)
+        self.assertEqual(row['cost_consumed'], 20.0)  # 200 * 0.10
+
+    def test_branch_scoped_cost_used_per_movement(self):
+        """D-09: two branches can carry different average costs for the
+        same ingredient — `cost_consumed` must reflect each movement's own
+        branch cost, not one global figure."""
+        self._make_recipe_movement(
+            product=self.chicken, branch=self.branch_a, qty=Decimal('100'),
+            avg_unit_cost=Decimal('0.10'),
+        )
+        self._make_recipe_movement(
+            product=self.chicken, branch=self.branch_b, qty=Decimal('100'),
+            avg_unit_cost=Decimal('0.20'),
+        )
+        resp = self.client.get(reverse('ingredient-consumption-report'))
+        row = resp.json()['results'][0]
+        self.assertEqual(row['qty_consumed'], 200.0)
+        self.assertEqual(row['cost_consumed'], 30.0)  # 100*0.10 + 100*0.20
+
+    def test_branch_filter_narrows(self):
+        self._make_recipe_movement(
+            product=self.chicken, branch=self.branch_a, qty=Decimal('100'),
+            avg_unit_cost=Decimal('0.10'),
+        )
+        self._make_recipe_movement(
+            product=self.chicken, branch=self.branch_b, qty=Decimal('100'),
+            avg_unit_cost=Decimal('0.20'),
+        )
+        resp = self.client.get(
+            reverse('ingredient-consumption-report'), {'branch_id': self.branch_a.pk},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+        row = resp.json()['results'][0]
+        self.assertEqual(row['qty_consumed'], 100.0)
+        self.assertEqual(row['cost_consumed'], 10.0)
+
+    def test_non_recipe_consume_movements_excluded(self):
+        StockMovement.objects.create(
+            tenant=self.tenant, product=self.chicken, branch=self.branch_a,
+            qty=Decimal('-5'), movement_type=StockMovement.MovementType.SALE_OUT,
+        )
+        resp = self.client.get(reverse('ingredient-consumption-report'))
+        self.assertEqual(resp.json()['results'], [])
+
+    def test_zero_movements_in_window_returns_empty_not_error(self):
+        resp = self.client.get(reverse('ingredient-consumption-report'), {
+            'start_date': '2020-01-01', 'end_date': '2020-01-02',
+        })
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+        self.assertEqual(resp.json()['results'], [])
+
+    def test_ordering_param_ascending_qty(self):
+        self._make_recipe_movement(
+            product=self.chicken, branch=self.branch_a, qty=Decimal('10'),
+            avg_unit_cost=Decimal('1.00'),
+        )
+        cheese = Product.objects.create(
+            tenant=self.tenant, category=self.category,
+            name='Cheese', barcode='S6-CHZ', sku='SKU-S6-CHZ',
+            price=Decimal('0.00'), cost=Decimal('0.00'), stock=Decimal('0'),
+        )
+        self._make_recipe_movement(
+            product=cheese, branch=self.branch_a, qty=Decimal('40'),
+            avg_unit_cost=Decimal('1.00'),
+        )
+        resp = self.client.get(reverse('ingredient-consumption-report'), {'ordering': 'qty_consumed'})
+        names = [r['product_name'] for r in resp.json()['results']]
+        self.assertEqual(names, ['Chicken', 'Cheese'])
+
+    def test_cashier_forbidden(self):
+        self.client.force_authenticate(user=self.cashier)
+        resp = self.client.get(reverse('ingredient-consumption-report'))
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)

@@ -57,6 +57,7 @@ from .serializers import (
     WarehouseStockSerializer,
 )
 from .services import barcode_resolution, costing, idempotency
+from .services.product_types import ProductType
 from .services.standard_units import StandardUnitCode
 
 
@@ -1676,6 +1677,230 @@ def dashboard_daily_stats(request):
         'transaction_count': agg['count'],
         'avg_basket':        round(float(agg['avg'] or 0), 2),
         'total_items':       float(total_items),
+    })
+
+
+# ── Recipe / food-cost reporting (Sprint 5 Batch 6) ───────────────────────────
+# Both views below are pure reads over data Batch 5 already writes — no new
+# write-side code, matching the "reuse the COGS pipeline with zero write-side
+# change" strategy `dashboard_summary`'s COGS/gross-profit figures already use
+# for stock-item products (Sprint 3/4). Not GL-posted (R-L discipline
+# unchanged): "gross profit"/"food cost", never "net profit".
+
+def _parse_report_window(request, tenant):
+    """Shared start/end/branch_id parsing for the two report views below —
+    identical semantics to `dashboard_summary`'s own inline parsing (date
+    range defaults to today, an inverted range is swapped, `branch_id` is
+    tenant-scoped and 404s if unknown). Factored out only because both new
+    views need it verbatim; raises `ValueError` on a bad param, which each
+    caller turns into a 400."""
+    import datetime
+
+    today = timezone.localdate()
+
+    def _parse(name, value, fallback):
+        if not value:
+            return fallback
+        try:
+            return datetime.date.fromisoformat(value)
+        except ValueError:
+            raise ValueError(f'Invalid {name}: expected YYYY-MM-DD.')
+
+    start = _parse('start_date', request.query_params.get('start_date'), today)
+    end   = _parse('end_date',   request.query_params.get('end_date'),   today)
+    if start > end:
+        start, end = end, start
+
+    branch_id = request.query_params.get('branch_id')
+    if branch_id:
+        try:
+            branch_id = int(branch_id)
+        except (TypeError, ValueError):
+            raise ValueError('Invalid branch_id: expected an integer.')
+        get_object_or_404(Branch, pk=branch_id, tenant=tenant) if tenant else get_object_or_404(Branch, pk=branch_id)
+
+    return start, end, branch_id
+
+
+@api_view(['GET'])
+@permission_classes([IsManagerOrAbove])
+def recipe_profitability(request):
+    """
+    GET /api/reports/recipe-profitability/?start_date=&end_date=&branch_id=&ordering=
+
+    Per-(product, variant) food-cost/margin breakdown for RECIPE_PRODUCT
+    sales in the window — the "best/worst margin" report from the owner's
+    mock reports. `food_cost` reads the same `SaleItem.unit_cost` snapshot
+    `SaleSerializer.create()` already writes for a recipe sale line (the
+    branch-scoped recipe cost frozen at the moment of sale, Sprint 5 Batch
+    5) — this view never recomputes a recipe's cost itself.
+
+    `?ordering=` accepts `revenue`, `units_sold`, `gross_profit`,
+    `gross_margin_pct`, or `food_cost_pct`, each with an optional `-`
+    prefix for descending; defaults to `-revenue`. Grouped by
+    `(product, product_name, variant, variant_name)` — the name snapshot
+    fields, not a live join, so a row reflects the names as they were sold
+    (same known limitation `dashboard_summary`'s `top_products` already
+    has: a mid-window rename can split one logical product across two
+    rows).
+    """
+    tenant = getattr(request.user, 'tenant', None)
+    try:
+        start, end, branch_id = _parse_report_window(request, tenant)
+    except ValueError as exc:
+        return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    items = SaleItem.objects.filter(
+        sale__status=Sale.Status.COMPLETED,
+        sale__created_at__date__range=(start, end),
+        product__product_type=ProductType.RECIPE_PRODUCT,
+    ).exclude(product__isnull=True)
+    if tenant:
+        items = items.filter(sale__tenant=tenant)
+    if branch_id:
+        items = items.filter(sale__branch_id=branch_id)
+
+    def _cost_sum():
+        return Sum(ExpressionWrapper(
+            F('unit_cost') * F('qty'), output_field=DecimalField(max_digits=16, decimal_places=5),
+        ))
+
+    rows = []
+    for row in (
+        items
+        # Explicit empty order_by() clears SaleItem's default `Meta.ordering
+        # = ['id']` — left in place, Django would fold `id` into the GROUP
+        # BY and defeat this aggregation entirely (same gotcha every other
+        # `.values().annotate()` block in this file already works around).
+        .values('product', 'product_name', 'variant', 'variant_name')
+        .annotate(units_sold=Sum('qty'), revenue=Sum('line_total'), food_cost=_cost_sum())
+        .order_by()
+    ):
+        revenue      = row['revenue'] or Decimal('0')
+        food_cost    = costing.quantize_money(row['food_cost'] or 0)
+        gross_profit = costing.quantize_money(revenue - food_cost)
+        rows.append({
+            'product_id':       row['product'],
+            'product_name':     row['product_name'],
+            'variant_id':       row['variant'],
+            'variant_name':     row['variant_name'] or '',
+            'units_sold':       float(row['units_sold'] or 0),
+            'revenue':          float(revenue),
+            'food_cost':        float(food_cost),
+            'gross_profit':     float(gross_profit),
+            'gross_margin_pct': (
+                round(float(gross_profit / revenue) * 100, 1) if revenue > 0 else 0.0
+            ),
+            'food_cost_pct': (
+                round(float(food_cost / revenue) * 100, 1) if revenue > 0 else 0.0
+            ),
+        })
+
+    allowed_ordering = {
+        'revenue', '-revenue', 'units_sold', '-units_sold',
+        'gross_profit', '-gross_profit', 'gross_margin_pct', '-gross_margin_pct',
+        'food_cost_pct', '-food_cost_pct',
+    }
+    ordering = request.query_params.get('ordering') or '-revenue'
+    if ordering not in allowed_ordering:
+        ordering = '-revenue'
+    rows.sort(key=lambda r: r[ordering.lstrip('-')], reverse=ordering.startswith('-'))
+
+    return Response({
+        'range':   {'start_date': start.isoformat(), 'end_date': end.isoformat()},
+        'results': rows,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsManagerOrAbove])
+def ingredient_consumption_report(request):
+    """
+    GET /api/reports/ingredient-consumption/?start_date=&end_date=&branch_id=&ordering=
+
+    Per-ingredient consumption/cost breakdown, read directly from the
+    `RECIPE_CONSUME` stock-movement ledger — the "most-consumed
+    ingredients" report from the owner's mock reports. Reads the ledger
+    (never recomputes from a live recipe definition), the same "the
+    ledger is the source of truth" rule `pos.views.void_sale`'s own
+    `RECIPE_CONSUME` reversal already follows.
+
+    Unlike `recipe_profitability` above, a stock movement carries no cost
+    snapshot of its own — `cost_consumed` is derived here from each
+    movement's own `(product, branch)` branch-scoped `InventoryCost`
+    (D-09), read fresh at request time, not the cost at the moment that
+    particular unit was actually consumed. This is a live report, not an
+    immutable audit snapshot like `SaleItemRecipeCostSnapshot`.
+
+    `?ordering=` accepts `qty_consumed` or `cost_consumed`, each with an
+    optional `-` prefix; defaults to `-cost_consumed`.
+    """
+    tenant = getattr(request.user, 'tenant', None)
+    try:
+        start, end, branch_id = _parse_report_window(request, tenant)
+    except ValueError as exc:
+        return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    movements = StockMovement.objects.filter(
+        movement_type=StockMovement.MovementType.RECIPE_CONSUME,
+        created_at__date__range=(start, end),
+    ).exclude(product__isnull=True).select_related('product', 'branch')
+    if tenant:
+        movements = movements.filter(tenant=tenant)
+    if branch_id:
+        movements = movements.filter(branch_id=branch_id)
+
+    # One InventoryCost lookup per distinct (product, branch) pair seen,
+    # not one per movement row — the same small per-call cache pattern
+    # `recipes.services.costing.compute_recipe_sale_lines` uses.
+    unit_cost_cache = {}
+
+    def _unit_cost(product, branch):
+        key = (product.id, branch.id if branch else None)
+        cost = unit_cost_cache.get(key)
+        if cost is None:
+            cost = costing.get_cost_for_sale(product, branch=branch)
+            unit_cost_cache[key] = cost
+        return cost
+
+    # Raw (unrounded) accumulation per product, quantized to money once at
+    # the end — the same "sum raw, round once" discipline this session's
+    # snapshot-line rounding fix established, applied here for the same
+    # reason: summing already-rounded per-movement costs could drift the
+    # total on a component whose raw cost isn't already a clean 2dp value.
+    totals = {}
+    for mv in movements.iterator():
+        qty_consumed = -mv.qty  # RECIPE_CONSUME rows are stored negative.
+        if qty_consumed <= 0:
+            continue
+        unit_cost = _unit_cost(mv.product, mv.branch)
+        entry = totals.setdefault(mv.product_id, {
+            'product_name': mv.product.name,
+            'qty_consumed': Decimal('0'),
+            'raw_cost':     Decimal('0'),
+        })
+        entry['qty_consumed'] += qty_consumed
+        entry['raw_cost']     += qty_consumed * unit_cost
+
+    rows = [
+        {
+            'product_id':    product_id,
+            'product_name':  data['product_name'],
+            'qty_consumed':  float(data['qty_consumed']),
+            'cost_consumed': float(costing.quantize_money(data['raw_cost'])),
+        }
+        for product_id, data in totals.items()
+    ]
+
+    allowed_ordering = {'qty_consumed', '-qty_consumed', 'cost_consumed', '-cost_consumed'}
+    ordering = request.query_params.get('ordering') or '-cost_consumed'
+    if ordering not in allowed_ordering:
+        ordering = '-cost_consumed'
+    rows.sort(key=lambda r: r[ordering.lstrip('-')], reverse=ordering.startswith('-'))
+
+    return Response({
+        'range':   {'start_date': start.isoformat(), 'end_date': end.isoformat()},
+        'results': rows,
     })
 
 
