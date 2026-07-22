@@ -19,6 +19,7 @@ from decimal import Decimal
 from typing import Iterable, List, Optional
 
 from django.db import transaction
+from django.db.models import Q
 
 from pos.services import costing as pos_costing_svc
 from recipes.models import Recipe, RecipeVersion
@@ -137,6 +138,47 @@ def validate_recipe_lines(*, product, component_products: Iterable) -> None:
             )
 
 
+def compute_modifier_deltas(modifier_option, variant=None, branch=None) -> RecipeCostResult:
+    """Cost contribution of one selected `ModifierOption`, for a given
+    `variant` (or `variant=None` for a product with no size variants).
+
+    Matches `ModifierOptionConsumption` rows scoped to this exact variant
+    OR variant-agnostic (`variant=NULL`); when both exist for the same
+    component, the variant-specific row wins. Per D-34, a **negative**
+    consumption delta (e.g. "No Onion", `qty_base < 0`) is not consumed at
+    sale time and contributes **zero** cost — removing an ingredient must
+    never produce a negative COGS line; a free modifier (`price_delta=0`)
+    still contributes its full consumption cost.
+    """
+    consumptions = list(
+        modifier_option.consumptions.filter(is_active=True)
+        .filter(Q(variant=variant) | Q(variant__isnull=True))
+        .select_related('component_product')
+    )
+    by_component = {}
+    for consumption in consumptions:
+        existing = by_component.get(consumption.component_product_id)
+        is_more_specific = existing is not None and existing.variant_id is None and consumption.variant_id is not None
+        if existing is None or is_more_specific:
+            by_component[consumption.component_product_id] = consumption
+
+    lines = []
+    total = Decimal('0.00')
+    for consumption in by_component.values():
+        if consumption.qty_base <= 0:
+            continue  # negative/removal delta — not consumed, zero cost (D-34)
+        unit_cost = pos_costing_svc.get_cost_for_sale(consumption.component_product, branch=branch)
+        line_cost = pos_costing_svc.quantize_money(consumption.qty_base * unit_cost)
+        total += line_cost
+        lines.append(RecipeCostLine(
+            component_product_id=consumption.component_product_id,
+            component_name=consumption.component_product.name,
+            qty_base=consumption.qty_base, unit_cost=unit_cost, line_cost=line_cost,
+            is_modifier_line=True, source_modifier_option_id=modifier_option.id,
+        ))
+    return RecipeCostResult(total_cost=total, lines=lines)
+
+
 @transaction.atomic
 def activate_recipe_version(version: RecipeVersion) -> RecipeVersion:
     """Flip `version` to ACTIVE, archiving whatever was previously active
@@ -156,5 +198,5 @@ def activate_recipe_version(version: RecipeVersion) -> RecipeVersion:
 __all__ = [
     'RecipeError', 'RecipeCostLine', 'RecipeCostResult', 'MAX_RECIPE_DEPTH',
     'get_active_recipe', 'compute_recipe_cost', 'validate_recipe_lines',
-    'activate_recipe_version',
+    'compute_modifier_deltas', 'activate_recipe_version',
 ]

@@ -200,3 +200,163 @@ class RecipeLine(models.Model):
 
     def __str__(self):
         return f'RecipeLine version={self.recipe_version_id} component={self.component_product_id}'
+
+
+class ModifierGroup(models.Model):
+    """A named set of options a product offers at sale time (e.g. "Pizza
+    Toppings"). `selection_type` distinguishes "pick exactly one" (e.g. a
+    bread choice) from "pick any number of extras" — `min_select`/
+    `max_select` refine either further and are both optional (no cap by
+    default).
+    """
+
+    class SelectionType(models.TextChoices):
+        SINGLE   = 'single',   'Single'
+        MULTIPLE = 'multiple', 'Multiple'
+
+    tenant = models.ForeignKey(
+        'accounts.Tenant', on_delete=models.CASCADE,
+        related_name='modifier_groups', db_index=True,
+    )
+    name = models.CharField(max_length=80)
+    selection_type = models.CharField(
+        max_length=10, choices=SelectionType.choices, default=SelectionType.MULTIPLE,
+    )
+    min_select = models.PositiveIntegerField(null=True, blank=True)
+    max_select = models.PositiveIntegerField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['tenant', 'name'], name='recipes_modgroup_tenant_name_uniq',
+            ),
+        ]
+
+    def __str__(self):
+        return self.name
+
+
+class ProductModifierGroup(models.Model):
+    """Which products offer which modifier groups (e.g. "Pizza Toppings"
+    attached to every pizza product)."""
+
+    tenant = models.ForeignKey(
+        'accounts.Tenant', on_delete=models.CASCADE,
+        related_name='product_modifier_groups', db_index=True,
+    )
+    product = models.ForeignKey(
+        'pos.Product', on_delete=models.CASCADE, related_name='modifier_group_links',
+    )
+    modifier_group = models.ForeignKey(
+        ModifierGroup, on_delete=models.CASCADE, related_name='product_links',
+    )
+    sort_order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ['sort_order', 'id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['product', 'modifier_group'],
+                name='recipes_prodmodgroup_product_group_uniq',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.product_id} <- {self.modifier_group_id}'
+
+
+class ModifierOption(models.Model):
+    """One selectable option within a `ModifierGroup` (e.g. "Extra
+    Cheese", "No Onion"). `price_delta` can be zero (a free option still
+    consumes inventory — D-34) or, in principle, negative."""
+
+    tenant = models.ForeignKey(
+        'accounts.Tenant', on_delete=models.CASCADE,
+        related_name='modifier_options', db_index=True,
+    )
+    modifier_group = models.ForeignKey(
+        ModifierGroup, on_delete=models.CASCADE, related_name='options',
+    )
+    name = models.CharField(max_length=80)
+    price_delta = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    sort_order = models.PositiveIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['sort_order', 'name']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['tenant', 'modifier_group', 'name'],
+                name='recipes_modoption_tenant_group_name_uniq',
+            ),
+        ]
+
+    def __str__(self):
+        return self.name
+
+
+class ModifierOptionConsumption(models.Model):
+    """The per-variant ingredient consumption delta a `ModifierOption`
+    causes (TARGET_BOUNDARIES.md §6.10's "RecipeConsumptionDelta"). E.g.
+    Extra Cheese: +40g Mozzarella; No Onion: -20g Onion.
+
+    `variant=NULL` means "applies regardless of variant" (a product with
+    no size variants, or a delta that doesn't scale by size). Both
+    `entered_qty` and `qty_base` are **signed** — unlike `RecipeLine`,
+    which only ever adds an ingredient, a modifier may also *remove* one.
+    A negative delta is not consumed at sale time and contributes zero
+    cost (`recipes.services.costing.compute_modifier_deltas`) — removing
+    an ingredient doesn't create negative COGS, it simply isn't consumed.
+    """
+
+    tenant = models.ForeignKey(
+        'accounts.Tenant', on_delete=models.CASCADE,
+        related_name='modifier_option_consumptions', db_index=True,
+    )
+    modifier_option = models.ForeignKey(
+        ModifierOption, on_delete=models.CASCADE, related_name='consumptions',
+    )
+    variant = models.ForeignKey(
+        ProductVariant, on_delete=models.CASCADE,
+        null=True, blank=True, related_name='modifier_consumptions',
+    )
+    component_product = models.ForeignKey(
+        'pos.Product', on_delete=models.PROTECT, related_name='modifier_consumptions',
+    )
+    component_unit = models.ForeignKey(
+        'pos.ProductUnit', on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    entered_qty = models.DecimalField(max_digits=14, decimal_places=3)
+    qty_base = models.DecimalField(max_digits=14, decimal_places=4)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                check=~models.Q(entered_qty=0),
+                name='recipes_modconsumption_entered_qty_nonzero',
+            ),
+            models.UniqueConstraint(
+                fields=['modifier_option', 'variant', 'component_product'],
+                name='recipes_modconsumption_option_variant_component_uniq',
+            ),
+            # Same paired pattern as InventoryCost.branch / Recipe.variant —
+            # caps the variant=NULL (variant-agnostic) row at one per
+            # (option, component), since NULL is otherwise distinct-per-row.
+            models.UniqueConstraint(
+                fields=['modifier_option', 'component_product'],
+                condition=models.Q(variant__isnull=True),
+                name='recipes_modconsumption_option_component_null_variant_uniq',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.modifier_option_id}: {self.entered_qty} of {self.component_product_id}'

@@ -2540,6 +2540,63 @@ friendly 400 not a 500).
 models (Batch 4), any frontend file, any GL code. `Product.cost`/
 `InventoryCost` untouched by this batch — recipe cost is a pure read.
 
+### Batch 4 — Modifiers (`ModifierGroup` / `ModifierOption` / consumption deltas) (backend)
+
+**Goal:** dynamic extras/removals (Extra Cheese, No Onion) that change
+both price and per-variant ingredient consumption, matching D-23
+(price on the option, cost always derived from consumption) and D-34
+(a free option still consumes inventory and counts as COGS).
+
+**Files changed:**
+- `recipes/models.py` — `ModifierGroup` (tenant-scoped, flat, `single`/
+  `multiple` selection type + optional `min_select`/`max_select`);
+  `ProductModifierGroup` (the product↔group attach link, unique per pair);
+  `ModifierOption` (`price_delta`, can be 0 or negative); `ModifierOptionConsumption`
+  (`variant` nullable — NULL means "applies regardless of variant", same
+  paired-unique-constraint pattern as `Recipe.variant`/`InventoryCost.branch`;
+  `entered_qty`/`qty_base` are **signed**, unlike `RecipeLine` which only
+  ever adds — a modifier may also *remove* an ingredient, e.g. -20g onion;
+  `CHECK entered_qty != 0` instead of `> 0`).
+- `recipes/migrations/0003_modifiergroup_modifieroption_productmodifiergroup_and_more.py`
+  — `CreateModel` × 4 + 6 constraints, no data.
+- `recipes/services/costing.py` — new `compute_modifier_deltas(modifier_option,
+  variant=None, branch=None)`: matches consumption rows scoped to the exact
+  variant OR variant-agnostic, preferring the variant-specific row when
+  both exist for the same component; **a negative delta contributes zero
+  cost** (removing an ingredient must never produce negative COGS — a
+  dedicated test locks this in); a free option (`price_delta=0`) still
+  contributes its full consumption cost (D-34).
+- `recipes/serializers.py` — `ModifierGroupSerializer` (duplicate-name
+  400, mirrors `PriceTierSerializer`), `ModifierOptionSerializer`,
+  `ProductModifierGroupSerializer`, `ModifierOptionConsumptionSerializer`
+  (accepts a signed `entered_qty`, resolves `component_unit` to the
+  component's base unit when omitted, computes signed `qty_base` via
+  `convert_to_base(abs(entered_qty))` re-signed — `convert_to_base` itself
+  only accepts positive input).
+- `recipes/views.py` / `recipes/urls.py` — `catalog/modifier-groups/`
+  (+options nested one level, +deactivate), `catalog/modifier-options/<pk>/consumptions/`
+  (+detail), `products/<pk>/modifier-groups/` (attach/detach — the one
+  Sprint-5 resource that supports a real `DELETE`, since it's a pure link
+  table with no historical data worth soft-deleting, unlike everything
+  else in this catalog).
+
+**Tests:** extended `recipes/test_recipes.py` (+10) —
+`ModifierDeltaCalculationTests` (positive delta cost, negative delta →
+zero cost, free modifier still counts as COGS, variant-specific
+consumption preferred over variant-agnostic for the same component);
+`ModifierApiTests` (full create-group→option→consumption→attach-to-product
+flow, negative `entered_qty` accepted, zero `entered_qty` rejected,
+cashier forbidden to create a group, duplicate group name rejected,
+detach via DELETE).
+
+**Verification:** `manage.py check` clean. `manage.py makemigrations
+--check --dry-run` clean (exactly the one expected migration). Full suite:
+**726/726 passed** (716 baseline + 10 new).
+
+**Not touched:** `pos` app's sale-posting path (Batch 5's job — this is
+where `RECIPE_CONSUME` and the actual per-line modifier selection at sale
+time land), any frontend file, any GL code.
+
 ---
 
 *(Later batches of Sprint 5 get their own entries here as they land.)*

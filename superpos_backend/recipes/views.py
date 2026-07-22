@@ -5,8 +5,13 @@ from rest_framework.response import Response
 from accounts.permissions import IsCashierOrAbove, IsManagerOrAbove
 from pos.models import Product
 from pos.views import TenantMixin
-from recipes.models import ProductVariant, Recipe, RecipeVersion
+from recipes.models import (
+    ModifierGroup, ModifierOption, ModifierOptionConsumption,
+    ProductModifierGroup, ProductVariant, Recipe, RecipeVersion,
+)
 from recipes.serializers import (
+    ModifierGroupSerializer, ModifierOptionConsumptionSerializer,
+    ModifierOptionSerializer, ProductModifierGroupSerializer,
     ProductVariantSerializer, RecipeSerializer, RecipeVersionSerializer,
 )
 from recipes.services import costing as recipes_costing_svc
@@ -185,3 +190,198 @@ class RecipeVersionActivateView(_RecipeVersionScopedMixin, generics.GenericAPIVi
         version = self.get_object()
         version = recipes_costing_svc.activate_recipe_version(version)
         return Response(self.get_serializer(version).data)
+
+
+# ── Modifiers (Sprint 5 Batch 4) ─────────────────────────────────────────────
+# ModifierGroup is tenant-scoped and flat (same conventions as PriceTier);
+# ModifierOption nests one level under it; ProductModifierGroup is the
+# product<->group attach/detach link; ModifierOptionConsumption nests one
+# level under an option.
+
+class ModifierGroupListCreateView(TenantMixin, generics.ListCreateAPIView):
+    queryset         = ModifierGroup.objects.all()
+    serializer_class = ModifierGroupSerializer
+    search_fields    = ['name']
+    ordering_fields  = ['name', 'created_at']
+    ordering         = ['name']
+
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+
+class ModifierGroupDetailView(TenantMixin, generics.RetrieveUpdateAPIView):
+    """GET / PATCH a modifier group. No DELETE — deactivate instead."""
+
+    queryset          = ModifierGroup.objects.all()
+    serializer_class  = ModifierGroupSerializer
+    http_method_names = ['get', 'patch', 'head', 'options']
+
+    def get_permissions(self):
+        if self.request.method in ('PUT', 'PATCH'):
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+
+class ModifierGroupDeactivateView(TenantMixin, generics.GenericAPIView):
+    """POST — soft-delete by flipping `is_active=False`."""
+
+    queryset           = ModifierGroup.objects.all()
+    serializer_class   = ModifierGroupSerializer
+    permission_classes = [IsManagerOrAbove]
+
+    def post(self, request, *args, **kwargs):
+        group = self.get_object()
+        if group.is_active:
+            group.is_active = False
+            group.save(update_fields=['is_active', 'updated_at'])
+        return Response(self.get_serializer(group).data)
+
+
+class _ModifierGroupScopedMixin(TenantMixin):
+    """Resolves the parent modifier group from `group_pk`, tenant-scoped."""
+
+    def get_modifier_group(self):
+        qs = ModifierGroup.objects.all()
+        tenant = self._tenant()
+        if tenant:
+            qs = qs.filter(tenant=tenant)
+        return get_object_or_404(qs, pk=self.kwargs['group_pk'])
+
+    def get_serializer_context(self):
+        ctx = super().get_serializer_context()
+        ctx['modifier_group'] = self.get_modifier_group()
+        return ctx
+
+    def perform_create(self, serializer):
+        tenant = self._tenant()
+        modifier_group = self.get_modifier_group()
+        if tenant:
+            serializer.save(tenant=tenant, modifier_group=modifier_group)
+        else:
+            serializer.save(modifier_group=modifier_group)
+
+
+class ModifierOptionListCreateView(_ModifierGroupScopedMixin, generics.ListCreateAPIView):
+    queryset         = ModifierOption.objects.all()
+    serializer_class = ModifierOptionSerializer
+    ordering         = ['sort_order', 'name']
+
+    def get_queryset(self):
+        return super().get_queryset().filter(modifier_group_id=self.kwargs['group_pk'])
+
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+
+class ModifierOptionDetailView(_ModifierGroupScopedMixin, generics.RetrieveUpdateAPIView):
+    """GET / PATCH one option. No DELETE — deactivate via the dedicated action."""
+
+    queryset          = ModifierOption.objects.all()
+    serializer_class  = ModifierOptionSerializer
+    http_method_names = ['get', 'patch', 'head', 'options']
+
+    def get_queryset(self):
+        return super().get_queryset().filter(modifier_group_id=self.kwargs['group_pk'])
+
+    def get_permissions(self):
+        if self.request.method in ('PUT', 'PATCH'):
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+
+class ModifierOptionDeactivateView(_ModifierGroupScopedMixin, generics.GenericAPIView):
+    """POST — soft-delete by flipping `is_active=False`."""
+
+    queryset           = ModifierOption.objects.all()
+    serializer_class   = ModifierOptionSerializer
+    permission_classes = [IsManagerOrAbove]
+
+    def get_queryset(self):
+        return super().get_queryset().filter(modifier_group_id=self.kwargs['group_pk'])
+
+    def post(self, request, *args, **kwargs):
+        option = self.get_object()
+        if option.is_active:
+            option.is_active = False
+            option.save(update_fields=['is_active', 'updated_at'])
+        return Response(self.get_serializer(option).data)
+
+
+class ProductModifierGroupListCreateView(_ProductScopedMixin, generics.ListCreateAPIView):
+    """GET/POST which modifier groups a product offers. POST attaches
+    (creates the link); DELETE on the detail view detaches — this is a
+    pure link table (no historical data worth soft-deleting)."""
+
+    queryset         = ProductModifierGroup.objects.select_related('modifier_group').all()
+    serializer_class = ProductModifierGroupSerializer
+    ordering         = ['sort_order', 'id']
+
+    def get_queryset(self):
+        return super().get_queryset().filter(product_id=self.kwargs['product_pk'])
+
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+
+class ProductModifierGroupDetailView(_ProductScopedMixin, generics.RetrieveDestroyAPIView):
+    """GET one link; DELETE detaches the modifier group from the product."""
+
+    queryset          = ProductModifierGroup.objects.select_related('modifier_group').all()
+    serializer_class  = ProductModifierGroupSerializer
+    http_method_names = ['get', 'delete', 'head', 'options']
+
+    def get_queryset(self):
+        return super().get_queryset().filter(product_id=self.kwargs['product_pk'])
+
+    def get_permissions(self):
+        if self.request.method == 'DELETE':
+            return [IsManagerOrAbove()]
+        return [IsCashierOrAbove()]
+
+
+class _ModifierOptionScopedMixin(TenantMixin):
+    """Resolves the parent modifier option from `option_pk`, tenant-scoped."""
+
+    def get_modifier_option(self):
+        qs = ModifierOption.objects.all()
+        tenant = self._tenant()
+        if tenant:
+            qs = qs.filter(tenant=tenant)
+        return get_object_or_404(qs, pk=self.kwargs['option_pk'])
+
+    def get_serializer_context(self):
+        ctx = super().get_serializer_context()
+        ctx['modifier_option'] = self.get_modifier_option()
+        return ctx
+
+
+class ModifierOptionConsumptionListCreateView(_ModifierOptionScopedMixin, generics.ListCreateAPIView):
+    queryset         = ModifierOptionConsumption.objects.select_related(
+        'component_product', 'variant',
+    ).all()
+    serializer_class = ModifierOptionConsumptionSerializer
+    ordering         = ['id']
+    permission_classes = [IsManagerOrAbove]
+
+    def get_queryset(self):
+        return super().get_queryset().filter(modifier_option_id=self.kwargs['option_pk'])
+
+
+class ModifierOptionConsumptionDetailView(_ModifierOptionScopedMixin, generics.RetrieveUpdateAPIView):
+    """GET / PATCH one consumption row. No DELETE — deactivate via PATCH(is_active)."""
+
+    queryset            = ModifierOptionConsumption.objects.select_related(
+        'component_product', 'variant',
+    ).all()
+    serializer_class    = ModifierOptionConsumptionSerializer
+    http_method_names  = ['get', 'patch', 'head', 'options']
+    permission_classes = [IsManagerOrAbove]
+
+    def get_queryset(self):
+        return super().get_queryset().filter(modifier_option_id=self.kwargs['option_pk'])

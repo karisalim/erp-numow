@@ -18,7 +18,10 @@ from rest_framework.test import APITestCase
 from accounts.models import Branch, Tenant, User
 from pos.models import Category, InventoryCost, Product, ProductUnit, Unit, UnitGroup
 from pos.services import costing as pos_costing_svc
-from recipes.models import ProductVariant, Recipe, RecipeLine, RecipeVersion
+from recipes.models import (
+    ModifierGroup, ModifierOption, ModifierOptionConsumption,
+    ProductModifierGroup, ProductVariant, Recipe, RecipeLine, RecipeVersion,
+)
 from recipes.services import costing as recipes_costing_svc
 
 
@@ -361,3 +364,183 @@ class RecipeApiTests(APITestCase):
             format='json',
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+# ── Sprint 5 Batch 4: Modifiers ──────────────────────────────────────────────
+
+class ModifierDeltaCalculationTests(_RecipeTestBase):
+    def _make_group_and_option(self, *, name='Extras', option_name='Extra Cheese', price_delta='6.00'):
+        group = ModifierGroup.objects.create(tenant=self.tenant, name=name)
+        option = ModifierOption.objects.create(
+            tenant=self.tenant, modifier_group=group, name=option_name,
+            price_delta=Decimal(price_delta),
+        )
+        return group, option
+
+    def test_positive_delta_contributes_cost(self):
+        _, option = self._make_group_and_option()
+        cheese, cheese_unit = _make_ingredient(
+            self.tenant, self.ingredients_cat, self.gram,
+            name='Mozzarella', barcode='ING-MOZ', sku='SKU-MOZ', cost=Decimal('0.15'),
+        )
+        ModifierOptionConsumption.objects.create(
+            tenant=self.tenant, modifier_option=option, variant=None,
+            component_product=cheese, component_unit=cheese_unit,
+            entered_qty=Decimal('40'), qty_base=Decimal('40'),
+        )
+        result = recipes_costing_svc.compute_modifier_deltas(option)
+        self.assertEqual(result.total_cost, Decimal('6.00'))  # 40 * 0.15
+        self.assertEqual(len(result.lines), 1)
+
+    def test_negative_delta_contributes_zero_cost(self):
+        """D-34: 'No Onion' removes an ingredient — it must not create a
+        negative COGS line."""
+        _, option = self._make_group_and_option(name='Removals', option_name='No Onion', price_delta='0.00')
+        onion, onion_unit = _make_ingredient(
+            self.tenant, self.ingredients_cat, self.gram,
+            name='Onion', barcode='ING-ONI', sku='SKU-ONI', cost=Decimal('0.02'),
+        )
+        ModifierOptionConsumption.objects.create(
+            tenant=self.tenant, modifier_option=option, variant=None,
+            component_product=onion, component_unit=onion_unit,
+            entered_qty=Decimal('-20'), qty_base=Decimal('-20'),
+        )
+        result = recipes_costing_svc.compute_modifier_deltas(option)
+        self.assertEqual(result.total_cost, Decimal('0.00'))
+        self.assertEqual(len(result.lines), 0)
+
+    def test_free_modifier_still_contributes_full_cost(self):
+        _, option = self._make_group_and_option(option_name='Free Extra Sauce', price_delta='0.00')
+        sauce, sauce_unit = _make_ingredient(
+            self.tenant, self.ingredients_cat, self.gram,
+            name='House Sauce', barcode='ING-HSAUCE', sku='SKU-HSAUCE', cost=Decimal('0.10'),
+        )
+        ModifierOptionConsumption.objects.create(
+            tenant=self.tenant, modifier_option=option, variant=None,
+            component_product=sauce, component_unit=sauce_unit,
+            entered_qty=Decimal('30'), qty_base=Decimal('30'),
+        )
+        self.assertEqual(option.price_delta, Decimal('0.00'))
+        result = recipes_costing_svc.compute_modifier_deltas(option)
+        self.assertEqual(result.total_cost, Decimal('3.00'), 'free modifier still counts as COGS (D-34)')
+
+    def test_variant_specific_consumption_preferred_over_agnostic(self):
+        variant = ProductVariant.objects.create(
+            tenant=self.tenant, product=self.sandwich, name='Large', price=Decimal('120.00'),
+        )
+        _, option = self._make_group_and_option()
+        cheese, cheese_unit = _make_ingredient(
+            self.tenant, self.ingredients_cat, self.gram,
+            name='Cheddar', barcode='ING-CHD', sku='SKU-CHD', cost=Decimal('0.20'),
+        )
+        ModifierOptionConsumption.objects.create(
+            tenant=self.tenant, modifier_option=option, variant=None,
+            component_product=cheese, component_unit=cheese_unit,
+            entered_qty=Decimal('40'), qty_base=Decimal('40'),
+        )
+        ModifierOptionConsumption.objects.create(
+            tenant=self.tenant, modifier_option=option, variant=variant,
+            component_product=cheese, component_unit=cheese_unit,
+            entered_qty=Decimal('80'), qty_base=Decimal('80'),
+        )
+        result_no_variant = recipes_costing_svc.compute_modifier_deltas(option, variant=None)
+        result_variant = recipes_costing_svc.compute_modifier_deltas(option, variant=variant)
+        self.assertEqual(result_no_variant.total_cost, Decimal('8.00'))   # 40 * 0.20
+        self.assertEqual(result_variant.total_cost, Decimal('16.00'))    # 80 * 0.20 (variant-specific row wins)
+
+
+class ModifierApiTests(APITestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.tenant = Tenant.objects.create(name='Modifier Api Tenant')
+        cls.manager = User.objects.create_user(
+            username='modmgr', password='pw', role=User.Role.MANAGER, tenant=cls.tenant,
+        )
+        cls.cashier = User.objects.create_user(
+            username='modcsh', password='pw', role=User.Role.CASHIER, tenant=cls.tenant,
+        )
+        cls.category = Category.objects.create(tenant=cls.tenant, name='Menu')
+        cls.ingredients_cat = Category.objects.create(tenant=cls.tenant, name='Ingredients')
+        cls.mass = UnitGroup.objects.create(tenant=cls.tenant, name='Mass')
+        cls.gram = Unit.objects.create(
+            tenant=cls.tenant, unit_group=cls.mass, name='Gram', symbol='g',
+            factor_to_base=Decimal('1'), allow_decimal=True,
+        )
+        cls.pizza = Product.objects.create(
+            tenant=cls.tenant, category=cls.category,
+            name='Pizza', barcode='MOD-PZ', sku='SKU-MOD-PZ',
+            price=Decimal('0.00'), cost=Decimal('0.00'), stock=Decimal('0'),
+        )
+        cls.cheese, cls.cheese_unit = _make_ingredient(
+            cls.tenant, cls.ingredients_cat, cls.gram,
+            name='Cheese', barcode='MOD-CHZ', sku='SKU-MOD-CHZ', cost=Decimal('0.15'),
+        )
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.manager)
+
+    def test_create_group_option_consumption_and_attach_to_product(self):
+        resp = self.client.post(reverse('modifier-group-list'), {'name': 'Pizza Toppings'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        group_id = resp.json()['id']
+
+        resp2 = self.client.post(
+            reverse('modifier-option-list', args=[group_id]),
+            {'name': 'Extra Cheese', 'price_delta': '6.00'}, format='json',
+        )
+        self.assertEqual(resp2.status_code, status.HTTP_201_CREATED, resp2.content)
+        option_id = resp2.json()['id']
+
+        resp3 = self.client.post(
+            reverse('modifier-option-consumption-list', args=[option_id]),
+            {'component_product': self.cheese.id, 'entered_qty': '40'}, format='json',
+        )
+        self.assertEqual(resp3.status_code, status.HTTP_201_CREATED, resp3.content)
+        self.assertEqual(resp3.json()['qty_base'], '40.0000')
+
+        resp4 = self.client.post(
+            reverse('product-modifier-group-list', args=[self.pizza.id]),
+            {'modifier_group': group_id}, format='json',
+        )
+        self.assertEqual(resp4.status_code, status.HTTP_201_CREATED, resp4.content)
+        self.assertEqual(ProductModifierGroup.objects.filter(product=self.pizza).count(), 1)
+
+    def test_negative_entered_qty_accepted_for_removal_modifier(self):
+        group = ModifierGroup.objects.create(tenant=self.tenant, name='Removals')
+        option = ModifierOption.objects.create(tenant=self.tenant, modifier_group=group, name='No Onion')
+        resp = self.client.post(
+            reverse('modifier-option-consumption-list', args=[option.id]),
+            {'component_product': self.cheese.id, 'entered_qty': '-20'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        self.assertEqual(resp.json()['qty_base'], '-20.0000')
+
+    def test_zero_entered_qty_rejected(self):
+        group = ModifierGroup.objects.create(tenant=self.tenant, name='Zero Test')
+        option = ModifierOption.objects.create(tenant=self.tenant, modifier_group=group, name='Nothing')
+        resp = self.client.post(
+            reverse('modifier-option-consumption-list', args=[option.id]),
+            {'component_product': self.cheese.id, 'entered_qty': '0'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_cashier_forbidden_to_create_group(self):
+        self.client.force_authenticate(user=self.cashier)
+        resp = self.client.post(reverse('modifier-group-list'), {'name': 'Cashier Group'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_duplicate_group_name_rejected(self):
+        ModifierGroup.objects.create(tenant=self.tenant, name='Dup Group')
+        resp = self.client.post(reverse('modifier-group-list'), {'name': 'Dup Group'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_detach_modifier_group_from_product(self):
+        group = ModifierGroup.objects.create(tenant=self.tenant, name='Detach Group')
+        link = ProductModifierGroup.objects.create(
+            tenant=self.tenant, product=self.pizza, modifier_group=group,
+        )
+        resp = self.client.delete(
+            reverse('product-modifier-group-detail', args=[self.pizza.id, link.id]),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(ProductModifierGroup.objects.filter(pk=link.id).exists())
