@@ -2462,6 +2462,84 @@ Full suite: **699/699 passed** (684 baseline + 15 new).
 **Not touched:** `pos` app's models/migrations, sale-posting path, Recipe/
 Modifier models (Batches 3-4), any frontend file, any GL code.
 
+### Batch 3 — `Recipe` / `RecipeVersion` / `RecipeLine` models + cost calculation service (backend)
+
+**Goal:** the core BOM structure — a container (`Recipe`) holding
+versioned, statused snapshots (`RecipeVersion`) of component quantities
+(`RecipeLine`), plus a service that rolls the cost up live from each
+component's current branch-scoped average cost — with D-26 (max nesting
+depth 2) and D-27 (no circular references) enforced at save time.
+
+**Files changed:**
+- `recipes/models.py` — `Recipe` (`product` FK + nullable `variant` FK,
+  paired unique constraints mirroring `InventoryCost.branch`'s
+  `(product, branch)` + partial-`branch IS NULL` pattern from Batch 1, just
+  applied to `(product, variant)`); `RecipeVersion` (`draft`/`active`/
+  `archived` status, partial unique constraint capping at most one
+  `active` version per recipe — same "one default" shape as
+  `ProductUnit.is_base`); `RecipeLine` (`component_product` **PROTECT**ed,
+  `component_unit` + `entered_qty` → `qty_base` following the exact
+  "entered + unit → base" pattern `SaleItem`/`PurchaseInvoiceLine` already
+  established, `CHECK entered_qty > 0`). Recipe *cost* is never stored —
+  only quantities are versioned; cost is always computed fresh from live
+  component costs (the owner's own requirement: the recipe stays the
+  same, but a sale's cost moves automatically when an ingredient's price
+  moves).
+- `recipes/migrations/0002_recipe_recipeversion_recipeline_and_more.py` —
+  `CreateModel` × 3 + 5 constraints, no data.
+- New `recipes/services/costing.py` — mirrors `pos/services/costing.py`'s
+  house style (pure functions, `RecipeError`, `__all__`):
+  `get_active_recipe(product, variant=None)`,
+  `compute_recipe_cost(recipe_version, branch=None)` (rolls up via
+  `pos.services.costing.get_cost_for_sale` per line, D-12 line-level 2dp
+  rounding, total = Σ already-rounded lines), `validate_recipe_lines`
+  (walks each candidate component's own sub-recipe chain — depth capped at
+  `MAX_RECIPE_DEPTH = 2`, raises on a chain revisiting an ancestor
+  product), `activate_recipe_version` (atomically archives whatever was
+  previously active on the same recipe).
+- `recipes/serializers.py` — `RecipeSerializer`, `RecipeLineSerializer`
+  (tenant + same-product validation for `component_product`/
+  `component_unit`, `entered_qty > 0`), `RecipeVersionSerializer` (nested
+  line writes — pops `lines` from `validated_data`, calls
+  `validate_recipe_lines` before creating anything, resolves
+  `component_unit` to the component's base unit via
+  `units_svc.get_base_product_unit` when omitted, computes `qty_base` via
+  `units_svc.convert_to_base` per line — always created as `DRAFT`).
+- `recipes/views.py` — `RecipeListCreateView`/`DetailView` (nested under
+  `products/<pk>/`, `IsCashierOrAbove` read / `IsManagerOrAbove` write, same
+  split as every other catalog endpoint), `RecipeVersionListCreateView`/
+  `DetailView`/`ActivateView` (Manager+-only for both read and write — a
+  recipe's exact quantities are a sensitive editorial detail, not a
+  routine catalog read, unlike Variants/Units/Price-Tiers).
+- `recipes/urls.py` — `products/<pk>/recipes/` (+detail), `.../versions/`
+  (+detail/activate) — two-level nesting, mirrors `pos`'s
+  `products/<pk>/units/<pk>/tier-prices/` shape.
+
+**Tests:** new `recipes/test_recipes.py` (17 tests) —
+`RecipeCostCalculationTests` (the owner's own worked example: Chicken
+180g/Lettuce 120g/Caesar Sauce 40g/Parmesan 20g/Bread 60g → 38.00 total;
+branch-scoped cost differs per branch from the same recipe definition; a
+later ingredient purchase changes the computed cost without touching the
+recipe's own rows); `RecipeDepthCycleValidationTests` (depth-2 sub-recipe
+allowed, depth-3 rejected, self-reference rejected, indirect/circular
+reference rejected); `RecipeVersionModelTests` (one-active-version DB
+constraint, `activate_recipe_version` atomically archives the prior
+active version, `get_active_recipe` returns `None` for a draft-only
+recipe, `component_product` PROTECT blocks deletion, `(product, variant)`
+uniqueness, a product's base recipe and its variant's recipe are fully
+independent rows); `RecipeApiTests` (create recipe → create draft version
+with nested lines → activate, empty-lines rejected with 400, cashier
+forbidden to write versions, a self-referencing line rejected with a
+friendly 400 not a 500).
+
+**Verification:** `manage.py check` clean. `manage.py makemigrations
+--check --dry-run` clean (exactly the one expected migration). Full suite:
+**716/716 passed** (699 baseline + 17 new).
+
+**Not touched:** `pos` app's sale-posting path (Batch 5's job), Modifier
+models (Batch 4), any frontend file, any GL code. `Product.cost`/
+`InventoryCost` untouched by this batch — recipe cost is a pure read.
+
 ---
 
 *(Later batches of Sprint 5 get their own entries here as they land.)*
