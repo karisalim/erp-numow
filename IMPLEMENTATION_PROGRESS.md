@@ -3340,4 +3340,71 @@ or a documentation correction.
 
 ---
 
+### Sprint 5 Batch 8 — Frontend: Recipe Management Application
+
+New, fully independent React feature app at `superpos/src/apps/recipes/`
+(api/components/hooks/pages/routes/services/store/types/utils), covering
+Recipes/BOM, Size Variants, Modifiers, and food-cost reporting — the first
+frontend consumer of every Sprint 5 Batch 1-6 backend endpoint.
+
+- **Routing:** `/recipes`, `/recipes/new`, `/recipes/:id`,
+  `/recipes/:id/edit`, `/recipes/:id/versions`, `/recipes/modifiers`,
+  `/recipes/reports`, mounted into `App.tsx` as a single
+  `/recipes/*` route (`RecipesApp` from `apps/recipes/routes/index.tsx`) —
+  the only integration point; POS/Inventory/Sales routing untouched.
+- **Reusable editor:** `RecipeProductForm` (component, not a page) owns all
+  ingredient-editing behavior, taking `productId`/`variantId` — designed so
+  a future batch can embed it directly inside `ProductFormModal` when
+  `product_type === 'recipe_product'`, with no rewrite.
+- **Zero business logic in React** (grep-verified): no cost/margin
+  computed client-side anywhere; `CostPreview.tsx` explicitly explains why
+  no live cost preview exists (see Gap G-1 below) instead of faking one;
+  every save just POSTs the Sprint 5 request shape and renders whatever
+  the server returns.
+- **Independent state:** `recipesStore` (zustand) holds only the Recipe
+  Editor's in-progress draft lines — nothing Recipes-specific was added to
+  `posStore`/`appStore`.
+- **Design system:** reuses `DataTable`/`Drawer`/`Modal`/`ConfirmDialog`/
+  `FormField`/`Badge`/`Icon`/`Tabs`/`useQuery` etc. verbatim — no new
+  design tokens.
+
+**4 real gaps found and documented (not worked around):**
+- G-1: no backend endpoint computes a recipe's cost before it's sold —
+  `CostPreview` shows an honest explanation + a link to Recipe Reports
+  instead of reimplementing the AVCO lookup in React.
+- G-2: `GET /products/` has no `product_type` filter — the Recipe list
+  fetches a larger page and filters client-side for display.
+- G-3: no tenant-wide "recipe completeness"/variant-count endpoint —
+  `RecipeSummary` only shows the 2 stats derivable from data already
+  fetched, rather than N+1-looping to fake the rest.
+- G-4: `ModifierGroup.selection_type`/`min_select`/`max_select` have no
+  edit UI yet (low priority — POS doesn't consume them yet either).
+
+Full file/component/route/API/gap inventory:
+`SPRINT5_BATCH8_ARCHITECTURE_REVIEW.md`.
+
+**Files changed outside `apps/recipes/`:** `App.tsx` (+2 lines), `Sidebar.tsx`
+(+1 nav entry), `auth/permissions.ts` (+1 line, cosmetic role floor).
+**Also fixed (environment, unrelated to this feature but blocking any
+build verification):** `tsconfig.json` — added `"ignoreDeprecations":
+"6.0"` (the TypeScript 6.0.2 now installed here deprecated `baseUrl`,
+which made `tsc` fail before any code could be checked); the compiler's
+own suggested fix, behavior-neutral.
+
+**Verification:** `npm run build` clean (`tsc` + `vite build`). Full
+real-browser click-through (Playwright + real Django/Postgres backend, not
+mocked): seeded a demo tenant/ingredients/recipe product, then created a
+recipe (search → pick ingredient → unit/qty → save draft → activate),
+verified version history, created a size variant, created a modifier group
++ option (including the backend's own duplicate-name validation surfacing
+correctly through the UI on a repeat attempt), and loaded the Reports page
+with its branch/date filters against both report endpoints. No console
+errors beyond a pre-existing, app-wide `favicon.ico` 404.
+
+**Not touched:** any backend file, any POS/Sales/Inventory frontend page,
+`ProductFormModal.tsx` (the future embed point for `RecipeProductForm` —
+deliberately deferred, not started this batch).
+
+---
+
 *(Later batches of Sprint 5 get their own entries here as they land.)*

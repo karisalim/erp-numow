@@ -32,6 +32,7 @@ const FinancePage    = React.lazy(() => import('./pages/finance/FinancePage').th
 const UnitsPage       = React.lazy(() => import('./pages/units/UnitsPage').then(m => ({ default: m.UnitsPage })));
 const PriceTiersPage  = React.lazy(() => import('./pages/pricing/PriceTiersPage').then(m => ({ default: m.PriceTiersPage })));
 const CategoriesPage  = React.lazy(() => import('./pages/categories/CategoriesPage').then(m => ({ default: m.CategoriesPage })));
+const RecipesApp      = React.lazy(() => import('./apps/recipes/routes').then(m => ({ default: m.RecipesApp })));
 
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { isAuthenticated } = useAuthStore();
@@ -114,6 +115,7 @@ export const App: React.FC = () => {
       <Route path="/units" element={<Guarded min="Manager"><Lazy><UnitsPage /></Lazy></Guarded>} />
       <Route path="/price-tiers" element={<Guarded min="Manager"><Lazy><PriceTiersPage /></Lazy></Guarded>} />
       <Route path="/categories" element={<Guarded min="Manager"><Lazy><CategoriesPage /></Lazy></Guarded>} />
+      <Route path="/recipes/*" element={<Guarded min="Manager"><Lazy><RecipesApp /></Lazy></Guarded>} />
 
       <Route path="/" element={<Navigate to="/pos" replace />} />
       <Route path="*" element={<Navigate to="/pos" replace />} />

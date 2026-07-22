@@ -65,6 +65,7 @@ const NAV_GROUPS: NavGroup[] = [
     accent: ACCENT_VIOLET,
     items: [
       { path: '/products',   labelKey: 'nav.products',   fallback: 'Products',   icon: 'tag' },
+      { path: '/recipes',    labelKey: 'nav.recipes',    fallback: 'Recipes',    icon: 'doc' },
       { path: '/categories', labelKey: 'nav.categories', fallback: 'Categories', icon: 'archive' },
       { path: '/units',      labelKey: 'nav.units',      fallback: 'Units',      icon: 'box' },
       { path: '/price-tiers', labelKey: 'nav.priceTiers', fallback: 'Price Tiers', icon: 'chart' },
