@@ -7,6 +7,7 @@ import { Header } from '../components/layout/Header';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 import { Badge } from '../components/ui/Badge';
+import { ProductTypeBadge } from '../components/ui/StatusBadges';
 import { Icon } from '../components/ui/Icon';
 import { Modal } from '../components/ui/Modal';
 import { ProductFormModal, type FormMode } from '../components/products/ProductFormModal';
@@ -292,6 +293,7 @@ export const ProductsPage: React.FC = () => {
                   <th className="text-start font-semibold">SKU</th>
                   <th className="text-start font-semibold">Barcode</th>
                   <th className="text-start font-semibold">Category</th>
+                  <th className="text-start font-semibold">Type</th>
                   <th className="text-end font-semibold">Cost</th>
                   <th className="text-end font-semibold">Price</th>
                   <th className="text-end font-semibold">Margin</th>
@@ -303,7 +305,7 @@ export const ProductsPage: React.FC = () => {
               <tbody>
                 {loading && (
                   <tr>
-                    <td colSpan={10} className="py-12 text-center text-neutral-500">
+                    <td colSpan={11} className="py-12 text-center text-neutral-500">
                       <span className="inline-flex items-center gap-2">
                         <span className="w-4 h-4 border-2 border-neutral-300 border-t-brand-500 rounded-full spin" />
                         Loading products…
@@ -337,6 +339,7 @@ export const ProductsPage: React.FC = () => {
                       <td className="font-mono text-[12px] text-neutral-600">{p.sku}</td>
                       <td className="font-mono text-[12px] text-neutral-600">{p.barcode}</td>
                       <td className="text-neutral-600">{categoryLabel}</td>
+                      <td><ProductTypeBadge productType={p.product_type} /></td>
                       <td className="text-end font-mono tabular-nums text-neutral-500">{money(p.cost)}</td>
                       <td className="text-end font-mono tabular-nums font-semibold">{money(p.price)}</td>
                       <td className="text-end font-mono tabular-nums text-neutral-600">{margin}%</td>
@@ -355,7 +358,7 @@ export const ProductsPage: React.FC = () => {
 
                 {!loading && visible.length === 0 && !error && (
                   <tr>
-                    <td colSpan={10} className="py-12 text-center text-neutral-500">
+                    <td colSpan={11} className="py-12 text-center text-neutral-500">
                       No products match these filters.
                     </td>
                   </tr>

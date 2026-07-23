@@ -1,6 +1,7 @@
 import React from 'react';
 import { LoadingState, EmptyState, QueryErrorState } from './states';
 import { Pagination } from './Pagination';
+import { Icon } from './Icon';
 import type { ApiError } from '../../utils/apiError';
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -8,6 +9,12 @@ import type { ApiError } from '../../utils/apiError';
  * uppercase 11px headers on n50, 13.5px cells, row hover, right-aligned
  * numeric columns. Owns loading / empty / error / pagination so pages
  * don't re-implement them.
+ *
+ * Phase 3 (Enterprise UX Polish, item 8): two opt-in, additive capabilities
+ * — column sorting (`sortable` on a column + `sort`/`onSort` on the table)
+ * and a sticky header (`stickyHeader`). Both default to the previous,
+ * unchanged behavior, so every existing call site across the app keeps
+ * rendering exactly as before unless it explicitly opts in.
  * ──────────────────────────────────────────────────────────────────────────── */
 
 export interface Column<T> {
@@ -18,7 +25,15 @@ export interface Column<T> {
   /** Monospaced tabular numbers. */
   mono?: boolean;
   className?: string;
+  /** Clickable header that toggles `onSort(key)` — only rendered as
+   * clickable when the table is also given `sort`/`onSort`. */
+  sortable?: boolean;
   render: (row: T) => React.ReactNode;
+}
+
+export interface SortState {
+  key: string;
+  dir: 'asc' | 'desc';
 }
 
 interface DataTableProps<T> {
@@ -38,6 +53,14 @@ interface DataTableProps<T> {
   pageSize?: number;
   count?: number;
   onPage?: (page: number) => void;
+  /** Current sort + toggle handler — omit both to leave headers static
+   * (existing behavior). Sort direction/logic is the caller's — this
+   * component only renders the indicator and forwards the click. */
+  sort?: SortState;
+  onSort?: (key: string) => void;
+  /** Keep the header row visible while the table body scrolls — opt-in
+   * since it requires a bounded scroll container the caller controls. */
+  stickyHeader?: boolean;
   className?: string;
 }
 
@@ -57,6 +80,9 @@ export function DataTable<T>({
   pageSize,
   count,
   onPage,
+  sort,
+  onSort,
+  stickyHeader,
   className = '',
 }: DataTableProps<T>) {
   let body: React.ReactNode = null;
@@ -75,15 +101,35 @@ export function DataTable<T>({
         <table className="w-full border-collapse min-w-[560px]">
           <thead>
             <tr>
-              {columns.map((c) => (
-                <th
-                  key={c.key}
-                  className={`text-start text-[11px] tracking-wider uppercase text-neutral-500 font-bold px-3.5 py-2.5 border-b border-neutral-200 bg-neutral-50 whitespace-nowrap
-                    ${c.align === 'end' ? 'text-end' : ''} ${c.className ?? ''}`}
-                >
-                  {c.header}
-                </th>
-              ))}
+              {columns.map((c) => {
+                const isSortable = !!(c.sortable && onSort);
+                const isSorted = sort?.key === c.key;
+                return (
+                  <th
+                    key={c.key}
+                    aria-sort={isSorted ? (sort!.dir === 'asc' ? 'ascending' : 'descending') : undefined}
+                    className={`text-start text-[11px] tracking-wider uppercase text-neutral-500 font-bold px-3.5 py-2.5 border-b border-neutral-200 bg-neutral-50 whitespace-nowrap
+                      ${stickyHeader ? 'sticky top-0 z-10' : ''}
+                      ${c.align === 'end' ? 'text-end' : ''} ${c.className ?? ''}`}
+                  >
+                    {isSortable ? (
+                      <button
+                        type="button"
+                        onClick={() => onSort!(c.key)}
+                        className={`inline-flex items-center gap-1 focus-ring rounded hover:text-neutral-800 transition-colors
+                          ${c.align === 'end' ? 'flex-row-reverse' : ''}`}
+                      >
+                        {c.header}
+                        <Icon
+                          name={isSorted ? (sort!.dir === 'asc' ? 'arrowUp' : 'arrowDn') : 'arrowDn'}
+                          size={11}
+                          className={isSorted ? 'text-brand-500' : 'text-neutral-300'}
+                        />
+                      </button>
+                    ) : c.header}
+                  </th>
+                );
+              })}
             </tr>
           </thead>
           {!body && (

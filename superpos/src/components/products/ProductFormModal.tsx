@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AxiosError } from 'axios';
 import apiClient from '../../api/client';
@@ -6,10 +6,12 @@ import { Modal } from '../ui/Modal';
 import { Button } from '../ui/Button';
 import { Icon } from '../ui/Icon';
 import { Badge } from '../ui/Badge';
+import { FormField, SelectField } from '../ui/FormField';
+import { ProductTypeBadge, StockStatusBadge, PosVisibilityBadge } from '../ui/StatusBadges';
 import { categoriesApi, asResults } from '../../api/erp';
 import { flattenTree } from '../../utils/tree';
 import { ProductCostHistoryDrawer } from './ProductCostHistoryDrawer';
-import { RecipeStatusStepper } from './RecipeStatusStepper';
+import { RecipeWorkflowCard } from './RecipeWorkflowCard';
 import { DerivedCostField } from './DerivedCostField';
 import { useProductTypeMetadata, findTypeMetadata } from '../../hooks/useProductTypeMetadata';
 import type { Product, ProductUnit } from '../../types';
@@ -77,22 +79,23 @@ const HIDDEN_DEFAULTS = {
  * (`pos.services.product_types.PRODUCT_TYPE_BEHAVIOR`, fetched once and
  * cached by `useProductTypeMetadata`) — there is no second, hand-copied
  * behavior matrix in this file anymore. This function is a pure renderer:
- * it maps server-supplied booleans to which inputs show, nothing more.
- * Every rule this drives (can_sell, show_on_pos, affects_stock/
+ * it maps server-supplied booleans to which sections/inputs show, nothing
+ * more. Every rule this drives (can_sell, show_on_pos, affects_stock/
  * track_inventory) is still independently enforced server-side
- * (`ProductSerializer.validate`, `SaleSerializer`) regardless of what this
- * form shows or hides — the backend never trusts this. `meta` is
- * `undefined` only before the metadata fetch resolves; callers gate on
- * that via `typesLoading` before rendering type-dependent fields. */
+ * (`ProductSerializer.validate`, `SaleSerializer`, `PurchaseInvoiceLine
+ * Serializer`) regardless of what this form shows or hides — the backend
+ * never trusts this. `meta` is `undefined` only before the metadata fetch
+ * resolves; callers gate on that via `typesLoading`. */
 function fieldVisibility(meta: ProductTypeMetadata | undefined) {
   const b = meta?.behavior;
   const required = new Set(meta?.required_fields ?? []);
   const recommended = new Set(meta?.recommended_fields ?? []);
   return {
-    showSale: !!b?.can_sell,          // Price, Show on POS, Tax rate, Discountable, Sales category
-    showStock: !!b?.track_inventory,  // Stock, Reorder, Unit, Pack qty, Weighted, Inventory category
-    showCost: !!b?.requires_cost,     // Cost (opening cost on create; AVCO-derived read-only on edit)
-    showBuildRecipe: meta?.value === 'recipe_product',
+    showSale: !!b?.can_sell,          // Sales section: Price, Tax rate, Sales category
+    showStock: !!b?.track_inventory,  // Inventory section: Stock, Unit, Pack qty, Weighted, Inventory category
+    showCost: !!b?.requires_cost,     // Accounting section: opening Cost (create) / read-only mirror (edit)
+    canPurchase: !!b?.can_purchase,   // Purchasing section content
+    showBuildRecipe: meta?.value === 'recipe_product', // Recipe section
     required,
     recommended,
   };
@@ -231,6 +234,56 @@ function parseFieldErrors(err: unknown): { fieldErrors: Record<string, string>; 
   return { fieldErrors, formError };
 }
 
+type Visibility = ReturnType<typeof fieldVisibility>;
+type FieldKey = keyof FormState;
+
+/** Phase 3 (Enterprise UX Polish) — the ONE place client-side field rules
+ * live, reused for both live inline validation (as the user types) and the
+ * pre-submit check, so the two never drift apart. These mirror
+ * backend-enforced constraints only (required fields, the `tax_rate`
+ * 0-1 CHECK constraint, positive-quantity constraints) — never a new rule
+ * invented client-side; the backend is always re-checked on submit
+ * regardless of what this says. */
+function computeFieldError(key: FieldKey, form: FormState, visibility: Visibility): string | undefined {
+  switch (key) {
+    case 'name':
+      return form.name.trim() ? undefined : 'Name is required.';
+    case 'barcode':
+      return form.barcode.trim() ? undefined : 'Barcode is required.';
+    case 'price': {
+      if (!visibility.showSale) return undefined;
+      const n = Number(form.price);
+      if (!form.price || Number.isNaN(n) || n <= 0) return 'Price must be greater than 0.';
+      return undefined;
+    }
+    case 'tax_rate': {
+      if (!visibility.showSale) return undefined;
+      const n = Number(form.tax_rate);
+      if (form.tax_rate === '' || Number.isNaN(n) || n < 0 || n > 1) {
+        return 'Tax rate must be between 0 and 1 (e.g. 0.14 for 14%).';
+      }
+      return undefined;
+    }
+    case 'pack_qty': {
+      if (!visibility.showStock) return undefined;
+      const n = Number(form.pack_qty);
+      if (!form.pack_qty || Number.isNaN(n) || n <= 0) return 'Pack quantity must be greater than 0.';
+      return undefined;
+    }
+    case 'plu': {
+      if (!(visibility.showStock && form.weighted)) return undefined;
+      const plu = form.plu.trim();
+      if (!plu) return 'PLU code is required for weighted products.';
+      if (plu.length > 10) return 'PLU code must be 10 characters or fewer.';
+      return undefined;
+    }
+    default:
+      return undefined;
+  }
+}
+
+const VALIDATED_KEYS: FieldKey[] = ['name', 'barcode', 'price', 'tax_rate', 'pack_qty', 'plu'];
+
 /* ─────────────────────────────────────────────────────────────────────────── */
 
 export const ProductFormModal: React.FC<Props> = ({
@@ -252,6 +305,12 @@ export const ProductFormModal: React.FC<Props> = ({
   const [saving, setSaving]         = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [formError, setFormError]   = useState<string | null>(null);
+  // Inline validation (item 4): a field's error is shown once the user has
+  // interacted with it (blur) OR after a submit attempt — never on a
+  // pristine, untouched field, so a blank required input doesn't scream
+  // "invalid" the instant the form opens.
+  const [touched, setTouched]       = useState<Partial<Record<FieldKey, boolean>>>({});
+  const [submitAttempted, setSubmitAttempted] = useState(false);
 
   const [salesCategories, setSalesCategories] = useState<CategoryTreeNode[]>([]);
   const [inventoryCategories, setInventoryCategories] = useState<CategoryTreeNode[]>([]);
@@ -297,29 +356,27 @@ export const ProductFormModal: React.FC<Props> = ({
       setFieldErrors((fe) => { const c = { ...fe }; delete c[k]; return c; });
     }
   };
+  const blur = (k: FieldKey) => setTouched((t) => (t[k] ? t : { ...t, [k]: true }));
 
-  const validateLocal = (): string | null => {
-    if (!form.name.trim())    return 'Name is required.';
-    if (!form.barcode.trim()) return 'Barcode is required.';
-    if (visibility.showSale) {
-      const price = Number(form.price);
-      if (!form.price || Number.isNaN(price) || price <= 0) return 'Price must be greater than 0.';
-    }
-    if (visibility.showStock && form.weighted) {
-      const plu = form.plu.trim();
-      if (!plu || plu.length > 10) return 'PLU code is required (1–10 characters) for weighted products.';
-    }
-    return null;
-  };
+  /** Server error wins (it's the backend's own word); otherwise fall back
+   * to the live client-side rule, but only once the field is "dirty"
+   * (touched or a submit was attempted). */
+  const displayError = (k: FieldKey): string | undefined =>
+    fieldErrors[k] ?? ((touched[k] || submitAttempted) ? computeFieldError(k, form, visibility) : undefined);
+
+  const liveErrors = useMemo(
+    () => VALIDATED_KEYS.map((k) => computeFieldError(k, form, visibility)).filter(Boolean),
+    [form, visibility],
+  );
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (saving || isView) return;
     setFormError(null);
     setFieldErrors({});
+    setSubmitAttempted(true);
 
-    const localError = validateLocal();
-    if (localError) { setFormError(localError); return; }
+    if (liveErrors.length > 0) return; // inline errors are already visible; nothing more to say
 
     setSaving(true);
     try {
@@ -331,8 +388,8 @@ export const ProductFormModal: React.FC<Props> = ({
       // a direct "Build Recipe" offer instead of just closing — the exact
       // journey requested (Save → Build Recipe → Recipe Editor, no
       // re-search). Editing an existing product (even to Recipe type)
-      // still just closes normally; the persistent footer button (below)
-      // covers that case without hijacking every edit-save.
+      // still just closes normally; the persistent Recipe workflow card
+      // (below) covers that case without hijacking every edit-save.
       if (!isEdit && resp.data.product_type === 'recipe_product') {
         setJustCreatedRecipeProduct(resp.data);
       } else {
@@ -354,7 +411,9 @@ export const ProductFormModal: React.FC<Props> = ({
 
   // Batch 8 production-readiness pass: the "Product → Save → Build Recipe
   // → Recipe Editor" journey — a brand-new Recipe product goes straight to
-  // this screen instead of the modal just closing.
+  // this screen instead of the modal just closing. Confirms item 6's
+  // constraint too: "Build Recipe" only ever appears once the product was
+  // actually created (this screen literally cannot render before then).
   if (justCreatedRecipeProduct) {
     return (
       <Modal title="Recipe product created" onClose={() => onSuccess('created', justCreatedRecipeProduct)} maxWidth="max-w-[480px]">
@@ -394,13 +453,20 @@ export const ProductFormModal: React.FC<Props> = ({
     );
   }
 
+  const savingProps = { disabled: isView || saving, readOnly: isView };
+
   return (
     <>
-    <Modal title={title} onClose={onClose} maxWidth="max-w-[640px]">
-      <form onSubmit={submit} className="flex flex-col">
+    <Modal title={title} onClose={onClose} maxWidth={tab === 'full' ? 'max-w-[760px]' : 'max-w-[640px]'}>
+      {/* `noValidate`: item 4 explicitly forbids relying on browser popup
+          alerts for validation — every rule below surfaces inline at its
+          own field (`computeFieldError`/`displayError`) instead. Without
+          this, the native "Please fill out this field" tooltip would fire
+          on submit and swallow the event before our own handler runs. */}
+      <form onSubmit={submit} noValidate className="flex flex-col max-h-[80vh]">
         {/* Tab switcher — hidden in view mode */}
         {!isView && (
-          <div className="px-6 pt-4">
+          <div className="px-6 pt-4 flex items-center gap-3 flex-wrap">
             <div className="inline-flex bg-neutral-100 rounded-md p-0.5">
               <TabButton active={tab === 'quick'} onClick={() => setTab('quick')} disabled={isEdit}>
                 Quick Add
@@ -410,14 +476,25 @@ export const ProductFormModal: React.FC<Props> = ({
               </TabButton>
             </div>
             {isEdit && (
-              <span className="ms-3 text-[12px] text-neutral-500">
+              <span className="text-[12px] text-neutral-500">
                 Editing uses the full form.
               </span>
+            )}
+            {initialProduct && (
+              <div className="flex items-center gap-1.5 ms-auto">
+                <ProductTypeBadge productType={initialProduct.product_type} />
+                {visibility.showStock && (
+                  <StockStatusBadge stock={Number(form.stock)} reorder={Number(form.reorder)} />
+                )}
+                {typeMeta && <PosVisibilityBadge showOnPos={form.show_on_pos} canSell={visibility.showSale} />}
+              </div>
             )}
           </div>
         )}
 
-        {/* Form error banner */}
+        {/* Form error banner — reserved for SERVER-side errors only; every
+            client-known rule surfaces inline at its own field instead of a
+            popup/banner (item 4). */}
         {formError && (
           <div className="mx-6 mt-4 flex items-start gap-2 rounded-md border border-danger-500/30 bg-danger-50 px-3 py-2.5 text-[13px] text-danger-700">
             <Icon name="alert" size={16} className="mt-0.5 shrink-0" />
@@ -425,324 +502,299 @@ export const ProductFormModal: React.FC<Props> = ({
           </div>
         )}
 
-        <div className="p-6 grid grid-cols-2 gap-x-4 gap-y-3">
-          <Field label="Name" required error={fieldErrors.name} className="col-span-2">
-            <input
-              type="text" value={form.name} disabled={isView || saving}
-              onChange={(e) => set('name', e.target.value)}
-              className={inputCls(!!fieldErrors.name, isView)}
-            />
-          </Field>
+        <div className="p-6 overflow-y-auto space-y-6">
+          {/* ── General ─────────────────────────────────────────────── */}
+          <Section title="General" icon="doc" description="Identity — how this product is found and named.">
+            <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+              <FormField
+                label="Name" required showValid
+                value={form.name} onBlur={() => blur('name')}
+                error={displayError('name')}
+                disabled={savingProps.disabled} readOnly={savingProps.readOnly}
+                onChange={(e) => set('name', e.target.value)}
+                containerClassName="col-span-2"
+              />
+              <FormField
+                label="Barcode" required showValid
+                value={form.barcode} onBlur={() => blur('barcode')}
+                error={displayError('barcode')}
+                disabled={savingProps.disabled} readOnly={savingProps.readOnly}
+                onChange={(e) => set('barcode', e.target.value)}
+              />
+              <SelectField
+                label="Category" hint="Legacy flat category — kept for backward compatibility."
+                value={form.category} disabled={savingProps.disabled}
+                onChange={(e) => set('category', e.target.value)}
+              >
+                <option value="">— None —</option>
+                {categories.map((c) => <option key={c.id} value={String(c.id)}>{c.name}</option>)}
+              </SelectField>
 
-          <Field label="Barcode" required error={fieldErrors.barcode}>
-            <input
-              type="text" value={form.barcode} disabled={isView || saving}
-              onChange={(e) => set('barcode', e.target.value)}
-              className={inputCls(!!fieldErrors.barcode, isView)}
-            />
-          </Field>
+              {tab === 'full' && (
+                <>
+                  <FormField
+                    label="SKU" hint="Defaults to barcode when left blank."
+                    value={form.sku} disabled={savingProps.disabled} readOnly={savingProps.readOnly}
+                    onChange={(e) => set('sku', e.target.value)}
+                  />
+                  <SelectField
+                    label="Product type" loading={typesLoading}
+                    hint="Governs every section below — required fields, sale/purchase/inventory behavior."
+                    value={form.product_type} disabled={savingProps.disabled || typesLoading}
+                    onChange={(e) => set('product_type', e.target.value as ProductTypeValue)}
+                  >
+                    {(typeMetaList ?? []).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </SelectField>
 
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="color" value={form.color} disabled={savingProps.disabled}
+                      onChange={(e) => set('color', e.target.value)}
+                      className="w-10 h-10 rounded-md border border-neutral-300 bg-white cursor-pointer disabled:cursor-not-allowed"
+                    />
+                    <FormField
+                      label="Color"
+                      value={form.color} disabled={savingProps.disabled} readOnly={savingProps.readOnly}
+                      onChange={(e) => set('color', e.target.value)}
+                      className="font-mono text-[12px]"
+                      containerClassName="flex-1"
+                    />
+                  </div>
+
+                  <CheckboxField
+                    label="Active (sellable)"
+                    checked={form.active} disabled={savingProps.disabled}
+                    onChange={(v) => set('active', v)}
+                  />
+
+                  {initialProduct?.behavior && (
+                    <div className="col-span-2 -mt-1 flex flex-wrap gap-1.5">
+                      {Object.entries(initialProduct.behavior)
+                        .filter(([, v]) => v)
+                        .map(([flag]) => (
+                          <Badge key={flag} kind="gray">{flag.replace(/_/g, ' ')}</Badge>
+                        ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </Section>
+
+          {/* ── Sales ───────────────────────────────────────────────── */}
           {visibility.showSale && (
-            <Field label="Price" required error={fieldErrors.price}>
-              <input
-                type="number" step="0.01" min="0"
-                value={form.price} disabled={isView || saving}
-                onChange={(e) => set('price', e.target.value)}
-                className={inputCls(!!fieldErrors.price, isView)}
-              />
-            </Field>
+            <Section title="Sales" icon="cash" description="What a customer pays and where this shows up on the menu.">
+              <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+                <FormField
+                  label="Price" required showValid
+                  type="number" step="0.01" min="0"
+                  value={form.price} onBlur={() => blur('price')}
+                  error={displayError('price')}
+                  disabled={savingProps.disabled} readOnly={savingProps.readOnly}
+                  onChange={(e) => set('price', e.target.value)}
+                />
+                {tab === 'full' && (
+                  <FormField
+                    label="Tax rate (fraction)"
+                    type="number" step="0.01" min="0" max="1"
+                    value={form.tax_rate} onBlur={() => blur('tax_rate')}
+                    error={displayError('tax_rate')}
+                    disabled={savingProps.disabled} readOnly={savingProps.readOnly}
+                    onChange={(e) => set('tax_rate', e.target.value)}
+                  />
+                )}
+                {tab === 'full' && (
+                  <SelectField
+                    label="Sales category"
+                    recommended={visibility.recommended.has('sales_category')}
+                    hint="Menu/POS classification (category tree) — independent of the legacy Category above."
+                    value={form.sales_category} disabled={savingProps.disabled}
+                    onChange={(e) => set('sales_category', e.target.value)}
+                    containerClassName="col-span-2"
+                  >
+                    <option value="">— None —</option>
+                    {flattenTree(salesCategories).map(({ node, depth }) => (
+                      <option key={node.id} value={String(node.id)}>
+                        {'  '.repeat(depth)}{depth > 0 ? '↳ ' : ''}{node.name}
+                      </option>
+                    ))}
+                  </SelectField>
+                )}
+              </div>
+            </Section>
           )}
 
-          {visibility.showCost && (
-            <Field
-              label="Cost"
-              error={fieldErrors.cost}
-              hint={
-                (isEdit || isView) && initialProduct ? (
-                  <>
-                    Calculated automatically (moving-average) from purchases and stock counts.{' '}
-                    <button
-                      type="button"
-                      onClick={() => setShowCostHistory(true)}
-                      className="text-brand-600 hover:underline font-semibold"
-                    >
-                      View cost history
-                    </button>
-                  </>
-                ) : undefined
-              }
-            >
-              <input
-                type="number" step="0.01" min="0"
-                value={form.cost} disabled={isView || isEdit || saving}
-                onChange={(e) => set('cost', e.target.value)}
-                className={inputCls(!!fieldErrors.cost, isView || isEdit)}
-              />
-            </Field>
-          )}
-
-          {/* Recipe products have no cost of their own to enter — instead
-              of hiding the Cost section entirely, show the real, live,
-              server-computed derived cost (Batch 8 architectural-
-              improvement pass, item 4). Only once the product already
-              exists (create-mode has no recipe yet to derive from). */}
-          {!visibility.showCost && typeMeta?.value === 'recipe_product' && (isEdit || isView) && initialProduct && (
-            <DerivedCostField productId={initialProduct.id} />
-          )}
-
-          {visibility.showStock && (
-            <Field label="Stock" error={fieldErrors.stock} hint="Supports decimals for weighted SKUs">
-              <input
-                type="number" min="0" step="0.001"
-                value={form.stock} disabled={isView || saving}
-                onChange={(e) => set('stock', e.target.value)}
-                className={inputCls(!!fieldErrors.stock, isView)}
-              />
-            </Field>
-          )}
-
-          <Field label="Category" error={fieldErrors.category}>
-            <select
-              value={form.category} disabled={isView || saving}
-              onChange={(e) => set('category', e.target.value)}
-              className={inputCls(!!fieldErrors.category, isView)}
-            >
-              <option value="">— None —</option>
-              {categories.map((c) => (
-                <option key={c.id} value={String(c.id)}>{c.name}</option>
-              ))}
-            </select>
-          </Field>
-
-          {visibility.showStock && (
-            <>
-              <Field label="Unit" error={fieldErrors.unit}>
-                <select
-                  value={form.unit} disabled={isView || saving}
+          {/* ── Inventory ───────────────────────────────────────────── */}
+          {visibility.showStock && tab === 'full' && (
+            <Section title="Inventory" icon="box" description="What's on hand and how it's counted.">
+              <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+                <FormField
+                  label="Stock" hint="Supports decimals for weighted SKUs."
+                  type="number" min="0" step="0.001"
+                  value={form.stock} disabled={savingProps.disabled} readOnly={savingProps.readOnly}
+                  onChange={(e) => set('stock', e.target.value)}
+                />
+                <SelectField
+                  label="Unit"
+                  value={form.unit} disabled={savingProps.disabled}
                   onChange={(e) => set('unit', e.target.value as ProductUnit)}
-                  className={inputCls(!!fieldErrors.unit, isView)}
                 >
                   {UNIT_OPTIONS.map((u) => <option key={u} value={u}>{u}</option>)}
-                </select>
-              </Field>
-
-              <Field label="Pack qty" error={fieldErrors.pack_qty} hint="Pieces per sellable unit (e.g. 24 for a carton)">
-                <input
+                </SelectField>
+                <FormField
+                  label="Pack qty" hint="Pieces per sellable unit (e.g. 24 for a carton)."
                   type="number" min="0.001" step="0.001"
-                  value={form.pack_qty} disabled={isView || saving}
+                  value={form.pack_qty} onBlur={() => blur('pack_qty')}
+                  error={displayError('pack_qty')}
+                  disabled={savingProps.disabled} readOnly={savingProps.readOnly}
                   onChange={(e) => set('pack_qty', e.target.value)}
-                  className={inputCls(!!fieldErrors.pack_qty, isView)}
                 />
-              </Field>
-            </>
-          )}
-
-          {/* Full-add-only fields */}
-          {tab === 'full' && (
-            <>
-              <Field label="SKU" error={fieldErrors.sku}>
-                <input
-                  type="text" value={form.sku} placeholder="Defaults to barcode"
-                  disabled={isView || saving}
-                  onChange={(e) => set('sku', e.target.value)}
-                  className={inputCls(!!fieldErrors.sku, isView)}
-                />
-              </Field>
-
-              {visibility.showStock && (
-                <Field label="Reorder point" error={fieldErrors.reorder}>
-                  <input
-                    type="number" min="0" step="1"
-                    value={form.reorder} disabled={isView || saving}
-                    onChange={(e) => set('reorder', e.target.value)}
-                    className={inputCls(!!fieldErrors.reorder, isView)}
-                  />
-                </Field>
-              )}
-
-              {visibility.showSale && (
-                <Field label="Tax rate (fraction)" error={fieldErrors.tax_rate}>
-                  <input
-                    type="number" step="0.01" min="0" max="1"
-                    value={form.tax_rate} disabled={isView || saving}
-                    onChange={(e) => set('tax_rate', e.target.value)}
-                    className={inputCls(!!fieldErrors.tax_rate, isView)}
-                  />
-                </Field>
-              )}
-
-              <Field label="Color" error={fieldErrors.color}>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="color" value={form.color} disabled={isView || saving}
-                    onChange={(e) => set('color', e.target.value)}
-                    className="w-10 h-10 rounded-md border border-neutral-300 bg-white cursor-pointer disabled:cursor-not-allowed"
-                  />
-                  <input
-                    type="text" value={form.color} disabled={isView || saving}
-                    onChange={(e) => set('color', e.target.value)}
-                    className={`${inputCls(!!fieldErrors.color, isView)} font-mono text-[12px]`}
-                  />
-                </div>
-              </Field>
-
-              <Field label="Product type" error={fieldErrors.product_type} className="col-span-2">
-                <select
-                  value={form.product_type} disabled={isView || saving || typesLoading}
-                  onChange={(e) => set('product_type', e.target.value as ProductTypeValue)}
-                  className={inputCls(!!fieldErrors.product_type, isView)}
-                >
-                  {(typeMetaList ?? []).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                </select>
-              </Field>
-
-              {/* Item 3 (Batch 8 architectural-improvement pass): a
-                  visible Recipe Workflow status for an existing Recipe
-                  product — (No Recipe) -> Build Recipe -> Manage Versions
-                  -> Activate Version -> POS Ready, read from real backend
-                  state, never guessed. */}
-              {visibility.showBuildRecipe && isEdit && initialProduct && (
-                <RecipeStatusStepper
-                  productId={initialProduct.id}
-                  canSell={visibility.showSale}
-                  showOnPos={form.show_on_pos}
-                />
-              )}
-
-              {initialProduct?.behavior && (
-                <div className="col-span-2 -mt-1 flex flex-wrap gap-1.5">
-                  {Object.entries(initialProduct.behavior)
-                    .filter(([, v]) => v)
-                    .map(([flag]) => (
-                      <Badge key={flag} kind="gray">{flag.replace(/_/g, ' ')}</Badge>
-                    ))}
-                </div>
-              )}
-
-              {visibility.showSale && (
-              <Field
-                label="Sales category" error={fieldErrors.sales_category}
-                recommended={visibility.recommended.has('sales_category')}
-                hint="Menu/POS classification (Batch 2 tree) — independent of the legacy Category above."
-              >
-                <select
-                  value={form.sales_category} disabled={isView || saving}
-                  onChange={(e) => set('sales_category', e.target.value)}
-                  className={inputCls(!!fieldErrors.sales_category, isView)}
-                >
-                  <option value="">— None —</option>
-                  {flattenTree(salesCategories).map(({ node, depth }) => (
-                    <option key={node.id} value={String(node.id)}>
-                      {'  '.repeat(depth)}{depth > 0 ? '↳ ' : ''}{node.name}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-              )}
-
-              {visibility.showStock && (
-              <Field
-                label="Inventory category" error={fieldErrors.inventory_category}
-                recommended={visibility.recommended.has('inventory_category')}
-                hint="Stock/purchasing classification (Batch 2 tree)."
-              >
-                <select
-                  value={form.inventory_category} disabled={isView || saving}
+                <SelectField
+                  label="Inventory category"
+                  recommended={visibility.recommended.has('inventory_category')}
+                  hint="Stock/purchasing classification (category tree)."
+                  value={form.inventory_category} disabled={savingProps.disabled}
                   onChange={(e) => set('inventory_category', e.target.value)}
-                  className={inputCls(!!fieldErrors.inventory_category, isView)}
                 >
                   <option value="">— None —</option>
                   {flattenTree(inventoryCategories).map(({ node, depth }) => (
                     <option key={node.id} value={String(node.id)}>
-                      {'  '.repeat(depth)}{depth > 0 ? '↳ ' : ''}{node.name}
+                      {'  '.repeat(depth)}{depth > 0 ? '↳ ' : ''}{node.name}
                     </option>
                   ))}
-                </select>
-              </Field>
-              )}
+                </SelectField>
 
-              {visibility.showStock && (
-              <label className="flex items-center gap-2 text-[13px] text-neutral-700 mt-1">
-                <input
-                  type="checkbox" checked={form.weighted} disabled={isView || saving}
-                  onChange={(e) => set('weighted', e.target.checked)}
-                  className="w-4 h-4 rounded border-neutral-300 text-brand-500 focus-ring"
+                <CheckboxField
+                  label="Weighted (priced by weight)"
+                  checked={form.weighted} disabled={savingProps.disabled}
+                  onChange={(v) => set('weighted', v)}
                 />
-                Weighted (priced by weight)
-              </label>
-              )}
 
-              <label className="flex items-center gap-2 text-[13px] text-neutral-700 mt-1">
-                <input
-                  type="checkbox" checked={form.active} disabled={isView || saving}
-                  onChange={(e) => set('active', e.target.checked)}
-                  className="w-4 h-4 rounded border-neutral-300 text-brand-500 focus-ring"
-                />
-                Active (sellable)
-              </label>
+                {form.weighted && (
+                  <FormField
+                    label="PLU code" required
+                    hint="1–10 chars. Used by the scale to identify this product (e.g. 00041)."
+                    inputMode="numeric" maxLength={10} placeholder="e.g. 00041"
+                    value={form.plu} onBlur={() => blur('plu')}
+                    error={displayError('plu')}
+                    disabled={savingProps.disabled} readOnly={savingProps.readOnly}
+                    onChange={(e) => set('plu', e.target.value.replace(/\s/g, ''))}
+                    className="font-mono"
+                    containerClassName="col-span-2 max-w-[220px]"
+                  />
+                )}
+              </div>
+            </Section>
+          )}
 
-              {visibility.showSale && (
-              <label className="flex items-center gap-2 text-[13px] text-neutral-700 mt-1">
-                <input
-                  type="checkbox" checked={form.show_on_pos} disabled={isView || saving}
-                  onChange={(e) => set('show_on_pos', e.target.checked)}
-                  className="w-4 h-4 rounded border-neutral-300 text-brand-500 focus-ring"
-                />
-                Show on POS
-              </label>
-              )}
-
-              {visibility.showSale && (
-              <label className="flex items-center gap-2 text-[13px] text-neutral-700 mt-1">
-                <input
-                  type="checkbox" checked={form.is_discountable} disabled={isView || saving}
-                  onChange={(e) => set('is_discountable', e.target.checked)}
-                  className="w-4 h-4 rounded border-neutral-300 text-brand-500 focus-ring"
-                />
-                Discountable
-              </label>
-              )}
-
-              {/* Batch 8 production-readiness pass: persistent entry point
-                  into the Recipe Editor for an EXISTING Recipe product —
-                  covers products created before this batch, or revisited
-                  later without going through the just-created success
-                  screen. */}
-              {visibility.showBuildRecipe && isEdit && initialProduct && (
-                <div className="col-span-2 -mt-1">
-                  <Button
-                    type="button" size="sm" variant="secondary"
-                    onClick={() => navigate(`/recipes/new?product_id=${initialProduct.id}`)}
-                  >
-                    <Icon name="layers" size={14} /> Build / edit recipe
-                  </Button>
+          {/* ── Purchasing ──────────────────────────────────────────── */}
+          {tab === 'full' && (
+            <Section title="Purchasing" icon="truck" description="Whether — and how — this product is replenished.">
+              {visibility.canPurchase ? (
+                <div className="flex items-center gap-3">
+                  <Badge kind="success">Can be purchased</Badge>
+                  {visibility.showStock && (
+                    <FormField
+                      label="Reorder point" hint="Low-stock alert threshold."
+                      type="number" min="0" step="1"
+                      value={form.reorder} disabled={savingProps.disabled} readOnly={savingProps.readOnly}
+                      onChange={(e) => set('reorder', e.target.value)}
+                      containerClassName="max-w-[160px]"
+                    />
+                  )}
+                </div>
+              ) : (
+                <div className="flex items-start gap-2 text-[12.5px] text-neutral-500">
+                  <Badge kind="gray">Not purchasable</Badge>
+                  <span>
+                    "{typeMeta?.label ?? form.product_type}" products are rejected by purchase
+                    invoices ({visibility.showBuildRecipe ? 'assembled from a recipe' : 'not stocked directly'}) —
+                    enforced server-side, not just hidden here.
+                  </span>
                 </div>
               )}
+            </Section>
+          )}
 
-              {/* PLU input — only relevant for weighted SKUs. The Digi scale
-                  reads this PLU back inside the 13-digit weight barcode. */}
-              {visibility.showStock && form.weighted && (
-                <Field
-                  label="PLU code"
-                  required
-                  error={fieldErrors.plu}
-                  hint="1–10 chars. Used by the scale to identify this product (e.g. 00041)."
-                  className="col-span-2"
-                >
-                  <input
-                    type="text" inputMode="numeric" maxLength={10}
-                    value={form.plu} disabled={isView || saving}
-                    onChange={(e) => set('plu', e.target.value.replace(/\s/g, ''))}
-                    placeholder="e.g. 00041"
-                    className={`${inputCls(!!fieldErrors.plu, isView)} font-mono w-48`}
+          {/* ── Recipe ──────────────────────────────────────────────── */}
+          {visibility.showBuildRecipe && tab === 'full' && isEdit && initialProduct && (
+            <Section title="Recipe" icon="layers" description="The Bill of Materials this product sells through.">
+              <RecipeWorkflowCard
+                productId={initialProduct.id}
+                canSell={visibility.showSale}
+                showOnPos={form.show_on_pos}
+              />
+            </Section>
+          )}
+
+          {/* ── Accounting ──────────────────────────────────────────── */}
+          {(visibility.showCost || (visibility.showBuildRecipe && (isEdit || isView))) && tab === 'full' && (
+            <Section title="Accounting" icon="chart" description="Cost basis and margin.">
+              <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+                {visibility.showCost && (
+                  <FormField
+                    label="Cost"
+                    hint={
+                      (isEdit || isView) && initialProduct
+                        ? 'Calculated automatically (moving-average) from purchases and stock counts.'
+                        : 'Opening cost — used to seed the moving-average once this product is created.'
+                    }
+                    type="number" step="0.01" min="0"
+                    value={form.cost} disabled={savingProps.disabled || isEdit} readOnly={isView || isEdit}
+                    onChange={(e) => set('cost', e.target.value)}
                   />
-                </Field>
-              )}
-            </>
+                )}
+                {visibility.showCost && (isEdit || isView) && initialProduct && (
+                  <div className="flex items-end pb-1">
+                    <button
+                      type="button" onClick={() => setShowCostHistory(true)}
+                      className="text-[12.5px] text-brand-600 hover:underline font-semibold"
+                    >
+                      View cost history →
+                    </button>
+                  </div>
+                )}
+                {/* Recipe products have no cost of their own to enter — a
+                    real, live, server-computed derived-cost BREAKDOWN
+                    (item 7) instead of hiding the section or showing a
+                    single opaque number. */}
+                {!visibility.showCost && visibility.showBuildRecipe && (isEdit || isView) && initialProduct && (
+                  <DerivedCostField productId={initialProduct.id} />
+                )}
+                {typeof initialProduct?.margin === 'number' && (
+                  <div>
+                    <div className="text-[12.5px] font-semibold text-neutral-700 mb-1.5">Margin</div>
+                    <div className="h-10 flex items-center">
+                      <Badge kind={initialProduct.margin >= 0 ? 'success' : 'danger'} size="md">
+                        {initialProduct.margin.toFixed(0)}%
+                      </Badge>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </Section>
+          )}
+
+          {/* ── POS ──────────────────────────────────────────────────── */}
+          {visibility.showSale && tab === 'full' && (
+            <Section title="POS" icon="pos" description="Visibility and pricing behavior at the register.">
+              <div className="flex flex-col gap-2">
+                <CheckboxField
+                  label="Show on POS"
+                  checked={form.show_on_pos} disabled={savingProps.disabled}
+                  onChange={(v) => set('show_on_pos', v)}
+                />
+                <CheckboxField
+                  label="Discountable"
+                  checked={form.is_discountable} disabled={savingProps.disabled}
+                  onChange={(v) => set('is_discountable', v)}
+                />
+              </div>
+            </Section>
           )}
         </div>
 
-        <div className="px-6 h-14 border-t border-neutral-200 flex items-center justify-end gap-2">
+        <div className="px-6 h-14 border-t border-neutral-200 flex items-center justify-end gap-2 shrink-0">
           <Button type="button" variant="secondary" size="sm" onClick={onClose}>
             {isView ? 'Close' : 'Cancel'}
           </Button>
@@ -781,28 +833,39 @@ const TabButton: React.FC<React.PropsWithChildren<{
   </button>
 );
 
-const Field: React.FC<React.PropsWithChildren<{
-  label: string; required?: boolean; recommended?: boolean; error?: string; hint?: React.ReactNode; className?: string;
-}>> = ({ label, required, recommended, error, hint, className = '', children }) => (
-  <label className={`flex flex-col gap-1 text-[12.5px] font-semibold text-neutral-700 ${className}`}>
-    <span>
-      {label}
-      {required && <span className="text-danger-600 ms-0.5">*</span>}
-      {!required && recommended && <span className="text-neutral-400 font-normal ms-1 text-[11px]">(recommended)</span>}
-    </span>
+/** A workflow section — a titled group with an icon + one-line description,
+ * consistent across the whole form (item 2: organize into General/Sales/
+ * Inventory/Purchasing/Recipe/Accounting/POS; item 10: standardized
+ * spacing/typography). A section that has no visible fields for the
+ * current product type is simply never rendered by its caller — this
+ * component doesn't hide itself, callers gate on `visibility` so the
+ * "which sections exist" decision stays in one place (`fieldVisibility`). */
+const Section: React.FC<React.PropsWithChildren<{ title: string; icon: string; description: string }>> = ({
+  title, icon, description, children,
+}) => (
+  <section>
+    <div className="flex items-center gap-2 mb-3 pb-2 border-b border-neutral-100">
+      <div className="w-7 h-7 rounded-md bg-neutral-100 text-neutral-500 grid place-items-center shrink-0">
+        <Icon name={icon} size={14} />
+      </div>
+      <div>
+        <h3 className="text-[13px] font-bold text-neutral-800">{title}</h3>
+        <p className="text-[11.5px] text-neutral-400 leading-tight">{description}</p>
+      </div>
+    </div>
     {children}
-    {error
-      ? <span className="text-[12px] font-normal text-danger-600">{error}</span>
-      : hint
-        ? <span className="text-[12px] font-normal text-neutral-500">{hint}</span>
-        : null}
-  </label>
+  </section>
 );
 
-function inputCls(hasError: boolean, disabled: boolean) {
-  return [
-    'h-10 px-3 rounded-md border bg-white text-[14px] focus-ring',
-    hasError ? 'border-danger-500' : 'border-neutral-300',
-    disabled ? 'bg-neutral-50 text-neutral-500 cursor-not-allowed' : '',
-  ].filter(Boolean).join(' ');
-}
+const CheckboxField: React.FC<{
+  label: string; checked: boolean; disabled?: boolean; onChange: (v: boolean) => void;
+}> = ({ label, checked, disabled, onChange }) => (
+  <label className={`flex items-center gap-2 text-[13px] text-neutral-700 ${disabled ? 'opacity-60' : ''}`}>
+    <input
+      type="checkbox" checked={checked} disabled={disabled}
+      onChange={(e) => onChange(e.target.checked)}
+      className="w-4 h-4 rounded border-neutral-300 text-brand-500 focus-ring"
+    />
+    {label}
+  </label>
+);
