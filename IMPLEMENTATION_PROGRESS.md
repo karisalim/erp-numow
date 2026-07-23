@@ -3725,4 +3725,58 @@ no modal, unchanged from before this batch.
 
 ---
 
+### S5 Batch 10: Recipe reporting UI polish — sortable columns + quick-range chips (2026-07-23)
+
+100% frontend, zero backend files touched. The Sprint 5 plan's original
+Batch 10 scope (a dedicated `RecipeProfitabilityPage`/`IngredientConsumptionPage`
+under `pages/reports/`) turned out to already be delivered — ahead of
+schedule, as part of Batch 8's "Recipe Management as an independent
+feature app" restructuring — as `apps/recipes/pages/RecipeReportsPage.tsx`,
+consuming the Batch 6 `recipe-profitability`/`ingredient-consumption`
+endpoints directly, wired at `/recipes/reports` with a "Reports" button on
+`RecipeDashboardPage`. This batch closes the two real gaps between that
+existing page and the plan's stated acceptance criteria (sortable
+`?ordering=` headers matching the `ProductCostHistoryDrawer` convention;
+quick-range date chips instead of only raw date inputs), rather than
+re-building something that already existed.
+
+**Modified file:** `apps/recipes/pages/RecipeReportsPage.tsx` only.
+- Added the same quick-range chip pattern `ProductCostHistoryDrawer.tsx`
+  (Sprint 4 Batch 10) established — `7D`/`30D`/`90D`/`This Month`/`This
+  Year`/`Custom`, duplicated locally per this codebase's cross-app
+  boundary rule (`apps/recipes` never imports from `components/products/`).
+  Unlike that drawer, there's no "All" option here — the backend's
+  `_parse_report_window` requires a bounded `start_date`/`end_date`, so
+  every quick-range key resolves to a real window. Defaults to `month`
+  (unchanged first-load behavior).
+- Wired `DataTable`'s existing `sort`/`onSort` props (added in Phase 3
+  Enterprise UX Polish, previously unused by this page) to the backend's
+  own `?ordering=` allow-lists — `profitOrdering`/`consumptionOrdering`
+  state, `orderingToSort()`/`toggleOrdering()` helpers converting between
+  the DRF-style `'field'`/`'-field'` string and the DataTable's
+  `{key, dir}` shape. Every sortable column key matches the backend's
+  allowed field name exactly (`units_sold`, `revenue`, `food_cost_pct`,
+  `gross_profit`, `gross_margin_pct` for profitability; `qty_consumed`,
+  `cost_consumed` for consumption) — no client-side re-sort ever
+  disagrees with what the server considers valid. The Profitability
+  table's `Food cost` column is deliberately left **not** sortable: the
+  backend's `?ordering=` allow-list has no bare `food_cost` (only
+  `food_cost_pct`), so marking it sortable would have silently produced
+  a client/server mismatch.
+
+**Verification:** `npm run build` clean (`tsc` + `vite build`).
+Real-browser Playwright walkthrough against live seeded data (the
+"POS9 Test Latte" recipe sale from Batch 9's verification): quick-range
+chips correctly narrow/widen the window and re-fetch (`This Year` → shows
+the row, `7D` → still in range, no crash); `Custom` reveals the two date
+inputs inline, preserving whatever dates were already active; clicking
+`Revenue`/`Cost consumed` headers toggles the sort arrow and re-issues the
+request with the corresponding `?ordering=`/`-ordering=` param; `Food
+cost` header correctly renders with no sort affordance; tab switch
+between Recipe Profitability and Ingredient Consumption preserves the
+active date range and branch filter; zero new console errors or failed
+network requests introduced by this page.
+
+---
+
 *(Later batches of Sprint 5 get their own entries here as they land.)*
