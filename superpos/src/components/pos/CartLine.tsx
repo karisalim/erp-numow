@@ -41,10 +41,20 @@ export const CartLine: React.FC<CartLineProps> = ({
             {item.unitLabel}
           </span>
         )}
+        {item.variantName && (
+          <span className="ms-1.5 text-[10.5px] font-semibold text-violet-700 bg-violet-50 border border-violet-500/30 rounded px-1.5 py-0.5 align-middle">
+            {item.variantName}
+          </span>
+        )}
       </div>
+      {item.modifiers && item.modifiers.length > 0 && (
+        <div className="text-[11px] text-neutral-500 truncate">
+          + {item.modifiers.map((m) => m.name).join(', ')}
+        </div>
+      )}
       <div className="text-[11.5px] text-neutral-500 flex items-center gap-2">
-        <span className="font-mono">{item.barcode}</span>
-        <span>·</span>
+        {item.barcode && <span className="font-mono">{item.barcode}</span>}
+        {item.barcode && <span>·</span>}
         <span>
           {money(item.price)}
           {item.weighted ? '/kg' : item.unitLabel ? ` / ${item.unitLabel}` : ''}

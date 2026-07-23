@@ -21,6 +21,8 @@ import { PaymentModal } from '../components/pos/PaymentModal';
 import { CustomerSelectModal } from '../components/pos/CustomerSelectModal';
 import { DiscountModal } from '../components/pos/DiscountModal';
 import { UnitPickerModal } from '../components/pos/UnitPickerModal';
+import { RecipeOptionsModal } from '../components/pos/RecipeOptionsModal';
+import { isRecipeEligible } from '../utils/recipeEligibility';
 import { Button } from '../components/ui/Button';
 import { Badge } from '../components/ui/Badge';
 import { Card } from '../components/ui/Card';
@@ -57,6 +59,7 @@ export const POSPage: React.FC = () => {
   const [customerModal, setCustomerModal] = useState(false);
   const [discountModal, setDiscountModal] = useState(false);
   const [unitPickerProduct, setUnitPickerProduct] = useState<Product | null>(null);
+  const [recipeOptionsProduct, setRecipeOptionsProduct] = useState<Product | null>(null);
 
   // ── Server-driven Quick Grid + Categories (always show_on_pos=true) ────
   const [quickGrid, setQuickGrid]   = useState<Product[]>([]);
@@ -212,6 +215,12 @@ export const POSPage: React.FC = () => {
           displayPrice,
         });
         setScanInfo(`Added ${product.name} (${product_unit.unit_name}) — ${money(displayPrice)}`);
+      } else if (isRecipeEligible(product)) {
+        // A recipe product's own barcode still resolves it, but price
+        // depends on which size/modifiers are chosen — same picker as a
+        // tile tap, never a blind add (mirrors the backend's own
+        // product_unit-is-None gate for the variant/modifier code path).
+        setRecipeOptionsProduct(product);
       } else {
         addItem(product);
         setScanInfo(`Added ${product.name}`);
@@ -248,6 +257,17 @@ export const POSPage: React.FC = () => {
       // qty/price_each — never send price_each ourselves for these.
       if (c.productUnitId) {
         return { product: productId, product_unit: c.productUnitId, entered_qty: c.qty };
+      }
+      // Recipe line: send the chosen variant + modifier option ids, no
+      // price_each — the server independently computes it from
+      // variant.price + Σ option.price_delta and ignores any client value.
+      if (c.variantId != null || (c.modifiers && c.modifiers.length > 0)) {
+        return {
+          product: productId,
+          qty: c.qty,
+          variant: c.variantId,
+          modifier_option_ids: (c.modifiers ?? []).map((m) => m.id),
+        };
       }
       // Legacy base-unit shape, unchanged.
       return { product: productId, qty: c.qty, price_each: Number(Number(c.price).toFixed(2)) };
@@ -513,8 +533,13 @@ export const POSPage: React.FC = () => {
                   <QuickProductCard
                     key={String(p.id)}
                     product={p}
-                    onAdd={(prod: Product) => addItem(prod)}
-                    onPickUnit={(prod: Product) => setUnitPickerProduct(prod)}
+                    onAdd={(prod: Product) =>
+                      isRecipeEligible(prod) ? setRecipeOptionsProduct(prod) : addItem(prod)
+                    }
+                    // Unit picking (carton/box/…) and recipe customization
+                    // are mutually exclusive paths server-side — never
+                    // offer both affordances on the same tile.
+                    onPickUnit={isRecipeEligible(p) ? undefined : (prod: Product) => setUnitPickerProduct(prod)}
                   />
                 ))}
               </div>
@@ -695,6 +720,18 @@ export const POSPage: React.FC = () => {
           onConfirm={(qty, unit) => {
             addItem(unitPickerProduct, qty, unit);
             setUnitPickerProduct(null);
+          }}
+        />
+      )}
+
+      {recipeOptionsProduct && (
+        <RecipeOptionsModal
+          product={recipeOptionsProduct}
+          onClose={() => setRecipeOptionsProduct(null)}
+          onConfirm={(qty, choice) => {
+            addItem(recipeOptionsProduct, qty, undefined, choice);
+            setScanInfo(`Added ${recipeOptionsProduct.name}${choice.variantName ? ` (${choice.variantName})` : ''}`);
+            setRecipeOptionsProduct(null);
           }}
         />
       )}

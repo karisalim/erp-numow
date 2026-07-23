@@ -3649,4 +3649,80 @@ asterisk) for Ingredient/Stock Item, matching the live
 
 ---
 
+### S5 Batch 9: Frontend POS integration — variant/modifier selection (2026-07-23)
+
+100% frontend, zero backend files touched (confirmed via `git diff --stat`
+scoped to `superpos_backend/` — empty). Wires the already-shipped Batch 2/4/5
+backend contract (`ProductVariant`, `ModifierGroup`/`ModifierOption`,
+`SaleItemSerializer`'s `variant`/`modifier_option_ids` fields) into the
+actual checkout screen — previously a recipe product could only be sold at
+its flat base price with zero customization, from either grid or scan.
+
+**New files:**
+- `utils/recipeEligibility.ts` — `isRecipeEligible(product)` mirrors the
+  backend's own `is_recipe_eligible()` gate (`behavior.can_have_recipe &&
+  product_type !== 'bundle'`), the single place this rule is read from.
+- `components/pos/RecipeOptionsModal.tsx` — the POS-side counterpart to the
+  existing `UnitPickerModal`: fetches a product's active Variants +
+  attached ModifierGroups (with their own selection rules + active
+  Options) via a 4-endpoint fan-out (no combined endpoint exists), walks a
+  variant-step → modifier-step flow (each optional depending on what the
+  product actually has), enforces each group's `min_select`/`max_select`
+  as a UX-level gate, live price preview, qty stepper, confirm/cancel.
+
+**Modified files:**
+- `api/pos.ts` — `RecipeVariantDto`/`RecipeModifierGroupLinkDto`/
+  `RecipeModifierGroupDto`/`RecipeModifierOptionDto` (duplicated, not
+  imported from `apps/recipes/`, per this codebase's established
+  cross-app boundary rule) + 4 new `posApi` list/get wrappers;
+  `SaleItemPayload` gained optional `variant`/`modifier_option_ids` —
+  `price_each` is deliberately never sent alongside them, since
+  `SaleSerializer.validate()` computes it itself and ignores any client
+  value.
+- `store/posStore.ts` — new `PosRecipeChoice` type + `sameRecipeSelection`
+  merge-key helper (two recipe picks are the same cart line iff same
+  variant AND same modifier-option-id set); `addItem()` gained an optional
+  4th `recipe` param, computes the line's `price` as
+  `variantPrice + Σ modifier.priceDelta`.
+- `types/index.ts` — `CartItem` gained `variantId`/`variantName`/
+  `modifiers`.
+- `pages/POSPage.tsx` — a tile tap or a barcode-scan-resolved product now
+  checks `isRecipeEligible()` first: recipe-eligible → opens
+  `RecipeOptionsModal` instead of a blind add; everything else is
+  unchanged (zero behavior change for non-recipe products, verified live).
+  `completeSale()`'s payload builder gained a third branch alongside the
+  existing legacy/unit-aware ones, sending `variant`+`modifier_option_ids`
+  for a recipe line.
+- `components/pos/CartLine.tsx` — variant name badge + modifier chip list
+  under the product name (mirrors the existing unit-label badge pattern);
+  also fixed a small pre-existing display bug surfaced by this session's
+  earlier Barcode Strategy work — an empty `barcode` no longer renders a
+  stray `·` separator.
+- `components/pos/QuickProductCard.tsx` — the out-of-stock/low-stock
+  overlay and the stock-count readout are now gated on
+  `behavior.track_inventory` (a recipe product carries no stock of its
+  own, so these were previously always-wrong on every such tile); the
+  "choose unit" icon is hidden for recipe-eligible tiles (mutually
+  exclusive with variant/modifier selection server-side).
+
+**Verification:** `npm run build` clean. Full real-browser, real-backend
+Playwright walkthrough (fixtures created via the live API — an ingredient
+with a base unit and stock, a recipe product, a Large-variant-scoped
+active recipe consuming the ingredient, two Small/Large variants, a
+2-option modifier group attached to the product): tile tap → modal opens
+→ variant step → modifier step (live price preview correctly shows
+`35.00 + 5.00 + 3.00 = 43.00`) → cart line shows the `Large` badge + `+
+Extra Shot, Oat Milk` chip line at the correct price → completed a real
+cash sale → receipt confirms `EGP 47.30` (43.00 + 10% VAT) → confirmed via
+API that the ingredient's stock actually deducted by the recipe's
+`RECIPE_CONSUME` line (1000 → 976). Also caught, mid-verification, that
+the backend correctly rejects a variant with no recipe of its own scoped
+to it (`Recipe(product, variant)` is an exact match, no fallback to the
+base `variant=None` recipe) — confirms the frontend's `variant` field is
+being honestly enforced server-side, not silently ignored. Regression
+check: a plain `stock_item` (Cheese) still adds directly to the cart with
+no modal, unchanged from before this batch.
+
+---
+
 *(Later batches of Sprint 5 get their own entries here as they land.)*

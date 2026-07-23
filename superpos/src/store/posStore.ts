@@ -20,6 +20,29 @@ export interface PosUnitChoice {
   displayPrice: number;
 }
 
+/** Recipe-product Variant/Modifier selection (Sprint 5 Batch 9), passed to
+ * `addItem` for a customizable recipe-product line. Mutually exclusive
+ * with `PosUnitChoice` — see `CartItem.variantId`'s docstring. */
+export interface PosRecipeChoice {
+  variantId?: number;
+  variantName?: string;
+  /** The chosen variant's own price — falls back to the product's base
+   * price when the product has no variants (modifiers only). */
+  variantPrice: number;
+  modifiers: { id: number; name: string; priceDelta: number }[];
+}
+
+/** An existing cart line and a new recipe pick are "the same line" iff they
+ * carry the same variant AND the same set of modifier option ids
+ * (order-independent) — a plain line (`recipe` undefined) only matches
+ * another plain line. */
+function sameRecipeSelection(line: CartItem, recipe?: PosRecipeChoice): boolean {
+  if ((line.variantId ?? null) !== (recipe?.variantId ?? null)) return false;
+  const lineIds = (line.modifiers ?? []).map(m => m.id).sort((x, y) => x - y);
+  const pickIds = (recipe?.modifiers ?? []).map(m => m.id).sort((x, y) => x - y);
+  return lineIds.length === pickIds.length && lineIds.every((id, i) => id === pickIds[i]);
+}
+
 interface PosState {
   cart: CartItem[];
   barcode: string;
@@ -36,7 +59,7 @@ interface PosState {
   /** Optional price tier applied to this sale's unit-aware lines. */
   priceTierId: number | null;
 
-  addItem: (product: Product, qty?: number, unit?: PosUnitChoice) => void;
+  addItem: (product: Product, qty?: number, unit?: PosUnitChoice, recipe?: PosRecipeChoice) => void;
   removeItem: (lineId: string) => void;
   updateQty: (lineId: string, delta: number) => void;
   clearCart: () => void;
@@ -79,15 +102,18 @@ export const usePosStore = create<PosState>((set, get) => ({
   discountValue: 0,
   priceTierId: null,
 
-  addItem: (product: Product, qty = 1, unit?: PosUnitChoice) => {
+  addItem: (product: Product, qty = 1, unit?: PosUnitChoice, recipe?: PosRecipeChoice) => {
     const { cart, lineCounter } = get();
     playBeep();
-    // Group repeats of the same (product, unit) pair onto the same line —
-    // a base-unit line and a carton line of the same product are DIFFERENT
-    // lines and must never merge. toFixed(3) keeps floating-point math
+    // Group repeats of the same (product, unit, recipe choice) tuple onto
+    // the same line — a base-unit line, a carton line, and two DIFFERENT
+    // variant/modifier picks of the same product must never merge; only an
+    // identical repeat pick does. toFixed(3) keeps floating-point math
     // clean for sub-gram precision.
     const existing = cart.find(
-      x => x.id === product.id && x.productUnitId === unit?.productUnitId,
+      x => x.id === product.id
+        && x.productUnitId === unit?.productUnitId
+        && sameRecipeSelection(x, recipe),
     );
     if (existing) {
       set(state => ({
@@ -101,14 +127,26 @@ export const usePosStore = create<PosState>((set, get) => ({
       setTimeout(() => set({ flashId: null }), 600);
     } else {
       const lineId = 'L' + lineCounter;
-      const line: CartItem = unit
-        ? {
-            ...product, lineId, qty: +qty.toFixed(3),
-            price: unit.displayPrice,
-            productUnitId: unit.productUnitId,
-            unitLabel: unit.unitLabel,
-          }
-        : { ...product, lineId, qty: +qty.toFixed(3) };
+      let line: CartItem;
+      if (unit) {
+        line = {
+          ...product, lineId, qty: +qty.toFixed(3),
+          price: unit.displayPrice,
+          productUnitId: unit.productUnitId,
+          unitLabel: unit.unitLabel,
+        };
+      } else if (recipe) {
+        const modifierTotal = recipe.modifiers.reduce((s, m) => s + m.priceDelta, 0);
+        line = {
+          ...product, lineId, qty: +qty.toFixed(3),
+          price: recipe.variantPrice + modifierTotal,
+          variantId: recipe.variantId,
+          variantName: recipe.variantName,
+          modifiers: recipe.modifiers,
+        };
+      } else {
+        line = { ...product, lineId, qty: +qty.toFixed(3) };
+      }
       set(state => ({
         cart: [...state.cart, line],
         lineCounter: state.lineCounter + 1,

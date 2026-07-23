@@ -75,6 +75,17 @@ export interface CartItem extends Product {
    * this unit, not the product's base-unit price. */
   productUnitId?: number;
   unitLabel?: string;
+  /** Sprint 5 Batch 9 — set only for a recipe product sold with a chosen
+   * size Variant and/or one or more selected ModifierOptions. `price` on
+   * this CartItem is then `variantPrice + Σ modifier.priceDelta` (resolved
+   * client-side for display only — the server independently recomputes
+   * and is the sole authority on the posted `price_each`). Mutually
+   * exclusive with `productUnitId` — a recipe line is never also a
+   * non-base-unit line (mirrors the backend's own `product_unit is None`
+   * gate on the variant/modifier code path). */
+  variantId?: number;
+  variantName?: string;
+  modifiers?: { id: number; name: string; priceDelta: number }[];
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────

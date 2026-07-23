@@ -54,6 +54,53 @@ export interface SaleItemPayload {
   // …or the unit-aware shape (server derives qty/price_each).
   product_unit?: number;
   entered_qty?: number;
+  // …or the recipe-product shape (Sprint 5 Batch 9): a chosen size Variant
+  // and/or selected ModifierOptions. `price_each` is deliberately never
+  // sent alongside these — `SaleSerializer.validate()` computes it itself
+  // from `variant.price + Σ option.price_delta` and ignores any client
+  // value, so there is nothing for the client to compute correctly here.
+  variant?: number;
+  modifier_option_ids?: number[];
+}
+
+/* ── Recipe options (Sprint 5 Batch 9 — variant/modifier selection at the
+ * register). Small DTOs duplicated here rather than imported from
+ * `apps/recipes/`, per this codebase's established cross-app boundary rule
+ * (see `components/products/RecipeWorkflowCard.tsx`'s docstring): a
+ * `components/pos/`/`pages/`-scoped file never reaches into `apps/recipes`
+ * internals, it re-declares the handful of fields it actually needs. ── */
+export interface RecipeVariantDto {
+  id: number;
+  name: string;
+  price: string;
+  sort_order: number;
+  is_active: boolean;
+}
+
+export interface RecipeModifierGroupLinkDto {
+  id: number;
+  modifier_group: number;
+  modifier_group_name: string;
+  sort_order: number;
+}
+
+export type ModifierSelectionType = 'single' | 'multiple';
+
+export interface RecipeModifierGroupDto {
+  id: number;
+  name: string;
+  selection_type: ModifierSelectionType;
+  min_select: number | null;
+  max_select: number | null;
+  is_active: boolean;
+}
+
+export interface RecipeModifierOptionDto {
+  id: number;
+  name: string;
+  price_delta: string;
+  sort_order: number;
+  is_active: boolean;
 }
 
 export interface CreateSalePayload {
@@ -112,4 +159,31 @@ export const posApi = {
     apiClient
       .post<SaleResponseDto>('/sales/', payload, withIdempotencyHeaders(idempotencyKey))
       .then(r => r.data),
+
+  /** A recipe product's own size Variants (e.g. Small/Medium/Large). */
+  listProductVariants: (productId: number) =>
+    apiClient
+      .get<PaginatedResponse<RecipeVariantDto> | RecipeVariantDto[]>(`/products/${productId}/variants/`)
+      .then(r => unwrapList<RecipeVariantDto>(r.data)),
+
+  /** The ModifierGroups attached to a product — link rows only (id/name),
+   * not the group's own selection rules or its options. */
+  listProductModifierGroupLinks: (productId: number) =>
+    apiClient
+      .get<PaginatedResponse<RecipeModifierGroupLinkDto> | RecipeModifierGroupLinkDto[]>(
+        `/products/${productId}/modifier-groups/`,
+      )
+      .then(r => unwrapList<RecipeModifierGroupLinkDto>(r.data)),
+
+  /** A ModifierGroup's own selection rules (single/multiple, min/max). */
+  getModifierGroup: (groupId: number) =>
+    apiClient.get<RecipeModifierGroupDto>(`/catalog/modifier-groups/${groupId}/`).then(r => r.data),
+
+  /** The options offered inside one ModifierGroup. */
+  listModifierGroupOptions: (groupId: number) =>
+    apiClient
+      .get<PaginatedResponse<RecipeModifierOptionDto> | RecipeModifierOptionDto[]>(
+        `/catalog/modifier-groups/${groupId}/options/`,
+      )
+      .then(r => unwrapList<RecipeModifierOptionDto>(r.data)),
 };

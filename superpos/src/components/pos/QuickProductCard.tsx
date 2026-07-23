@@ -9,15 +9,24 @@ interface QuickProductCardProps {
   onAdd: (product: Product) => void;
   /** Optional secondary action — opens the unit picker (carton/box/…) for
    * this product instead of adding it at its base unit. Omit to hide the
-   * affordance (e.g. contexts where Sprint 2 units aren't relevant). */
+   * affordance (e.g. contexts where Sprint 2 units aren't relevant, or a
+   * recipe-eligible product where `onAdd` itself opens the recipe options
+   * picker instead — the two flows are mutually exclusive server-side). */
   onPickUnit?: (product: Product) => void;
 }
 
 export const QuickProductCard: React.FC<QuickProductCardProps> = ({ product, onAdd, onPickUnit }) => {
   const money = useMoney();
   const { emoji, gradient } = productVisual(product.name, product.category_name ?? product.sales_category_name);
-  const outOfStock = !product.weighted && product.stock <= 0;
-  const lowStock = !outOfStock && !product.weighted && product.stock > 0 && product.stock <= product.reorder;
+  // Sprint 5 Batch 9: a recipe product (or any type with track_inventory
+  // false) carries no stock of its own — `Product.stock` is meaningless
+  // for it, so the out-of-stock/low-stock overlays would be nonsensically
+  // wrong on every such tile. Only show them for stock-tracked types.
+  // `behavior` undefined (pre-Sprint-2 legacy payload) defaults to shown,
+  // matching the field's original always-on behavior.
+  const stockTracked = product.behavior ? product.behavior.track_inventory : true;
+  const outOfStock = stockTracked && !product.weighted && product.stock <= 0;
+  const lowStock = stockTracked && !outOfStock && !product.weighted && product.stock > 0 && product.stock <= product.reorder;
 
   return (
     <div className="relative group">
@@ -42,7 +51,9 @@ export const QuickProductCard: React.FC<QuickProductCardProps> = ({ product, onA
         </div>
         <div className="flex items-center justify-between">
           <span className="text-[14px] font-bold tabular-nums">{money(product.price)}</span>
-          <span className="text-[11px] text-neutral-500">{product.stock}{product.weighted ? 'kg' : ' pcs'}</span>
+          {stockTracked && (
+            <span className="text-[11px] text-neutral-500">{product.stock}{product.weighted ? 'kg' : ' pcs'}</span>
+          )}
         </div>
       </button>
       {onPickUnit && (
