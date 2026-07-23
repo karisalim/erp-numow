@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { AxiosError } from 'axios';
 import apiClient from '../../api/client';
 import { Modal } from '../ui/Modal';
@@ -83,6 +84,37 @@ const HIDDEN_DEFAULTS = {
   is_discountable: true,
 };
 
+/** Mirrors `pos/services/product_types.py`'s `PRODUCT_TYPE_BEHAVIOR` matrix
+ * — booleans only, no derived/computed logic. This is display-visibility
+ * data (which inputs to show before a product even exists yet, so there's
+ * no server-returned `behavior` to read), not business logic: every rule
+ * this drives (can_sell, show_on_pos, affects_stock/track_inventory) is
+ * independently enforced server-side (`ProductSerializer.validate`,
+ * `SaleSerializer`) regardless of what this form shows or hides. */
+const TYPE_BEHAVIOR: Record<ProductTypeValue, {
+  can_sell: boolean; can_purchase: boolean; track_inventory: boolean; requires_cost: boolean;
+}> = {
+  stock_item:     { can_sell: true,  can_purchase: true,  track_inventory: true,  requires_cost: true },
+  ingredient:     { can_sell: false, can_purchase: true,  track_inventory: true,  requires_cost: true },
+  prep_item:      { can_sell: false, can_purchase: false, track_inventory: true,  requires_cost: true },
+  recipe_product: { can_sell: true,  can_purchase: false, track_inventory: false, requires_cost: false },
+  resale:         { can_sell: true,  can_purchase: true,  track_inventory: true,  requires_cost: true },
+  packaging:      { can_sell: false, can_purchase: true,  track_inventory: true,  requires_cost: true },
+  service:        { can_sell: true,  can_purchase: false, track_inventory: false, requires_cost: false },
+  bundle:         { can_sell: true,  can_purchase: false, track_inventory: false, requires_cost: false },
+  fixed_asset:    { can_sell: false, can_purchase: true,  track_inventory: false, requires_cost: true },
+};
+
+function fieldVisibility(productType: ProductTypeValue) {
+  const b = TYPE_BEHAVIOR[productType];
+  return {
+    showSale: b.can_sell,          // Price, Show on POS, Tax rate, Discountable, Sales category
+    showStock: b.track_inventory,  // Stock, Reorder, Unit, Pack qty, Weighted, Inventory category
+    showCost: b.requires_cost,     // Cost (opening cost on create; AVCO-derived read-only on edit)
+    showBuildRecipe: productType === 'recipe_product',
+  };
+}
+
 function blankForm(): FormState {
   return {
     name: '', barcode: '', sku: '', plu: '',
@@ -130,6 +162,7 @@ function formFromProduct(p: Product): FormState {
 
 /** Convert form → payload, applying Quick Add defaults for hidden fields. */
 function buildPayload(form: FormState, tab: Tab, isEdit: boolean) {
+  const visibility = fieldVisibility(form.product_type);
   const sku = form.sku.trim() || form.barcode.trim();
   // PLU is only meaningful for weighted items (the scale prints `21<PLU><wt>`),
   // but we still send '' explicitly so editing a non-weighted product clears
@@ -140,8 +173,12 @@ function buildPayload(form: FormState, tab: Tab, isEdit: boolean) {
     barcode:  form.barcode.trim(),
     sku,
     plu,
-    price:    form.price,
-    stock:    form.stock || '0',
+    // Hidden fields still round-trip a safe value (the backend model
+    // requires `price`/`stock` regardless of type) — this is a display
+    // concern only, never a semantic override of anything the backend
+    // itself enforces (can_sell/show_on_pos rejection stays backend-side).
+    price:    visibility.showSale  ? form.price          : '0',
+    stock:    visibility.showStock ? (form.stock || '0') : '0',
     unit:     form.unit,
     pack_qty: form.pack_qty || '1',
   };
@@ -149,7 +186,7 @@ function buildPayload(form: FormState, tab: Tab, isEdit: boolean) {
   // backend rejects it on PATCH. Only a create sends it, as the opening
   // cost; the Cost field itself is disabled during edit (see the input
   // below) so this omission never silently drops an in-progress edit.
-  if (!isEdit) payload.cost = form.cost || '0';
+  if (!isEdit) payload.cost = visibility.showCost ? (form.cost || '0') : '0';
   if (form.category) payload.category = Number(form.category);
 
   if (tab === 'quick') {
@@ -162,16 +199,24 @@ function buildPayload(form: FormState, tab: Tab, isEdit: boolean) {
     payload.show_on_pos = HIDDEN_DEFAULTS.show_on_pos;
     payload.is_discountable = HIDDEN_DEFAULTS.is_discountable;
   } else {
-    payload.reorder  = Number(form.reorder || 0);
-    payload.tax_rate = form.tax_rate;
+    payload.reorder  = visibility.showStock ? Number(form.reorder || 0) : 0;
+    payload.tax_rate = visibility.showSale ? form.tax_rate : '0';
     payload.color    = form.color || HIDDEN_DEFAULTS.color;
-    payload.weighted = form.weighted;
+    payload.weighted = visibility.showStock && form.weighted;
     payload.active   = form.active;
     payload.product_type = form.product_type;
-    payload.show_on_pos = form.show_on_pos;
-    payload.is_discountable = form.is_discountable;
-    if (form.sales_category) payload.sales_category = Number(form.sales_category);
-    if (form.inventory_category) payload.inventory_category = Number(form.inventory_category);
+    // A non-sellable type may never be shown on POS — the frontend half of
+    // the backend enforcement (`ProductSerializer.validate`); the backend
+    // is still the sole authority, this just avoids sending an obviously
+    // wrong value for a field the user never saw an input for.
+    payload.show_on_pos = visibility.showSale && form.show_on_pos;
+    payload.is_discountable = visibility.showSale && form.is_discountable;
+    if (visibility.showSale && form.sales_category) {
+      payload.sales_category = Number(form.sales_category);
+    }
+    if (visibility.showStock && form.inventory_category) {
+      payload.inventory_category = Number(form.inventory_category);
+    }
   }
   return payload;
 }
@@ -228,6 +273,14 @@ export const ProductFormModal: React.FC<Props> = ({
   const [salesCategories, setSalesCategories] = useState<CategoryTreeNode[]>([]);
   const [inventoryCategories, setInventoryCategories] = useState<CategoryTreeNode[]>([]);
   const [showCostHistory, setShowCostHistory] = useState(false);
+  // Batch 8 production-readiness pass: shown in place of the form right
+  // after a brand-new Recipe product is created, offering a direct link
+  // into the Recipe Editor instead of leaving the user to navigate to
+  // /recipes and search for the product they just made.
+  const [justCreatedRecipeProduct, setJustCreatedRecipeProduct] = useState<Product | null>(null);
+  const navigate = useNavigate();
+
+  const visibility = fieldVisibility(form.product_type);
 
   // Keep state in sync if the parent swaps the product mid-flight (e.g. View → Edit).
   useEffect(() => {
@@ -261,9 +314,11 @@ export const ProductFormModal: React.FC<Props> = ({
   const validateLocal = (): string | null => {
     if (!form.name.trim())    return 'Name is required.';
     if (!form.barcode.trim()) return 'Barcode is required.';
-    const price = Number(form.price);
-    if (!form.price || Number.isNaN(price) || price <= 0) return 'Price must be greater than 0.';
-    if (form.weighted) {
+    if (visibility.showSale) {
+      const price = Number(form.price);
+      if (!form.price || Number.isNaN(price) || price <= 0) return 'Price must be greater than 0.';
+    }
+    if (visibility.showStock && form.weighted) {
       const plu = form.plu.trim();
       if (!plu || plu.length > 10) return 'PLU code is required (1–10 characters) for weighted products.';
     }
@@ -285,7 +340,17 @@ export const ProductFormModal: React.FC<Props> = ({
       const resp = isEdit && initialProduct
         ? await apiClient.patch<Product>(`/products/${initialProduct.id}/`, payload)
         : await apiClient.post<Product>('/products/', payload);
-      onSuccess(isEdit ? 'updated' : 'created', resp.data);
+      // Batch 8 production-readiness pass: a brand-new Recipe product gets
+      // a direct "Build Recipe" offer instead of just closing — the exact
+      // journey requested (Save → Build Recipe → Recipe Editor, no
+      // re-search). Editing an existing product (even to Recipe type)
+      // still just closes normally; the persistent footer button (below)
+      // covers that case without hijacking every edit-save.
+      if (!isEdit && resp.data.product_type === 'recipe_product') {
+        setJustCreatedRecipeProduct(resp.data);
+      } else {
+        onSuccess(isEdit ? 'updated' : 'created', resp.data);
+      }
     } catch (err) {
       const { fieldErrors: fe, formError: fmErr } = parseFieldErrors(err);
       setFieldErrors(fe);
@@ -299,6 +364,48 @@ export const ProductFormModal: React.FC<Props> = ({
     mode === 'view'   ? `Product · ${initialProduct?.name ?? ''}` :
     mode === 'edit'   ? `Edit product · ${initialProduct?.name ?? ''}` :
                         'New product';
+
+  // Batch 8 production-readiness pass: the "Product → Save → Build Recipe
+  // → Recipe Editor" journey — a brand-new Recipe product goes straight to
+  // this screen instead of the modal just closing.
+  if (justCreatedRecipeProduct) {
+    return (
+      <Modal title="Recipe product created" onClose={() => onSuccess('created', justCreatedRecipeProduct)} maxWidth="max-w-[480px]">
+        <div className="p-6 flex flex-col items-center text-center gap-3">
+          <div className="w-12 h-12 rounded-full bg-success-50 text-success-600 grid place-items-center">
+            <Icon name="check" size={22} />
+          </div>
+          <div>
+            <div className="text-[15px] font-semibold text-neutral-900">
+              "{justCreatedRecipeProduct.name}" created
+            </div>
+            <p className="text-[13px] text-neutral-500 mt-1">
+              This is a Recipe product — it needs a Bill of Materials before it can be
+              sold. Build it now, or come back to it later from the Recipes app.
+            </p>
+          </div>
+          <div className="flex gap-2 w-full mt-2">
+            <Button
+              variant="secondary" className="flex-1"
+              onClick={() => onSuccess('created', justCreatedRecipeProduct)}
+            >
+              Later
+            </Button>
+            <Button
+              className="flex-1"
+              onClick={() => {
+                const product = justCreatedRecipeProduct;
+                onSuccess('created', product);
+                navigate(`/recipes/new?product_id=${product.id}`);
+              }}
+            >
+              <Icon name="layers" size={14} /> Build Recipe
+            </Button>
+          </div>
+        </div>
+      </Modal>
+    );
+  }
 
   return (
     <>
@@ -348,49 +455,55 @@ export const ProductFormModal: React.FC<Props> = ({
             />
           </Field>
 
-          <Field label="Price" required error={fieldErrors.price}>
-            <input
-              type="number" step="0.01" min="0"
-              value={form.price} disabled={isView || saving}
-              onChange={(e) => set('price', e.target.value)}
-              className={inputCls(!!fieldErrors.price, isView)}
-            />
-          </Field>
+          {visibility.showSale && (
+            <Field label="Price" required error={fieldErrors.price}>
+              <input
+                type="number" step="0.01" min="0"
+                value={form.price} disabled={isView || saving}
+                onChange={(e) => set('price', e.target.value)}
+                className={inputCls(!!fieldErrors.price, isView)}
+              />
+            </Field>
+          )}
 
-          <Field
-            label="Cost"
-            error={fieldErrors.cost}
-            hint={
-              (isEdit || isView) && initialProduct ? (
-                <>
-                  Calculated automatically (moving-average) from purchases and stock counts.{' '}
-                  <button
-                    type="button"
-                    onClick={() => setShowCostHistory(true)}
-                    className="text-brand-600 hover:underline font-semibold"
-                  >
-                    View cost history
-                  </button>
-                </>
-              ) : undefined
-            }
-          >
-            <input
-              type="number" step="0.01" min="0"
-              value={form.cost} disabled={isView || isEdit || saving}
-              onChange={(e) => set('cost', e.target.value)}
-              className={inputCls(!!fieldErrors.cost, isView || isEdit)}
-            />
-          </Field>
+          {visibility.showCost && (
+            <Field
+              label="Cost"
+              error={fieldErrors.cost}
+              hint={
+                (isEdit || isView) && initialProduct ? (
+                  <>
+                    Calculated automatically (moving-average) from purchases and stock counts.{' '}
+                    <button
+                      type="button"
+                      onClick={() => setShowCostHistory(true)}
+                      className="text-brand-600 hover:underline font-semibold"
+                    >
+                      View cost history
+                    </button>
+                  </>
+                ) : undefined
+              }
+            >
+              <input
+                type="number" step="0.01" min="0"
+                value={form.cost} disabled={isView || isEdit || saving}
+                onChange={(e) => set('cost', e.target.value)}
+                className={inputCls(!!fieldErrors.cost, isView || isEdit)}
+              />
+            </Field>
+          )}
 
-          <Field label="Stock" error={fieldErrors.stock} hint="Supports decimals for weighted SKUs">
-            <input
-              type="number" min="0" step="0.001"
-              value={form.stock} disabled={isView || saving}
-              onChange={(e) => set('stock', e.target.value)}
-              className={inputCls(!!fieldErrors.stock, isView)}
-            />
-          </Field>
+          {visibility.showStock && (
+            <Field label="Stock" error={fieldErrors.stock} hint="Supports decimals for weighted SKUs">
+              <input
+                type="number" min="0" step="0.001"
+                value={form.stock} disabled={isView || saving}
+                onChange={(e) => set('stock', e.target.value)}
+                className={inputCls(!!fieldErrors.stock, isView)}
+              />
+            </Field>
+          )}
 
           <Field label="Category" error={fieldErrors.category}>
             <select
@@ -405,24 +518,28 @@ export const ProductFormModal: React.FC<Props> = ({
             </select>
           </Field>
 
-          <Field label="Unit" error={fieldErrors.unit}>
-            <select
-              value={form.unit} disabled={isView || saving}
-              onChange={(e) => set('unit', e.target.value as ProductUnit)}
-              className={inputCls(!!fieldErrors.unit, isView)}
-            >
-              {UNIT_OPTIONS.map((u) => <option key={u} value={u}>{u}</option>)}
-            </select>
-          </Field>
+          {visibility.showStock && (
+            <>
+              <Field label="Unit" error={fieldErrors.unit}>
+                <select
+                  value={form.unit} disabled={isView || saving}
+                  onChange={(e) => set('unit', e.target.value as ProductUnit)}
+                  className={inputCls(!!fieldErrors.unit, isView)}
+                >
+                  {UNIT_OPTIONS.map((u) => <option key={u} value={u}>{u}</option>)}
+                </select>
+              </Field>
 
-          <Field label="Pack qty" error={fieldErrors.pack_qty} hint="Pieces per sellable unit (e.g. 24 for a carton)">
-            <input
-              type="number" min="0.001" step="0.001"
-              value={form.pack_qty} disabled={isView || saving}
-              onChange={(e) => set('pack_qty', e.target.value)}
-              className={inputCls(!!fieldErrors.pack_qty, isView)}
-            />
-          </Field>
+              <Field label="Pack qty" error={fieldErrors.pack_qty} hint="Pieces per sellable unit (e.g. 24 for a carton)">
+                <input
+                  type="number" min="0.001" step="0.001"
+                  value={form.pack_qty} disabled={isView || saving}
+                  onChange={(e) => set('pack_qty', e.target.value)}
+                  className={inputCls(!!fieldErrors.pack_qty, isView)}
+                />
+              </Field>
+            </>
+          )}
 
           {/* Full-add-only fields */}
           {tab === 'full' && (
@@ -436,23 +553,27 @@ export const ProductFormModal: React.FC<Props> = ({
                 />
               </Field>
 
-              <Field label="Reorder point" error={fieldErrors.reorder}>
-                <input
-                  type="number" min="0" step="1"
-                  value={form.reorder} disabled={isView || saving}
-                  onChange={(e) => set('reorder', e.target.value)}
-                  className={inputCls(!!fieldErrors.reorder, isView)}
-                />
-              </Field>
+              {visibility.showStock && (
+                <Field label="Reorder point" error={fieldErrors.reorder}>
+                  <input
+                    type="number" min="0" step="1"
+                    value={form.reorder} disabled={isView || saving}
+                    onChange={(e) => set('reorder', e.target.value)}
+                    className={inputCls(!!fieldErrors.reorder, isView)}
+                  />
+                </Field>
+              )}
 
-              <Field label="Tax rate (fraction)" error={fieldErrors.tax_rate}>
-                <input
-                  type="number" step="0.01" min="0" max="1"
-                  value={form.tax_rate} disabled={isView || saving}
-                  onChange={(e) => set('tax_rate', e.target.value)}
-                  className={inputCls(!!fieldErrors.tax_rate, isView)}
-                />
-              </Field>
+              {visibility.showSale && (
+                <Field label="Tax rate (fraction)" error={fieldErrors.tax_rate}>
+                  <input
+                    type="number" step="0.01" min="0" max="1"
+                    value={form.tax_rate} disabled={isView || saving}
+                    onChange={(e) => set('tax_rate', e.target.value)}
+                    className={inputCls(!!fieldErrors.tax_rate, isView)}
+                  />
+                </Field>
+              )}
 
               <Field label="Color" error={fieldErrors.color}>
                 <div className="flex items-center gap-2">
@@ -489,6 +610,7 @@ export const ProductFormModal: React.FC<Props> = ({
                 </div>
               )}
 
+              {visibility.showSale && (
               <Field label="Sales category" error={fieldErrors.sales_category} hint="Menu/POS classification (Batch 2 tree) — independent of the legacy Category above.">
                 <select
                   value={form.sales_category} disabled={isView || saving}
@@ -503,7 +625,9 @@ export const ProductFormModal: React.FC<Props> = ({
                   ))}
                 </select>
               </Field>
+              )}
 
+              {visibility.showStock && (
               <Field label="Inventory category" error={fieldErrors.inventory_category} hint="Stock/purchasing classification (Batch 2 tree).">
                 <select
                   value={form.inventory_category} disabled={isView || saving}
@@ -518,7 +642,9 @@ export const ProductFormModal: React.FC<Props> = ({
                   ))}
                 </select>
               </Field>
+              )}
 
+              {visibility.showStock && (
               <label className="flex items-center gap-2 text-[13px] text-neutral-700 mt-1">
                 <input
                   type="checkbox" checked={form.weighted} disabled={isView || saving}
@@ -527,6 +653,7 @@ export const ProductFormModal: React.FC<Props> = ({
                 />
                 Weighted (priced by weight)
               </label>
+              )}
 
               <label className="flex items-center gap-2 text-[13px] text-neutral-700 mt-1">
                 <input
@@ -537,6 +664,7 @@ export const ProductFormModal: React.FC<Props> = ({
                 Active (sellable)
               </label>
 
+              {visibility.showSale && (
               <label className="flex items-center gap-2 text-[13px] text-neutral-700 mt-1">
                 <input
                   type="checkbox" checked={form.show_on_pos} disabled={isView || saving}
@@ -545,7 +673,9 @@ export const ProductFormModal: React.FC<Props> = ({
                 />
                 Show on POS
               </label>
+              )}
 
+              {visibility.showSale && (
               <label className="flex items-center gap-2 text-[13px] text-neutral-700 mt-1">
                 <input
                   type="checkbox" checked={form.is_discountable} disabled={isView || saving}
@@ -554,10 +684,27 @@ export const ProductFormModal: React.FC<Props> = ({
                 />
                 Discountable
               </label>
+              )}
+
+              {/* Batch 8 production-readiness pass: persistent entry point
+                  into the Recipe Editor for an EXISTING Recipe product —
+                  covers products created before this batch, or revisited
+                  later without going through the just-created success
+                  screen. */}
+              {visibility.showBuildRecipe && isEdit && initialProduct && (
+                <div className="col-span-2 -mt-1">
+                  <Button
+                    type="button" size="sm" variant="secondary"
+                    onClick={() => navigate(`/recipes/new?product_id=${initialProduct.id}`)}
+                  >
+                    <Icon name="layers" size={14} /> Build / edit recipe
+                  </Button>
+                </div>
+              )}
 
               {/* PLU input — only relevant for weighted SKUs. The Digi scale
                   reads this PLU back inside the 13-digit weight barcode. */}
-              {form.weighted && (
+              {visibility.showStock && form.weighted && (
                 <Field
                   label="PLU code"
                   required

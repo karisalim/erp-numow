@@ -26,7 +26,7 @@ from __future__ import annotations
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 
-from pos.models import ProductUnit, StockMovement
+from pos.models import ProductUnit, PurchaseInvoiceLine, SaleItem, StockMovement
 
 
 #: One base-unit quantity step — matches the 3dp of every stock column.
@@ -116,6 +116,25 @@ def assert_base_mapping_mutable(product) -> None:
         )
 
 
+def product_unit_in_use(product_unit: ProductUnit) -> bool:
+    """True when `product_unit` has already been used to denominate a real
+    pos-app document — a purchase invoice line or a sale item.
+
+    Narrower than `assert_base_mapping_mutable`: that guard only protects
+    the BASE mapping (inferred from StockMovement existence on the whole
+    product). This checks any single `ProductUnit` row — base or not —
+    against direct usage, so a purchase/sale unit like "Kg" or "Carton" is
+    covered too, not just the base row. Recipe/modifier usage (a separate
+    app) is checked by the caller (`ProductUnitSerializer.validate`), which
+    already lazy-imports `recipes` models the same way the rest of this
+    codebase does to avoid a static pos→recipes dependency.
+    """
+    return (
+        SaleItem.objects.filter(product_unit=product_unit).exists()
+        or PurchaseInvoiceLine.objects.filter(product_unit=product_unit).exists()
+    )
+
+
 __all__ = [
     'QTY_STEP',
     'UnitConversionError',
@@ -124,4 +143,5 @@ __all__ = [
     'convert_to_base',
     'product_has_stock_history',
     'assert_base_mapping_mutable',
+    'product_unit_in_use',
 ]

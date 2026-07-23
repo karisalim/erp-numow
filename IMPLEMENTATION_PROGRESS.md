@@ -3407,4 +3407,84 @@ deliberately deferred, not started this batch).
 
 ---
 
+## Sprint 5 Batch 8 — Production Readiness Hardening (2026-07-23)
+
+Follow-up to Batch 8's initial delivery: the user requested full
+Production-Grade enforcement (SAP/Odoo/Dynamics-level) of every rule the
+prior audits had found missing, plus a full OpenAPI/Swagger contract
+verification against a user-supplied `SuperPOS_API_2.yaml`.
+
+**Swagger verification method:** rather than a manual endpoint-by-endpoint
+read, generated a fresh schema from the live codebase via
+`manage.py spectacular` (the same tool that produced the uploaded file,
+since this backend runs `drf-spectacular`) and diffed it byte-for-byte
+against the uploaded YAML. Result: **0 path differences** (135/135
+identical); the only content diffs (240 lines) were cosmetic
+`drf-spectacular` version artifacts in unrelated auth/accounts email
+fields — zero differences in any Products/Recipes/Variants/Modifiers/
+Sales/Reports endpoint. Full findings: `SPRINT5_BATCH8_SWAGGER_COMPLIANCE_REPORT.md`.
+
+**Backend — 6 new/strengthened validations, all backend-authoritative:**
+1. `ProductSerializer.validate()` — `show_on_pos=True` now rejected for any
+   `product_type` with `can_sell=False`.
+2. `SaleSerializer.validate()` — `can_sell` now enforced per sale item
+   (previously unchecked entirely).
+3. `SaleSerializer._apply_stock()` — `affects_stock` now actually enforced
+   on the legacy branch (previously referenced only in a comment); Service/
+   Bundle/Fixed-asset sales no longer touch `Product.stock` or write any
+   `StockMovement`.
+4. `pos/services/units.py::product_unit_in_use()` (new) +
+   `ProductUnitSerializer.validate()` — `conversion_to_base` now locked for
+   any `ProductUnit` (not just the base one) once used in a real
+   purchase/sale/recipe/modifier line.
+5. `recipes/serializers.py::RecipeSerializer.validate()` (new) — Recipe
+   creation/update rejected for `product_type=bundle` (previously silently
+   accepted, functionally inert).
+6. `recipes/services/costing.py::check_recipe_readiness()` (new) — a
+   Dynamics-style "availability check" gate: Recipe exists → Active Version
+   exists (2 queries, replaces the old `get_active_recipe()` at identical
+   cost) → non-empty version + no discontinued ingredient (checked inside
+   `compute_recipe_sale_lines`, which already fetches the lines with
+   `select_related`, so **zero extra queries** on the success path — the
+   split was deliberate to avoid a measured query-count regression, caught
+   by `test_recipe_sale_query_count_regression_guard`).
+
+**Frontend — Dynamic Product Form + Reports enhancement:**
+- `ProductFormModal.tsx`: `fieldVisibility()` — a pure display mirror of
+  `pos/services/product_types.py`'s behavior matrix (booleans only, no
+  business logic) drives which inputs render per `product_type`. Verified
+  in a real browser: Ingredient hides Price/Cost-is-shown/POS/Tax/Sales
+  category, shows Stock/Unit/Pack qty/Inventory category; Recipe product
+  shows Price/POS/Tax/Sales category, hides Stock/Cost/Unit/Pack qty.
+- **"Build Recipe" journey**: a brand-new `recipe_product` gets a
+  dedicated success screen (Later / Build Recipe) after save, landing
+  directly on `/recipes/new?product_id=X` with the editor in draft mode —
+  no re-search. A persistent "Build / edit recipe" button also appears when
+  editing an existing recipe product. Full Product → Save → Build Recipe →
+  Recipe Editor journey verified end-to-end via Playwright against the
+  live stack.
+- `RecipeReportsPage.tsx`: added a 4-tile KPI strip (Revenue/Food cost/
+  Gross profit/Gross margin — client-side SUM over already-fetched rows,
+  no re-aggregation) and 3 ranked-list cards (Top Recipes by profit, Worst
+  Margin, Most Used Ingredient — client-side sort/slice of the same
+  already-fetched server-computed rows).
+- `CostPreview.tsx` — untouched, per explicit instruction (no backend
+  endpoint exists yet; placeholder stays as designed).
+
+**Verification:** 802/802 backend tests passing (0 regressions — 3
+pre-existing tests that asserted the OLD, buggy behavior were rewritten to
+assert the new, correct behavior, with each rewrite documented inline
+explaining why the old assertion was itself the bug); `manage.py check`
+clean; `makemigrations --check` — zero new migrations (pure logic changes,
+no schema changes); `npm run build` clean; real-browser Playwright
+click-through of the full Dynamic Form + Build Recipe + Reports KPI flow.
+
+**Deliverables:** `SPRINT5_BATCH8_PRODUCTION_READINESS_REPORT.md` (bugs
+fixed, validations added, validations deliberately not implemented + why,
+architecture conflicts — none found, before/after comparison,
+enterprise-grade assessment) and `SPRINT5_BATCH8_SWAGGER_COMPLIANCE_REPORT.md`
+(contract verification + endpoint dependency graph).
+
+---
+
 *(Later batches of Sprint 5 get their own entries here as they land.)*

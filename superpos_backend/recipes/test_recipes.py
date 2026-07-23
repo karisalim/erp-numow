@@ -263,6 +263,75 @@ class RecipeDepthCycleValidationTests(_RecipeTestBase):
             )
 
 
+class RecipeReadinessCheckTests(_RecipeTestBase):
+    """Batch 8 production-readiness pass — the "availability check" gate
+    `SaleSerializer.create()` now runs before allowing a recipe sale,
+    instead of the old bare `get_active_recipe()` + None-check. Split
+    across two functions for query-cost reasons (see
+    `check_recipe_readiness`'s docstring): recipe/active-version existence
+    is checked in `check_recipe_readiness` itself; non-empty-version and
+    no-discontinued-ingredient are checked inside `compute_recipe_sale_
+    lines` (which already fetches the lines anyway), not duplicated here."""
+
+    def test_no_recipe_at_all_raises_specific_message(self):
+        with self.assertRaises(recipes_costing_svc.RecipeError) as ctx:
+            recipes_costing_svc.check_recipe_readiness(self.sandwich)
+        self.assertIn('no recipe configured', str(ctx.exception))
+
+    def test_recipe_with_no_active_version_raises_specific_message(self):
+        recipe = self._create_recipe(self.sandwich)
+        self._add_version(
+            recipe, [(self.chicken, self.chicken_unit, '100')],
+            status=RecipeVersion.Status.DRAFT,
+        )
+        with self.assertRaises(recipes_costing_svc.RecipeError) as ctx:
+            recipes_costing_svc.check_recipe_readiness(self.sandwich)
+        self.assertIn('no active recipe version', str(ctx.exception))
+
+    def test_active_version_with_no_active_lines_raises_specific_message(self):
+        # Can't be produced through the write API (validate_lines rejects
+        # an empty version, and there's no endpoint to deactivate a line
+        # afterward) — constructed directly via the ORM to prove the
+        # defense-in-depth backstop itself actually works, not just that
+        # the API happens to prevent reaching this state today.
+        recipe = self._create_recipe(self.sandwich)
+        version = self._add_version(
+            recipe, [(self.chicken, self.chicken_unit, '100')],
+            status=RecipeVersion.Status.ACTIVE,
+        )
+        version.lines.update(is_active=False)
+        ready_version = recipes_costing_svc.check_recipe_readiness(self.sandwich)
+        with self.assertRaises(recipes_costing_svc.RecipeError) as ctx:
+            recipes_costing_svc.compute_recipe_sale_lines(ready_version)
+        self.assertIn('no ingredient lines', str(ctx.exception))
+
+    def test_discontinued_ingredient_raises_specific_message(self):
+        recipe = self._create_recipe(self.sandwich)
+        self._add_version(
+            recipe, [(self.chicken, self.chicken_unit, '100'), (self.lettuce, self.lettuce_unit, '30')],
+            status=RecipeVersion.Status.ACTIVE,
+        )
+        self.chicken.active = False
+        self.chicken.save(update_fields=['active'])
+        ready_version = recipes_costing_svc.check_recipe_readiness(self.sandwich)
+        with self.assertRaises(recipes_costing_svc.RecipeError) as ctx:
+            recipes_costing_svc.compute_recipe_sale_lines(ready_version)
+        self.assertIn('discontinued ingredient', str(ctx.exception))
+        self.assertIn('Chicken Breast', str(ctx.exception))
+
+    def test_fully_ready_recipe_returns_the_active_version(self):
+        recipe = self._create_recipe(self.sandwich)
+        version = self._add_version(
+            recipe, [(self.chicken, self.chicken_unit, '100')],
+            status=RecipeVersion.Status.ACTIVE,
+        )
+        result = recipes_costing_svc.check_recipe_readiness(self.sandwich)
+        self.assertEqual(result.id, version.id)
+        # And the second half of the gate (still callable independently)
+        # raises nothing for this fully-valid version.
+        recipes_costing_svc.compute_recipe_sale_lines(result)
+
+
 class RecipeVersionModelTests(_RecipeTestBase):
     def test_only_one_active_version_enforced_at_db_level(self):
         recipe = self._create_recipe(self.sandwich)
@@ -403,6 +472,23 @@ class RecipeApiTests(APITestCase):
             format='json',
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_bundle_product_cannot_have_a_recipe_created(self):
+        """Batch 8 production-readiness pass — BUNDLE is a classification
+        placeholder (`is_recipe_eligible` already excludes it from the
+        sale-time RECIPE_CONSUME path); the write API must reject it too,
+        rather than silently accepting a Recipe nothing will ever use."""
+        bundle = Product.objects.create(
+            tenant=self.tenant, category=self.category,
+            name='Combo Meal', barcode='API-BUNDLE', sku='SKU-API-BUNDLE',
+            price=Decimal('40.00'), cost=Decimal('0.00'), stock=Decimal('0'),
+            product_type=ProductType.BUNDLE,
+        )
+        resp = self.client.post(
+            reverse('recipe-list', args=[bundle.id]), {}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
+        self.assertIn('product', resp.json())
 
     def test_recipe_detail_get_and_patch(self):
         """Batch 7 verification (coverage gap review) — RecipeDetailView
@@ -1056,6 +1142,19 @@ class RecipeSalePostingTests(APITestCase):
         self.chicken.refresh_from_db()
         self.assertLess(self.chicken.stock, Decimal('0'))
 
+    def test_discontinued_ingredient_blocks_the_actual_sale(self):
+        """Batch 8 production-readiness pass — the end-to-end version of
+        `RecipeReadinessCheckTests.test_discontinued_ingredient_raises_
+        specific_message`, proving the check is actually wired into the
+        real sale endpoint, not just the service function in isolation."""
+        self.lettuce.active = False
+        self.lettuce.save(update_fields=['active'])
+        resp = self._post_sale([{'product': self.sandwich.id, 'qty': '1'}])
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
+        self.assertIn('discontinued', str(resp.json()))
+        self.lettuce.active = True
+        self.lettuce.save(update_fields=['active'])
+
     def test_no_active_recipe_returns_clean_400(self):
         unconfigured = Product.objects.create(
             tenant=self.tenant, category=self.category,
@@ -1110,12 +1209,24 @@ class RecipeSalePostingTests(APITestCase):
     # (2026-07-22). Reuses this class's fixture (branches, ingredients,
     # sandwich recipe, cheese modifier) directly.
 
-    def test_bundle_type_recipe_ignored_falls_through_to_legacy_stock_path(self):
+    def test_bundle_type_recipe_ignored_never_touches_any_stock(self):
         """Point 1 — `can_have_recipe=True` is shared by RECIPE_PRODUCT,
         PREP_ITEM, and BUNDLE, but only the first two are recipe-eligible.
-        A BUNDLE with a Recipe attached must still sell through the legacy
-        stock-item path (its own Product.stock/SALE_OUT), never through
-        RECIPE_CONSUME on its "recipe"'s ingredients."""
+        A BUNDLE with a Recipe attached (constructed directly via the ORM
+        here — the Batch 8 production-readiness pass added an API-level
+        guard rejecting this through `POST .../recipes/`, but pre-existing
+        data or a direct ORM write can still produce it) falls through to
+        the legacy stock-item branch of `_apply_stock`, never
+        RECIPE_CONSUME on its "recipe"'s ingredients.
+
+        Batch 8 production-readiness pass revision: that legacy branch now
+        also enforces `affects_stock` (previously referenced only in a
+        comment) — and BUNDLE has `affects_stock=False` — so a Bundle sale
+        must touch NEITHER its own `Product.stock` NOR write any
+        `StockMovement` at all, not even a `SALE_OUT` one. This supersedes
+        the pre-Batch-8 assertion here, which documented the bug being
+        fixed (a Bundle silently decrementing its own stock on every
+        sale), not a contract worth preserving."""
         bundle = Product.objects.create(
             tenant=self.tenant, category=self.category,
             name='Combo Bundle', barcode='RS-BND', sku='SKU-RS-BND',
@@ -1135,29 +1246,23 @@ class RecipeSalePostingTests(APITestCase):
 
         resp = self._post_sale([{'product': bundle.id, 'qty': '2', 'price_each': '20.00'}])
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
-        sale = Sale.objects.get(sale_uuid=resp.json()['sale_uuid'])
-        item = sale.items.get(product=bundle)
 
-        self.assertTrue(
-            StockMovement.objects.filter(
-                product=bundle, movement_type=StockMovement.MovementType.SALE_OUT,
-                source_document_id=sale.id,
-            ).exists()
-        )
         bundle.refresh_from_db()
-        self.assertEqual(bundle.stock, Decimal('98'))
+        self.assertEqual(bundle.stock, Decimal('100'), 'Bundle has no stock concept — must be untouched')
         self.assertFalse(
-            StockMovement.objects.filter(
-                product=bundle, movement_type=StockMovement.MovementType.RECIPE_CONSUME,
-            ).exists()
+            StockMovement.objects.filter(product=bundle).exists(),
+            'a Bundle sale must write zero StockMovement rows of any type',
+        )
+        self.chicken.refresh_from_db()
+        self.assertEqual(
+            self.chicken.stock, Decimal('100000'),  # 50000 purchased into each of branch A/B
+            "the Bundle's inert ORM-attached Recipe must never consume its ingredients either",
         )
         self.assertFalse(
             StockMovement.objects.filter(
                 product=self.chicken, movement_type=StockMovement.MovementType.RECIPE_CONSUME,
-                source_document_id=sale.id,
-            ).exists()
+            ).exists(),
         )
-        self.assertFalse(SaleItemRecipeCostSnapshot.objects.filter(sale_item=item).exists())
 
     def test_variant_snapshot_fields_survive_variant_rename_and_deletion(self):
         """Point 2 — SaleItem.variant_name/variant_price freeze the

@@ -233,7 +233,7 @@ class ProductTypeApiTests(_ProductFoundationTestBase):
         for i, value in enumerate(ProductType.values):
             resp = self.client.post(reverse('product-list'), self._payload(
                 name=f'Typed {value}', barcode=f'PF-T-{i}', sku=f'PF-SKU-T-{i}',
-                product_type=value,
+                product_type=value, show_on_pos=False,
             ), format='json')
             self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
             body = resp.json()
@@ -439,6 +439,39 @@ class ProductFlagsAndBarcodeGuardTests(_ProductFoundationTestBase):
             reverse('product-detail', args=[self.choco.pk]),
             {'name': 'Chocolate Deluxe'}, format='json')
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+
+    # ── Batch 8 production-readiness pass: show_on_pos enforcement ─────────
+
+    def test_show_on_pos_rejected_for_non_sellable_type_on_create(self):
+        resp = self.client.post(reverse('product-list'), self._payload(
+            product_type=ProductType.INGREDIENT, show_on_pos=True), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
+        self.assertIn('show_on_pos', resp.json())
+
+    def test_show_on_pos_false_accepted_for_non_sellable_type(self):
+        resp = self.client.post(reverse('product-list'), self._payload(
+            product_type=ProductType.INGREDIENT, show_on_pos=False), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+
+    def test_show_on_pos_still_allowed_for_sellable_type(self):
+        resp = self.client.post(reverse('product-list'), self._payload(
+            product_type=ProductType.STOCK_ITEM, show_on_pos=True), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+
+    def test_reclassifying_to_non_sellable_rejects_leftover_show_on_pos_true(self):
+        # The product_type change and the show_on_pos flip aren't in the
+        # same PATCH — show_on_pos defaults from the existing (True) row,
+        # so switching only product_type must still be caught.
+        resp = self.client.post(reverse('product-list'), self._payload(
+            barcode='PF-RECLASSIFY', product_type=ProductType.STOCK_ITEM,
+        ), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        product_id = resp.json()['id']
+        resp2 = self.client.patch(
+            reverse('product-detail', args=[product_id]),
+            {'product_type': ProductType.INGREDIENT}, format='json')
+        self.assertEqual(resp2.status_code, status.HTTP_400_BAD_REQUEST, resp2.content)
+        self.assertIn('show_on_pos', resp2.json())
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -675,11 +708,15 @@ class LegacyCompatibilityTests(_ProductFoundationTestBase):
                     'active', 'margin', 'created_at', 'updated_at']:
             self.assertIn(key, body)
 
-    def test_sale_flow_untouched_by_new_classification(self):
-        self.milk.product_type = 'service'  # even a non-stock classification…
+    def test_default_stock_item_sale_flow_untouched_by_classification_fields_existing(self):
+        # The default `stock_item` classification (unlike `service`, see
+        # below) still sells and deducts stock exactly as before Batch 3 —
+        # merely having `product_type`/`show_on_pos` fields present on the
+        # model changed nothing for the type every pre-Batch-3 product
+        # already defaults to.
         self.milk.show_on_pos = False
         self.milk.stock = Decimal('100')
-        self.milk.save(update_fields=['product_type', 'show_on_pos', 'stock'])
+        self.milk.save(update_fields=['show_on_pos', 'stock'])
 
         self.client.force_authenticate(user=self.pos_cashier)
         resp = self.client.post(reverse('sale-list'), {
@@ -688,10 +725,32 @@ class LegacyCompatibilityTests(_ProductFoundationTestBase):
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
 
-        # …still deducts stock exactly as before: classification only, no
-        # behavior is wired to the flags in this batch.
         self.milk.refresh_from_db()
         self.assertEqual(self.milk.stock, Decimal('98.000'))
+        self.assertEqual(Sale.objects.filter(tenant=self.tenant).count(), 1)
+
+    def test_service_classification_sells_but_no_longer_deducts_stock(self):
+        # Batch 8 production-readiness pass: `affects_stock` is now actually
+        # enforced (previously it was referenced only in a comment) — a
+        # `service`-typed product still sells (can_sell=True) but must NOT
+        # deduct stock (affects_stock=False). This intentionally supersedes
+        # the pre-Batch-8 assertion here, which documented the bug being
+        # fixed ("classification only, no behavior is wired to the flags"),
+        # not a contract worth preserving.
+        self.milk.product_type = 'service'
+        self.milk.stock = Decimal('100')
+        self.milk.save(update_fields=['product_type', 'stock'])
+
+        self.client.force_authenticate(user=self.pos_cashier)
+        resp = self.client.post(reverse('sale-list'), {
+            'items': [{'product': self.milk.pk, 'qty': '2', 'price_each': '30.00'}],
+            'method': 'cash', 'amount_paid': '60.00',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+
+        self.milk.refresh_from_db()
+        self.assertEqual(self.milk.stock, Decimal('100.000'))
+        self.assertFalse(StockMovement.objects.filter(product=self.milk).exists())
         self.assertEqual(Sale.objects.filter(tenant=self.tenant).count(), 1)
 
     def test_seeded_product_sells_unchanged(self):

@@ -2,6 +2,7 @@ from django.db.models import Max
 from rest_framework import serializers
 
 from pos.services import units as units_svc
+from pos.services.product_types import ProductType
 from recipes.models import (
     ModifierGroup, ModifierOption, ModifierOptionConsumption,
     ProductModifierGroup, ProductVariant, Recipe, RecipeLine, RecipeVersion,
@@ -73,6 +74,26 @@ class RecipeSerializer(serializers.ModelSerializer):
         if value is not None and tenant is not None and value.tenant_id != tenant.id:
             raise serializers.ValidationError("variant must belong to the caller's tenant.")
         return value
+
+    def validate(self, attrs):
+        # Bundle enforcement (Batch 8 production-readiness pass): BUNDLE is
+        # a classification placeholder only — `recipes.services.costing
+        # .is_recipe_eligible()` already excludes it from ever being sold
+        # through the recipe/RECIPE_CONSUME path (real bundle-explosion
+        # costing doesn't exist yet). Letting the API silently accept a
+        # Recipe for a Bundle product gave a false impression the feature
+        # worked; reject it explicitly here instead, with a message naming
+        # the actual reason.
+        product = self.context.get('product') or getattr(self.instance, 'product', None)
+        if product is not None and product.product_type == ProductType.BUNDLE:
+            raise serializers.ValidationError({
+                'product': (
+                    'Bundle products do not support recipes yet — bundle-explosion '
+                    'costing is a planned future feature, not implemented today. '
+                    'Attach ingredients to individual products instead.'
+                ),
+            })
+        return attrs
 
 
 class RecipeLineSerializer(serializers.ModelSerializer):

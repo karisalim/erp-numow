@@ -25,12 +25,15 @@ from accounts.services import account_movements as account_service
 from accounts.services import customer_ar as customer_ar_service
 from accounts.services import supplier_ap as supplier_ap_service
 from pos.models import (
-    AuditLog, BranchWarehouse, Category, Payment, Product, PurchaseInvoice,
-    PurchaseInvoiceLine, Sale, SaleItem, StockMovement, Warehouse, WarehouseStock,
+    AuditLog, BranchWarehouse, Category, Payment, Product, ProductUnit,
+    PurchaseInvoice, PurchaseInvoiceLine, Sale, SaleItem, StockMovement, Unit,
+    UnitGroup, Warehouse, WarehouseStock,
 )
 from pos.services import purchase_invoices as purchase_invoice_service
 from pos.services import sale_posting
+from pos.services import units as units_svc
 from pos.services import stock_movements as stock_movement_service
+from pos.services.product_types import ProductType
 from pos.views import _parse_weight_encoded_barcode
 
 
@@ -2171,3 +2174,149 @@ class ProvisionDefaultPaymentRoutingCommandTests(APITestCase):
     def test_unknown_tenant_raises_command_error(self):
         with self.assertRaises(CommandError):
             self._run('--apply', '--tenant=999999')
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Batch 8 production-readiness pass — can_sell / affects_stock enforcement
+# ══════════════════════════════════════════════════════════════════════════════
+
+class ProductTypeSaleEnforcementTests(_SalePostingTestBase):
+    """The backend is the sole authority on which product types may be sold
+    and which affect stock — not a frontend convention. Mirrors the exact
+    gaps the Batch 8 audit named: `affects_stock` was previously referenced
+    only in a comment, and no `can_sell` check existed anywhere in
+    `SaleSerializer`."""
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.cashier)
+
+    def _make_product(self, product_type, **over):
+        defaults = dict(
+            tenant=self.tenant, category=self.category,
+            name=f'{product_type} item', barcode=f'PT-{product_type}',
+            sku=f'SKU-PT-{product_type}',
+            price=Decimal('10.00'), cost=Decimal('5.00'), stock=Decimal('50'),
+            product_type=product_type,
+        )
+        defaults.update(over)
+        return Product.objects.create(**defaults)
+
+    def test_ingredient_cannot_be_sold_directly(self):
+        ingredient = self._make_product(ProductType.INGREDIENT)
+        body = self._sale_body('cash', items=[
+            {'product': ingredient.id, 'qty': '1', 'price_each': '10.00'},
+        ])
+        resp = self.client.post(reverse('sale-list'), body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
+        self.assertIn('cannot be sold directly', str(resp.json()))
+
+    def test_packaging_cannot_be_sold_directly(self):
+        packaging = self._make_product(ProductType.PACKAGING)
+        body = self._sale_body('cash', items=[
+            {'product': packaging.id, 'qty': '1', 'price_each': '10.00'},
+        ])
+        resp = self.client.post(reverse('sale-list'), body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
+
+    def test_fixed_asset_cannot_be_sold(self):
+        asset = self._make_product(ProductType.FIXED_ASSET)
+        body = self._sale_body('cash', items=[
+            {'product': asset.id, 'qty': '1', 'price_each': '10.00'},
+        ])
+        resp = self.client.post(reverse('sale-list'), body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
+
+    def test_stock_item_still_sells_normally_after_can_sell_enforcement(self):
+        # Regression guard: the new per-item can_sell check must not touch
+        # the ordinary stock-item path at all.
+        resp = self.client.post(reverse('sale-list'), self._sale_body('cash'), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+
+    def test_service_product_sells_but_never_touches_stock(self):
+        service = self._make_product(ProductType.SERVICE, stock=Decimal('0'))
+        body = self._sale_body('cash', items=[
+            {'product': service.id, 'qty': '1', 'price_each': '10.00'},
+        ])
+        resp = self.client.post(reverse('sale-list'), body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        service.refresh_from_db()
+        self.assertEqual(service.stock, Decimal('0'))
+        self.assertFalse(
+            StockMovement.objects.filter(product=service).exists(),
+            'a Service product must never get a StockMovement row — it has no stock concept',
+        )
+
+    def test_bundle_sells_but_never_touches_its_own_stock(self):
+        bundle = self._make_product(ProductType.BUNDLE, stock=Decimal('0'))
+        body = self._sale_body('cash', items=[
+            {'product': bundle.id, 'qty': '1', 'price_each': '10.00'},
+        ])
+        resp = self.client.post(reverse('sale-list'), body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        bundle.refresh_from_db()
+        self.assertEqual(bundle.stock, Decimal('0'))
+        self.assertFalse(StockMovement.objects.filter(product=bundle).exists())
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Batch 8 production-readiness pass — conversion_to_base integrity
+# ══════════════════════════════════════════════════════════════════════════════
+
+class ProductUnitConversionIntegrityTests(_SalePostingTestBase):
+    """A `ProductUnit` (base or not) that has already denominated a real
+    sale/purchase must not have its `conversion_to_base` silently changed —
+    that would leave already-converted historical quantities inconsistent
+    with all future ones sharing the same unit row."""
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.manager)
+        self.unit_group = UnitGroup.objects.create(tenant=self.tenant, name='Count')
+        self.dozen_unit = Unit.objects.create(
+            tenant=self.tenant, unit_group=self.unit_group, name='Dozen', symbol='dz',
+            factor_to_base=Decimal('1'), allow_decimal=False,
+        )
+        self.dozen = ProductUnit.objects.create(
+            tenant=self.tenant, product=self.product, unit=self.dozen_unit,
+            conversion_to_base=Decimal('12'), is_base=False, is_sale_unit=True,
+        )
+
+    def test_unused_unit_conversion_freely_editable(self):
+        resp = self.client.patch(
+            reverse('product-unit-detail', args=[self.product.id, self.dozen.id]),
+            {'conversion_to_base': '10'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+
+    def test_conversion_locked_once_used_in_a_sale(self):
+        sale_body = {
+            'items': [{
+                'product': self.product.id, 'product_unit': self.dozen.id,
+                'entered_qty': '2',
+            }],
+            'method': 'cash', 'amount_paid': '1000.00',
+        }
+        self.client.force_authenticate(user=self.cashier)
+        resp = self.client.post(reverse('sale-list'), sale_body, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+
+        self.client.force_authenticate(user=self.manager)
+        resp2 = self.client.patch(
+            reverse('product-unit-detail', args=[self.product.id, self.dozen.id]),
+            {'conversion_to_base': '10'}, format='json')
+        self.assertEqual(resp2.status_code, status.HTTP_400_BAD_REQUEST, resp2.content)
+        self.assertIn('conversion_to_base', resp2.json())
+
+    def test_editing_other_fields_still_allowed_once_locked(self):
+        SaleItem.objects.create(
+            sale=Sale.objects.create(
+                tenant=self.tenant, branch=self.branch, cashier=self.cashier,
+                subtotal=Decimal('0'), tax_amount=Decimal('0'), total=Decimal('0'),
+                method=Sale.Method.CASH,
+            ),
+            product=self.product, product_unit=self.dozen,
+            product_name=self.product.name, qty=Decimal('12'), price_each=Decimal('10.00'),
+            line_total=Decimal('120.00'),
+        )
+        resp = self.client.patch(
+            reverse('product-unit-detail', args=[self.product.id, self.dozen.id]),
+            {'is_sale_unit': False}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)

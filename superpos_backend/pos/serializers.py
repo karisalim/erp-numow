@@ -157,6 +157,24 @@ class ProductSerializer(serializers.ModelSerializer):
                     'instead.'
                 ),
             })
+
+        # show_on_pos enforcement (Batch 8 production-readiness pass): a
+        # product type that cannot be sold at all (`can_sell=False` —
+        # Ingredient, Packaging, Prep item, Fixed asset) must never be
+        # marked visible on the POS catalog. This closes the exact gap the
+        # Batch 8 audit flagged: hiding the checkbox in the UI is not
+        # enforcement, only the backend rejecting the write is.
+        effective_type = attrs.get('product_type', getattr(self.instance, 'product_type', None))
+        effective_show_on_pos = attrs.get(
+            'show_on_pos', getattr(self.instance, 'show_on_pos', True),
+        )
+        if effective_type and effective_show_on_pos and not get_behavior(effective_type).can_sell:
+            raise serializers.ValidationError({
+                'show_on_pos': (
+                    f'"{effective_type}" products are not sellable and cannot be shown on '
+                    f'the POS catalog.'
+                ),
+            })
         return attrs
 
     def __init__(self, *args, **kwargs):
@@ -850,6 +868,38 @@ class ProductUnitSerializer(serializers.ModelSerializer):
                     'is_base': str(exc),
                     'code': units_svc.UnitConversionError.code,
                 })
+
+        # Broader conversion-integrity guard (Batch 8 production-readiness
+        # pass): the base-only check above protects `StockMovement` history.
+        # This one protects any `ProductUnit` — base or not — once it has
+        # actually denominated a real Purchase/Sale/Recipe/Modifier line.
+        # `PurchaseInvoiceLine`/`SaleItem` are pos-app tables, checked via
+        # `units_svc.product_unit_in_use`; `RecipeLine`/
+        # `ModifierOptionConsumption` live in the `recipes` app, so they're
+        # lazy-imported here rather than from `units.py` itself — same
+        # pattern already used everywhere else in this file to avoid a
+        # static pos→recipes dependency (recipes depends on pos, never the
+        # reverse).
+        if self.instance is not None and 'conversion_to_base' in attrs:
+            new_conversion = attrs['conversion_to_base']
+            if new_conversion != self.instance.conversion_to_base:
+                from recipes.models import ModifierOptionConsumption, RecipeLine
+                in_use = (
+                    units_svc.product_unit_in_use(self.instance)
+                    or RecipeLine.objects.filter(component_unit=self.instance).exists()
+                    or ModifierOptionConsumption.objects.filter(component_unit=self.instance).exists()
+                )
+                if in_use:
+                    raise serializers.ValidationError({
+                        'conversion_to_base': (
+                            'This unit has already been used in a purchase, sale, or '
+                            'recipe/modifier line; its conversion factor cannot be changed '
+                            '— historical quantities were converted with the old factor and '
+                            'would silently drift out of sync. Deactivate this unit and add '
+                            'a new one instead.'
+                        ),
+                        'code': 'unit_conversion_locked',
+                    })
         return attrs
 
 
@@ -1410,6 +1460,19 @@ class SaleSerializer(serializers.ModelSerializer):
             variant      = item.get('variant')
             key          = f'items[{i}]'
 
+            # can_sell enforcement (Batch 8 production-readiness pass): the
+            # backend is the sole authority — a product type that cannot be
+            # sold (Ingredient, Packaging, Prep item, Fixed asset) must be
+            # rejected here regardless of what the frontend does or doesn't
+            # hide. Checked once, before any of the three payload shapes
+            # below are branched on, so it covers all of them uniformly.
+            if product is not None and not product.type_behavior.can_sell:
+                errors[f'{key}.product'] = (
+                    f'"{product.name}" ({product.get_product_type_display()}) cannot be '
+                    f'sold directly.'
+                )
+                continue
+
             # Sprint 2 Batch 5a: a unit-aware line derives qty/price_each
             # server-side instead of accepting them from the client — never
             # both shapes at once, and the client-supplied qty/price_each (if
@@ -1644,11 +1707,18 @@ class SaleSerializer(serializers.ModelSerializer):
                     # snapshot below; nothing recomputes a recipe's cost or
                     # consumption again after this point (review point 5) —
                     # `_apply_stock`/void/refund read the snapshot only.
-                    recipe_version = recipes_costing_svc.get_active_recipe(product, variant=variant)
-                    if recipe_version is None:
-                        raise serializers.ValidationError({
-                            'items': [f'"{product.name}" has no active recipe configured yet.'],
-                        })
+                    # Batch 8 production-readiness gate — Recipe exists,
+                    # has an ACTIVE version, that version is non-empty, and
+                    # every ingredient it references is still active.
+                    # Replaces the old inline `get_active_recipe()` + bare
+                    # None-check, which only ever covered the first two
+                    # conditions.
+                    try:
+                        recipe_version = recipes_costing_svc.check_recipe_readiness(
+                            product, variant=variant,
+                        )
+                    except recipes_costing_svc.RecipeError as exc:
+                        raise serializers.ValidationError({'items': [str(exc)]})
                     try:
                         recipe_result = recipes_costing_svc.compute_recipe_sale_lines(
                             recipe_version, modifier_options=modifier_options,
@@ -1874,6 +1944,15 @@ class SaleSerializer(serializers.ModelSerializer):
                                 'LOW STOCK: "%s" (id=%s) stock=%s below reorder=%s',
                                 component.name, component.pk, component.stock, component.reorder,
                             )
+                    continue
+
+                # affects_stock enforcement (Batch 8 production-readiness
+                # pass): a type with no stock concept at all — Service,
+                # Bundle (until real bundle-explosion exists), Fixed asset —
+                # must never reach `deduct_stock`/`StockMovement(SALE_OUT)`.
+                # Previously `affects_stock` was referenced only in a
+                # comment here; this is the actual enforcement.
+                if not product.type_behavior.affects_stock:
                     continue
 
                 qty_delta = item.qty

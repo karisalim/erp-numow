@@ -113,6 +113,51 @@ def get_active_recipe(product, variant=None) -> Optional[RecipeVersion]:
     return recipe.versions.filter(status=RecipeVersion.Status.ACTIVE).first()
 
 
+def check_recipe_readiness(product, variant=None) -> RecipeVersion:
+    """The Batch 8 production-readiness gate — the same concept mature
+    ERPs call an "availability check" before allowing a sale/production
+    order (e.g. Dynamics 365's material availability check). Raises
+    `RecipeError` with a message naming the SPECIFIC failed condition —
+    never a generic "not ready" — so `SaleSerializer` can surface it
+    directly to the cashier/manager.
+
+    Conditions checked HERE (deliberately query-cheap — identical cost to
+    the old bare `get_active_recipe()` this replaces, 2 queries):
+      1. A Recipe exists for (product, variant).
+      2. That Recipe has an ACTIVE version.
+
+    Two further conditions — (3) the active version has at least one
+    active ingredient line, (4) every referenced ingredient is still an
+    active `Product` — are enforced by `compute_recipe_sale_lines`
+    instead of here, deliberately: that function already fetches every
+    line with `select_related('component_product')` to compute cost, so
+    checking there costs ZERO extra queries. Checking here too would
+    fetch the same rows twice — a measured regression this codebase
+    treats as a real regression, not a rounding error (see
+    `RecipeSalePostingTests.test_recipe_sale_query_count_regression_
+    guard`). `SaleSerializer.create()` calls both functions in the same
+    request, so the net effect for a caller is identical either way; only
+    the query cost differs.
+
+    Unit correctness (D-26-style "every unit resolves") is NOT re-checked
+    at all: `RecipeLine.qty_base` is computed and frozen once, at
+    line-creation time (`RecipeLineSerializer.create`) — there is no live
+    unit resolution left to fail at sale time.
+    """
+    recipe = Recipe.objects.filter(product=product, variant=variant, is_active=True).first()
+    if recipe is None:
+        raise RecipeError(f'"{product.name}" has no recipe configured yet.')
+    # select_related so `compute_recipe_sale_lines`' failure-path messages
+    # (recipe_version.recipe.product.name) cost a JOIN, not an extra query.
+    version = (
+        recipe.versions.filter(status=RecipeVersion.Status.ACTIVE)
+        .select_related('recipe__product').first()
+    )
+    if version is None:
+        raise RecipeError(f'"{product.name}" has no active recipe version yet.')
+    return version
+
+
 def compute_recipe_cost(recipe_version: RecipeVersion, branch=None) -> RecipeCostResult:
     """Roll up a `RecipeVersion`'s cost from its components' current
     branch-scoped average cost (Sprint 5 Batch 1). Each line is quantized
@@ -310,6 +355,25 @@ def compute_recipe_sale_lines(
     base_lines = list(
         recipe_version.lines.filter(is_active=True).select_related('component_product'),
     )
+    # Batch 8 production-readiness pass — the two remaining
+    # check_recipe_readiness() conditions (non-empty version, no
+    # discontinued ingredient), checked HERE instead of in that function
+    # so they cost zero extra queries: `base_lines` above is already the
+    # exact fetch those checks need, with `component_product` already
+    # select_related. See check_recipe_readiness's docstring.
+    if not base_lines:
+        raise RecipeError(
+            f'"{recipe_version.recipe.product.name}"\'s active recipe version '
+            f'(v{recipe_version.version_no}) has no ingredient lines.',
+        )
+    discontinued = sorted({
+        line.component_product.name for line in base_lines if not line.component_product.active
+    })
+    if discontinued:
+        raise RecipeError(
+            f'"{recipe_version.recipe.product.name}" cannot be sold — its recipe uses '
+            f'discontinued ingredient(s): {", ".join(discontinued)}.',
+        )
     for line in base_lines:
         cid = line.component_product_id
         net_qty[cid] = net_qty.get(cid, Decimal('0')) + line.qty_base
@@ -399,7 +463,7 @@ def resolve_kitchen_warehouse(*, tenant, branch):
 
 __all__ = [
     'RecipeError', 'RecipeCostLine', 'RecipeCostResult', 'MAX_RECIPE_DEPTH',
-    'is_recipe_eligible', 'get_active_recipe', 'compute_recipe_cost',
+    'is_recipe_eligible', 'get_active_recipe', 'check_recipe_readiness', 'compute_recipe_cost',
     'validate_recipe_lines', 'compute_modifier_deltas', 'compute_recipe_sale_lines',
     'activate_recipe_version', 'resolve_kitchen_warehouse',
 ]
