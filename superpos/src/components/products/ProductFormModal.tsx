@@ -96,6 +96,10 @@ function fieldVisibility(meta: ProductTypeMetadata | undefined) {
     showCost: !!b?.requires_cost,     // Accounting section: opening Cost (create) / read-only mirror (edit)
     canPurchase: !!b?.can_purchase,   // Purchasing section content
     showBuildRecipe: meta?.value === 'recipe_product', // Recipe section
+    // Barcode Strategy: hidden entirely for types that never scan (Prep
+    // Item, Service, Fixed Asset) — `meta` undefined (still loading) shows
+    // it by default so the field doesn't flicker away then back on load.
+    showBarcode: meta ? !!meta.barcode_visible : true,
     required,
     recommended,
   };
@@ -248,8 +252,6 @@ function computeFieldError(key: FieldKey, form: FormState, visibility: Visibilit
   switch (key) {
     case 'name':
       return form.name.trim() ? undefined : 'Name is required.';
-    case 'barcode':
-      return form.barcode.trim() ? undefined : 'Barcode is required.';
     case 'price': {
       if (!visibility.showSale) return undefined;
       const n = Number(form.price);
@@ -282,7 +284,7 @@ function computeFieldError(key: FieldKey, form: FormState, visibility: Visibilit
   }
 }
 
-const VALIDATED_KEYS: FieldKey[] = ['name', 'barcode', 'price', 'tax_rate', 'pack_qty', 'plu'];
+const VALIDATED_KEYS: FieldKey[] = ['name', 'price', 'tax_rate', 'pack_qty', 'plu'];
 
 /* ─────────────────────────────────────────────────────────────────────────── */
 
@@ -514,13 +516,19 @@ export const ProductFormModal: React.FC<Props> = ({
                 onChange={(e) => set('name', e.target.value)}
                 containerClassName="col-span-2"
               />
-              <FormField
-                label="Barcode" required showValid
-                value={form.barcode} onBlur={() => blur('barcode')}
-                error={displayError('barcode')}
-                disabled={savingProps.disabled} readOnly={savingProps.readOnly}
-                onChange={(e) => set('barcode', e.target.value)}
-              />
+              {/* Barcode Strategy: optional for every type, shown for every
+                  type except Prep Item / Service / Fixed Asset (which never
+                  scan — Name/SKU stay the identifier instead). Driven
+                  entirely by backend metadata, never a hardcoded list here. */}
+              {visibility.showBarcode && (
+                <FormField
+                  label="Barcode"
+                  hint="Optional — used for POS scanning. Leave blank if this item isn't scanned."
+                  value={form.barcode}
+                  disabled={savingProps.disabled} readOnly={savingProps.readOnly}
+                  onChange={(e) => set('barcode', e.target.value)}
+                />
+              )}
               <SelectField
                 label="Category" hint="Legacy flat category — kept for backward compatibility."
                 value={form.category} disabled={savingProps.disabled}

@@ -576,6 +576,12 @@ export interface ProductTypeMetadata {
    * `_recommended_fields` docstring for why (Quick Add stays unblocked;
    * "Uncategorized" is a valid permanent state, matching mainstream ERPs). */
   recommended_fields: string[];
+  /** Barcode Strategy (Enterprise UX Polish): whether the Barcode field is
+   * even shown for this type. `barcode` is never in `required_fields` for
+   * ANY type — this only controls visibility, not requirement. Hidden for
+   * types that never scan (Prep Item, Service, Fixed Asset); name/SKU
+   * remain the identifier when it's hidden. */
+  barcode_visible: boolean;
 }
 
 /* ── Inventory costing (AVCO audit trail — read-only) ─────────────────────

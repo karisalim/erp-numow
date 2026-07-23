@@ -767,3 +767,60 @@ class LegacyCompatibilityTests(_ProductFoundationTestBase):
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
         self.milk.refresh_from_db()
         self.assertEqual(self.milk.stock, Decimal('47.000'))
+
+
+class BarcodeOptionalTests(_ProductFoundationTestBase):
+    """Enterprise UX Polish — Barcode Strategy: `barcode` is never a hard
+    requirement for any product type; visibility (not requirement) is the
+    only thing that varies by type, and that's a frontend concern driven by
+    `product_type_metadata()['barcode_visible']`."""
+
+    def test_create_product_with_no_barcode_succeeds(self):
+        resp = self.client.post(reverse('product-list'), self._payload(
+            name='No Barcode Item', barcode='', sku='PF-SKU-NOBAR',
+        ), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        self.assertEqual(resp.json()['barcode'], '')
+
+    def test_two_products_with_blank_barcode_do_not_collide(self):
+        first = self.client.post(reverse('product-list'), self._payload(
+            name='Blank A', barcode='', sku='PF-SKU-BLANK-A',
+        ), format='json')
+        second = self.client.post(reverse('product-list'), self._payload(
+            name='Blank B', barcode='', sku='PF-SKU-BLANK-B',
+        ), format='json')
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED, first.content)
+        self.assertEqual(second.status_code, status.HTTP_201_CREATED, second.content)
+
+    def test_non_empty_duplicate_barcode_still_rejected(self):
+        resp = self.client.post(reverse('product-list'), self._payload(
+            name='Dup', barcode=self.milk.barcode, sku='PF-SKU-DUP',
+        ), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_omitting_barcode_field_entirely_still_succeeds(self):
+        payload = self._payload(name='Omitted Barcode', sku='PF-SKU-OMIT')
+        del payload['barcode']
+        resp = self.client.post(reverse('product-list'), payload, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+        self.assertEqual(resp.json()['barcode'], '')
+
+    def test_required_fields_never_include_barcode_for_any_type(self):
+        resp = self.client.get(reverse('product-type-metadata-list'))
+        for row in resp.json():
+            self.assertNotIn(
+                'barcode', row['required_fields'],
+                f"{row['value']} must not hard-require barcode",
+            )
+
+    def test_barcode_visible_true_for_stock_facing_types(self):
+        resp = self.client.get(reverse('product-type-metadata-list'))
+        body = {row['value']: row for row in resp.json()}
+        for value in ('stock_item', 'resale', 'ingredient', 'packaging', 'recipe_product'):
+            self.assertTrue(body[value]['barcode_visible'], value)
+
+    def test_barcode_hidden_for_non_scanned_types(self):
+        resp = self.client.get(reverse('product-type-metadata-list'))
+        body = {row['value']: row for row in resp.json()}
+        for value in ('prep_item', 'service', 'fixed_asset'):
+            self.assertFalse(body[value]['barcode_visible'], value)

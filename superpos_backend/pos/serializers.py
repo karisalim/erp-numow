@@ -135,6 +135,21 @@ class ProductSerializer(serializers.ModelSerializer):
                         '(pack barcode); pick a distinct product barcode.'
                     ),
                 })
+            # Same-tenant Product-vs-Product collision (Barcode Strategy:
+            # `barcode` dropped out of Meta.unique_together when it became
+            # optional — DRF only auto-generates a UniqueTogetherValidator
+            # from that Meta option, not from the raw partial `Meta.constraints`
+            # UniqueConstraint that replaced it, so this check must be
+            # explicit or a duplicate would 500 as a raw IntegrityError
+            # instead of a clean 400. Blank barcodes are exempt by design —
+            # that's the whole point of the partial constraint.
+            dup_qs = Product.objects.filter(tenant=tenant, barcode=barcode)
+            if self.instance is not None:
+                dup_qs = dup_qs.exclude(pk=self.instance.pk)
+            if dup_qs.exists():
+                raise serializers.ValidationError({
+                    'barcode': 'A product with this barcode already exists.',
+                })
 
         # Type-change guard (same philosophy as the base-unit immutability
         # rule): once stock history exists in the ledger, the product cannot

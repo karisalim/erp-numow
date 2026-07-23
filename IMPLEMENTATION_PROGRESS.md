@@ -3591,4 +3591,62 @@ yet" for the same product — all matching real backend state, not assumed.
 
 ---
 
+### Product Module Enterprise UX Review — Barcode Strategy (2026-07-23)
+
+Follow-up to the Phase 3 Enterprise UX Polish pass, scoped to a fresh
+11-item Product-module review. Ten of the eleven items were already
+satisfied by prior work (verified, not rebuilt — see
+`Product_Module_Enterprise_UX_Review.md`); the one real gap was **Barcode
+Strategy (item 4)**: `Product.barcode` was DB/API-required for every
+product type, contradicting the requested "barcode is never globally
+required; visibility depends on type" policy.
+
+**Backend:**
+- `pos/models.py`: `Product.barcode` → `blank=True, default=''`; removed
+  `('tenant', 'barcode')` from `unique_together`; added a partial
+  `UniqueConstraint(fields=['tenant', 'barcode'], condition=~Q(barcode=''))`
+  so any number of products may leave barcode blank without colliding.
+  Migration `0032_product_barcode_optional` — schema-only, zero data
+  mutation.
+- `pos/services/product_types.py`: `barcode` removed from
+  `_required_fields()` for every type (was previously always-required);
+  new `_barcode_visible()` / `_BARCODE_HIDDEN_TYPES` (Prep Item, Service,
+  Fixed Asset — types that never scan) exposed as `barcode_visible` on
+  `product_type_metadata()`.
+- `pos/serializers.py`: **real bug caught before shipping** — removing
+  `unique_together` also silently removed DRF's auto-generated duplicate
+  validator (it only derives from `Meta.unique_together`, not from raw
+  `Meta.constraints`), so a duplicate non-blank barcode would have fallen
+  through to an uncaught `IntegrityError` (500) instead of a clean 400.
+  Fixed with an explicit tenant-scoped `Product`-vs-`Product` uniqueness
+  check in `ProductSerializer.validate()`, mirroring the existing
+  pack-barcode collision check right above it.
+- 7 new tests in `pos/test_product_foundation.py::BarcodeOptionalTests`
+  (blank-barcode create, two-blanks-no-collision, duplicate-non-blank
+  still-rejected, omitted-field-defaults-blank, `required_fields` never
+  contains barcode for any type, `barcode_visible` correct per type).
+
+**Frontend:**
+- `types/erp.ts`: `ProductTypeMetadata.barcode_visible: boolean`.
+- `components/products/ProductFormModal.tsx`: `fieldVisibility()` gained
+  `showBarcode`; the Barcode field is no longer hardcoded `required` and
+  is wrapped in `visibility.showBarcode &&` so it disappears entirely for
+  Prep Item/Service/Fixed Asset; `barcode` removed from
+  `computeFieldError`/`VALIDATED_KEYS` (nothing to validate — it's
+  optional everywhere now); added a hint explaining it's optional.
+- `pages/ProductsPage.tsx`: blank barcode renders as a muted em-dash
+  instead of empty whitespace.
+- New root doc: `Product_Module_Enterprise_UX_Review.md` — the full
+  11-item review (type-by-type field table, comparison vs SAP/Dynamics/
+  Odoo, already-implemented/improved/still-recommended breakdown).
+
+**Verification:** 821/821 backend tests passing (814 baseline + 7 new);
+`manage.py check` / `makemigrations --check` clean; `npm run build`
+clean; real-browser Playwright click-through confirmed the Barcode field
+correctly disappears for Service/Prep Item and reappears (optional, no
+asterisk) for Ingredient/Stock Item, matching the live
+`GET /catalog/product-types/` response.
+
+---
+
 *(Later batches of Sprint 5 get their own entries here as they land.)*

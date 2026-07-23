@@ -141,8 +141,9 @@ def behavior_flags(product_type: str) -> dict[str, bool]:
 #: actually does:
 #:   * `required_fields`  — the backend REJECTS a write missing this field
 #:     for this type (`Product.price`/`Product.cost` have no DB default and
-#:     no `null=True`, so DRF already requires them; `name`/`barcode` are
-#:     always required). Every name here is a hard 400 if omitted.
+#:     no `null=True`, so DRF already requires them; `name` is always
+#:     required). Every name here is a hard 400 if omitted. `barcode` is
+#:     deliberately never in this list — see the Barcode Strategy note below.
 #:   * `recommended_fields` — a real business-rule gap review finding (a
 #:     sellable product with no `sales_category`, or a stock-tracked one
 #:     with no `inventory_category`, is bad menu/purchasing hygiene) that is
@@ -153,12 +154,33 @@ def behavior_flags(product_type: str) -> dict[str, bool]:
 #:     app's POS relies on). The frontend nudges for these; the backend
 #:     never 400s over them.
 def _required_fields(behavior: ProductTypeBehavior) -> list[str]:
-    fields: list[str] = ['name', 'barcode']
+    # `barcode` is intentionally NOT in this list for any type (Enterprise UX
+    # Polish, Barcode Strategy) — `name` is the only identifier the backend
+    # ever hard-requires; barcode/SKU/PLU are all optional aids on top of it.
+    fields: list[str] = ['name']
     if behavior.can_sell:
         fields.append('price')
     if behavior.requires_cost:
         fields.append('cost')  # opening cost, create-time only — see ProductSerializer.create()
     return fields
+
+
+#: Types that never scan a barcode in normal operation — an internal
+#: kitchen component (Prep Item), a non-physical line (Service), or a
+#: purchase-only asset (Fixed Asset). The form hides the field entirely for
+#: these rather than show a control nobody will ever use; every other type
+#: still shows it, optionally. This is a UI-visibility decision only — it
+#: does not change what the backend accepts (barcode is never required, and
+#: a hidden-by-default type may still be given one later, e.g. via CSV).
+_BARCODE_HIDDEN_TYPES = frozenset({
+    ProductType.PREP_ITEM,
+    ProductType.SERVICE,
+    ProductType.FIXED_ASSET,
+})
+
+
+def _barcode_visible(product_type: str) -> bool:
+    return product_type not in _BARCODE_HIDDEN_TYPES
 
 
 def _recommended_fields(behavior: ProductTypeBehavior) -> list[str]:
@@ -184,6 +206,7 @@ def product_type_metadata() -> list[dict]:
             'behavior': behavior_flags(value),
             'required_fields': _required_fields(get_behavior(value)),
             'recommended_fields': _recommended_fields(get_behavior(value)),
+            'barcode_visible': _barcode_visible(value),
         }
         for value, label in ProductType.choices
     ]

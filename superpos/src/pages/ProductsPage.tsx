@@ -337,7 +337,7 @@ export const ProductsPage: React.FC = () => {
                         </div>
                       </td>
                       <td className="font-mono text-[12px] text-neutral-600">{p.sku}</td>
-                      <td className="font-mono text-[12px] text-neutral-600">{p.barcode}</td>
+                      <td className="font-mono text-[12px] text-neutral-600">{p.barcode || <span className="text-neutral-300">—</span>}</td>
                       <td className="text-neutral-600">{categoryLabel}</td>
                       <td><ProductTypeBadge productType={p.product_type} /></td>
                       <td className="text-end font-mono tabular-nums text-neutral-500">{money(p.cost)}</td>

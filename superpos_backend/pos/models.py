@@ -56,7 +56,13 @@ class Product(models.Model):
         'accounts.Tenant', on_delete=models.CASCADE,
         related_name='products', db_index=True,
     )
-    barcode  = models.CharField(max_length=30, db_index=True)
+    # Optional (Enterprise UX Polish, Barcode Strategy): NOT globally required.
+    # Whether the field is even shown to the user is a type-driven UI decision
+    # (`product_types.py`'s `barcode_visible`) — Prep Item / Service / Fixed
+    # Asset never scan, so their forms hide it entirely; every other type may
+    # still leave it blank (name/SKU remain the identifier). Blank barcodes
+    # never collide with each other — see the partial unique constraint below.
+    barcode  = models.CharField(max_length=30, db_index=True, blank=True, default='')
     sku      = models.CharField(max_length=40, db_index=True)
     name     = models.CharField(max_length=120)
     category = models.ForeignKey(Category, on_delete=models.SET_NULL, null=True, related_name='products')
@@ -107,7 +113,7 @@ class Product(models.Model):
 
     class Meta:
         ordering        = ['name']
-        unique_together = [('tenant', 'barcode'), ('tenant', 'sku')]
+        unique_together = [('tenant', 'sku')]
         indexes = [
             # Partial: fast lookups for the "low stock alerts" widget on the
             # dashboard — avoids scanning the whole catalog every page load.
@@ -135,6 +141,15 @@ class Product(models.Model):
             models.CheckConstraint(
                 check=models.Q(tax_rate__gte=0) & models.Q(tax_rate__lte=1),
                 name='pos_product_tax_rate_bounded',
+            ),
+            # Barcode Strategy: uniqueness only applies to a real, non-blank
+            # code — an unlimited number of products may leave barcode blank
+            # (Postgres's plain `unique_together` would have rejected the
+            # second blank one; this partial index does not).
+            models.UniqueConstraint(
+                fields=['tenant', 'barcode'],
+                condition=~models.Q(barcode=''),
+                name='pos_product_tenant_barcode_uniq_nonempty',
             ),
         ]
 
