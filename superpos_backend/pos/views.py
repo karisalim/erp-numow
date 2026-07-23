@@ -57,7 +57,7 @@ from .serializers import (
     WarehouseStockSerializer,
 )
 from .services import barcode_resolution, costing, idempotency
-from .services.product_types import ProductType
+from .services.product_types import ProductType, product_type_metadata
 from .services.standard_units import StandardUnitCode
 
 
@@ -2410,6 +2410,28 @@ class StandardUnitCodeListView(APIView):
             {'code': code, 'label': label}
             for code, label in StandardUnitCode.choices
         ])
+
+
+class ProductTypeMetadataListView(APIView):
+    """GET — the full product-type behavior + required-field matrix (Batch 8
+    architectural-improvement pass), read straight off
+    `pos.services.product_types.PRODUCT_TYPE_BEHAVIOR`.
+
+    This is the single source of truth the frontend's Dynamic Product Form
+    renders from — no `product_type` rule is duplicated in React. Every
+    rule this data drives (can_sell, show_on_pos, required fields) is still
+    independently enforced server-side regardless of what the form does
+    with this payload; it only controls what's *shown*, never what's
+    *allowed*.
+
+    Pure enum readout, no DB query, no tenant scoping — same shape as
+    `StandardUnitCodeListView` right above it.
+    """
+
+    permission_classes = [IsCashierOrAbove]
+
+    def get(self, request):
+        return Response(product_type_metadata())
 
 
 class _ProductScopedMixin(TenantMixin):

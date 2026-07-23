@@ -83,6 +83,24 @@ export interface RecipeVersionPayload {
   lines: RecipeLineInput[];
 }
 
+/** `GET .../versions/{id}/cost-preview/` — server-computed, branch-scoped
+ * live cost. Every field here comes straight off the response; nothing is
+ * recomputed client-side. */
+export interface RecipeCostPreviewLine {
+  component_product: number;
+  component_name: string;
+  qty_base: string;
+  unit_cost: string;
+  line_cost: string;
+}
+
+export interface RecipeCostPreview {
+  recipe_version: number;
+  branch_id: number | null;
+  total_cost: string;
+  lines: RecipeCostPreviewLine[];
+}
+
 /* ── Modifiers (Sprint 5 Batch 4) ─────────────────────────────────────────── */
 
 export type ModifierSelectionType = 'single' | 'multiple';

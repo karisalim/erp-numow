@@ -562,6 +562,82 @@ class RecipeApiTests(APITestCase):
         self.assertEqual(resp.json()['id'], version.id)
         self.assertEqual(len(resp.json()['lines']), 1)
 
+    def test_cost_preview_returns_live_computed_total(self):
+        """Architectural-improvement pass: `RecipeVersionCostPreviewView`
+        closes the documented `CostPreview.tsx` gap — a real, server-
+        computed cost is now available before the recipe is ever sold."""
+        recipe = Recipe.objects.create(tenant=self.tenant, product=self.sandwich)
+        version = RecipeVersion.objects.create(
+            tenant=self.tenant, recipe=recipe, version_no=1, status=RecipeVersion.Status.DRAFT,
+        )
+        RecipeLine.objects.create(
+            tenant=self.tenant, recipe_version=version,
+            component_product=self.chicken, component_unit=self.chicken_unit,
+            entered_qty=Decimal('150'), qty_base=Decimal('150'),
+        )
+        resp = self.client.get(
+            reverse('recipe-version-cost-preview', args=[self.sandwich.id, recipe.id, version.id]),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+        data = resp.json()
+        self.assertEqual(data['total_cost'], '15.00')  # 150 * 0.10
+        self.assertEqual(len(data['lines']), 1)
+        self.assertEqual(data['lines'][0]['component_product'], self.chicken.id)
+        self.assertIsNone(data['branch_id'])
+
+    def test_cost_preview_is_branch_scoped_when_branch_id_given(self):
+        branch = Branch.objects.create(tenant=self.tenant, name='Downtown')
+        InventoryCost.objects.create(
+            tenant=self.tenant, product=self.chicken, branch=branch,
+            avg_unit_cost=Decimal('0.5000'),
+        )
+        recipe = Recipe.objects.create(tenant=self.tenant, product=self.sandwich)
+        version = RecipeVersion.objects.create(
+            tenant=self.tenant, recipe=recipe, version_no=1, status=RecipeVersion.Status.DRAFT,
+        )
+        RecipeLine.objects.create(
+            tenant=self.tenant, recipe_version=version,
+            component_product=self.chicken, component_unit=self.chicken_unit,
+            entered_qty=Decimal('100'), qty_base=Decimal('100'),
+        )
+        resp = self.client.get(
+            reverse('recipe-version-cost-preview', args=[self.sandwich.id, recipe.id, version.id]),
+            {'branch_id': branch.id},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content)
+        self.assertEqual(resp.json()['total_cost'], '50.00')  # 100 * 0.50
+        self.assertEqual(resp.json()['branch_id'], branch.id)
+
+    def test_cost_preview_rejects_cross_tenant_branch(self):
+        other_tenant = Tenant.objects.create(name='Other Tenant')
+        other_branch = Branch.objects.create(tenant=other_tenant, name='Not Mine')
+        recipe = Recipe.objects.create(tenant=self.tenant, product=self.sandwich)
+        version = RecipeVersion.objects.create(
+            tenant=self.tenant, recipe=recipe, version_no=1, status=RecipeVersion.Status.DRAFT,
+        )
+        resp = self.client.get(
+            reverse('recipe-version-cost-preview', args=[self.sandwich.id, recipe.id, version.id]),
+            {'branch_id': other_branch.id},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_cost_preview_cashier_can_read(self):
+        """Manager+-only for writes, but a cashier building a menu preview
+        should be able to read it — matches other read-heavy recipe GETs
+        (`recipe-version-detail`) staying available to IsManagerOrAbove
+        only per this app's convention (recipe editing is manager-scoped
+        end to end, unlike Units/Categories); confirmed here as a
+        regression guard rather than assumed."""
+        recipe = Recipe.objects.create(tenant=self.tenant, product=self.sandwich)
+        version = RecipeVersion.objects.create(
+            tenant=self.tenant, recipe=recipe, version_no=1, status=RecipeVersion.Status.DRAFT,
+        )
+        self.client.force_authenticate(user=self.cashier)
+        resp = self.client.get(
+            reverse('recipe-version-cost-preview', args=[self.sandwich.id, recipe.id, version.id]),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
 
 # ── Sprint 5 Batch 4: Modifiers ──────────────────────────────────────────────
 

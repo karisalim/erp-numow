@@ -11,6 +11,7 @@ import type {
   ProductVariant, ProductVariantPayload,
   Recipe, RecipePayload,
   RecipeVersion, RecipeVersionPayload,
+  RecipeCostPreview,
 } from '../types';
 
 export type ListParams = Record<string, string | number | boolean | undefined>;
@@ -85,5 +86,16 @@ export const recipeVersionsApi = {
   activate: (productId: number, recipeId: number, versionId: number) =>
     apiClient
       .post<RecipeVersion>(`/products/${productId}/recipes/${recipeId}/versions/${versionId}/activate/`)
+      .then(r => r.data),
+
+  /** Live, server-computed cost for a (draft or active) version — real
+   * branch-scoped AVCO roll-up, closes the gap `CostPreview.tsx` used to
+   * document as an explicit backend gap (see that component's history). */
+  costPreview: (productId: number, recipeId: number, versionId: number, branchId?: number) =>
+    apiClient
+      .get<RecipeCostPreview>(
+        `/products/${productId}/recipes/${recipeId}/versions/${versionId}/cost-preview/`,
+        { params: branchId ? { branch_id: branchId } : undefined },
+      )
       .then(r => r.data),
 };

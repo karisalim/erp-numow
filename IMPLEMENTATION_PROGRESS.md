@@ -3487,4 +3487,108 @@ enterprise-grade assessment) and `SPRINT5_BATCH8_SWAGGER_COMPLIANCE_REPORT.md`
 
 ---
 
+### Sprint 5 Batch 8 — Architectural Improvements Pass (2026-07-23)
+
+**Scope:** explicit follow-up request — architectural improvements only,
+not a re-implementation of the validations already shipped in the
+Production Readiness pass above. Six items:
+
+1. **Single Source of Truth.** New `GET /api/catalog/product-types/`
+   (`pos.services.product_types.product_type_metadata()`) reads straight
+   off `PRODUCT_TYPE_BEHAVIOR` — value/label/behavior flags/`required_fields`/
+   `recommended_fields` per type, zero duplication. `ProductFormModal.tsx`'s
+   local `TYPE_BEHAVIOR` const and hardcoded `PRODUCT_TYPE_OPTIONS` array
+   are deleted; the form now fetches this endpoint once per session (cached
+   in `hooks/useProductTypeMetadata.ts`, a module-level singleton fetch —
+   static reference data, changes only when a developer adds a new type)
+   and renders purely from the response via `findTypeMetadata()`. The
+   frontend is now genuinely a renderer, not a second copy of the rule set.
+2. **Dynamic Form Architecture — evaluated, not rebuilt.** A full Tabs/
+   Sections redesign was assessed and intentionally NOT done this pass: the
+   form is short enough (≤20 fields) that a tab split would add navigation
+   cost without reducing real complexity, and every other admin form in
+   this codebase (Units, Price Tiers, Categories) uses the same flat-card
+   pattern — switching only this one form would break consistency. What
+   *was* done is the workflow-driven piece the request's own example was
+   really pointing at (steps 3-4 below): the Recipe Status stepper and the
+   Derived Cost field turn "hide fields you can't use" into "show you where
+   you are in the process" for the one product type (`recipe_product`)
+   that actually has a multi-step lifecycle. Recorded as a conscious
+   decision, not a skipped one — see the ERP UX Review reply for detail.
+3. **Recipe Workflow.** New `RecipeStatusStepper.tsx` — reads real backend
+   state (`GET /products/{id}/recipes/` + its versions) and renders
+   `(No Recipe) → Build Recipe → Manage Versions → Activate Version →
+   POS Ready`, only ever shown for an *existing* Recipe product in edit
+   mode (never on create, since there's no product id yet to query).
+   "POS Ready" only lights up when ALL of {active version exists, `can_sell`,
+   `show_on_pos`} are true — a built-and-activated recipe that isn't shown
+   on POS correctly stays short of the last step, with an inline reason.
+4. **Derived Cost.** New backend endpoint
+   `GET /products/{id}/recipes/{recipe_id}/versions/{version_id}/cost-preview/`
+   (`recipes.services.costing.compute_recipe_cost`, exposed for the first
+   time over the API — previously sale-only) plus `?branch_id=`. Replaces
+   the previous `CostPreview.tsx` "not available yet" placeholder with a
+   real, live, branch-scoped total + per-ingredient line list. New
+   `DerivedCostField.tsx` shows this same number read-only inside
+   `ProductFormModal` in place of the (now correctly still-hidden) editable
+   Cost input for Recipe products, closing the "hide the whole section"
+   gap named in the request.
+5. **Required Fields Audit.** Two real, honest findings, both fixed:
+   - **Purchase-side type enforcement was missing** — `can_sell` is
+     enforced on `SaleSerializer` (prior batch) but `can_purchase` was
+     never checked on `PurchaseInvoiceLineSerializer`; a Recipe
+     product/Prep item/Service/Bundle could be purchased via a purchase
+     invoice, which is architecturally wrong. Fixed with the exact mirror
+     check.
+   - **`sales_category`/`inventory_category` "required" claim was
+     re-scoped, not force-enforced.** Both FKs stay `null=True, blank=True`
+     at the model level deliberately — hard-requiring them would break the
+     Quick Add fast-entry path and doesn't match how mainstream ERPs treat
+     an "Uncategorized" product (a permanent valid state, not an error).
+     `product_type_metadata()` now splits `required_fields` (backend
+     rejects a write missing it — `name`/`barcode`/`price` when sellable/
+     `cost` when cost-tracked) from `recommended_fields` (a real nudge, UI
+     shows "(recommended)", never blocks submission). This keeps the new
+     metadata endpoint honest — it never claims an enforcement the backend
+     doesn't actually perform.
+6. **ERP UX Review** — delivered as a direct chat reply (production-ready
+   vs still-needs-improvement list), not a new document, matching the
+   request's own "state only what's still needed / what's ready" framing.
+
+**Files changed:**
+- Backend: `pos/services/product_types.py` (`_required_fields`,
+  `_recommended_fields`, `product_type_metadata`), `pos/views.py`
+  (`ProductTypeMetadataListView`), `pos/urls.py`, `pos/serializers.py`
+  (`PurchaseInvoiceLineSerializer.validate` — `can_purchase` check),
+  `recipes/views.py` (`RecipeVersionCostPreviewView`), `recipes/urls.py`.
+- Backend tests: `pos/test_units.py` (`ProductTypeMetadataTests`),
+  `pos/tests.py` (`PurchaseInvoiceProductTypeEnforcementTests`),
+  `recipes/test_recipes.py` (5 new cost-preview tests in `RecipeApiTests`).
+- Frontend: `hooks/useProductTypeMetadata.ts` (new), `api/erp.ts`
+  (`productTypesApi`), `types/erp.ts` (`ProductTypeMetadata`),
+  `components/products/ProductFormModal.tsx` (metadata-driven visibility,
+  `(recommended)` field tags, stepper + derived-cost wiring),
+  `components/products/RecipeStatusStepper.tsx` (new),
+  `components/products/DerivedCostField.tsx` (new),
+  `apps/recipes/components/CostPreview.tsx` (real fetch, replacing the
+  documented placeholder — includes a fix for a `useQuery` fetcher that
+  must gate on `canPreview` itself, not just its render branch, since the
+  hook's effect fires on every dependency change regardless of what gets
+  rendered), `apps/recipes/api/recipesApi.ts` (`costPreview`),
+  `apps/recipes/types/index.ts` (`RecipeCostPreview`).
+
+**Verification:** 814/814 backend tests passing (up from 802 — 9 new
+tests for the metadata endpoint + purchase enforcement + cost-preview
+endpoint, 3 pre-existing tests updated where `required_fields` assertions
+moved to `recommended_fields`); `manage.py check` clean;
+`makemigrations --check` — zero new migrations (pure service/view/
+serializer additions, no schema changes); `npm run build` clean;
+real-browser Playwright verification of the metadata-driven Dynamic Form
+(type switch correctly re-renders visibility from the server response),
+the `(recommended)` tag, the Recipe Status stepper showing "No recipe" for
+a product with none, and the Derived Cost field showing "No active recipe
+yet" for the same product — all matching real backend state, not assumed.
+
+---
+
 *(Later batches of Sprint 5 get their own entries here as they land.)*

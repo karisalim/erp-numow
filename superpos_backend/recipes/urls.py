@@ -21,6 +21,10 @@ urlpatterns = [
         'products/<int:product_pk>/recipes/<int:recipe_pk>/versions/<int:pk>/activate/',
         views.RecipeVersionActivateView.as_view(), name='recipe-version-activate',
     ),
+    path(
+        'products/<int:product_pk>/recipes/<int:recipe_pk>/versions/<int:pk>/cost-preview/',
+        views.RecipeVersionCostPreviewView.as_view(), name='recipe-version-cost-preview',
+    ),
 
     path('catalog/modifier-groups/',                        views.ModifierGroupListCreateView.as_view(), name='modifier-group-list'),
     path('catalog/modifier-groups/<int:pk>/',                views.ModifierGroupDetailView.as_view(),     name='modifier-group-detail'),

@@ -698,6 +698,65 @@ class _PurchaseInvoiceTestBase(APITestCase):
         return body
 
 
+class PurchaseInvoiceProductTypeEnforcementTests(_PurchaseInvoiceTestBase):
+    """Architectural-improvement pass: the purchase-side mirror of
+    `ProductTypeSaleEnforcementTests` — `can_purchase=False` types (Recipe
+    product, Prep item, Service, Bundle) must be rejected by
+    `PurchaseInvoiceLineSerializer`, not just kept off a purchase-entry
+    UI's product picker."""
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.manager)
+
+    def _make(self, product_type, **over):
+        defaults = dict(
+            tenant=self.tenant, category=self.category,
+            name=f'{product_type} item', barcode=f'BC-{product_type}',
+            sku=f'SKU-{product_type}', price=Decimal('20.00'),
+            cost=Decimal('0.00'), stock=Decimal('0'), product_type=product_type,
+        )
+        defaults.update(over)
+        return Product.objects.create(**defaults)
+
+    def test_recipe_product_cannot_be_purchased(self):
+        product = self._make(ProductType.RECIPE_PRODUCT)
+        resp = self.client.post(
+            reverse('purchase-invoice-list'),
+            self._body(lines=[{'product': product.id, 'warehouse': self.warehouse.id, 'qty': '5', 'unit_cost': '9.00'}]),
+            format='json', HTTP_IDEMPOTENCY_KEY='pit-recipe-reject',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
+        self.assertIn('cannot be purchased', str(resp.json()))
+
+    def test_service_cannot_be_purchased(self):
+        product = self._make(ProductType.SERVICE)
+        resp = self.client.post(
+            reverse('purchase-invoice-list'),
+            self._body(lines=[{'product': product.id, 'warehouse': self.warehouse.id, 'qty': '5', 'unit_cost': '9.00'}]),
+            format='json', HTTP_IDEMPOTENCY_KEY='pit-service-reject',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
+
+    def test_bundle_cannot_be_purchased(self):
+        product = self._make(ProductType.BUNDLE)
+        resp = self.client.post(
+            reverse('purchase-invoice-list'),
+            self._body(lines=[{'product': product.id, 'warehouse': self.warehouse.id, 'qty': '5', 'unit_cost': '9.00'}]),
+            format='json', HTTP_IDEMPOTENCY_KEY='pit-bundle-reject',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.content)
+
+    def test_stock_item_still_purchases_normally(self):
+        """Regression guard: the default type (and every other
+        `can_purchase=True` type — Ingredient/Packaging/Resale/Fixed
+        asset) must be entirely unaffected by this check."""
+        resp = self.client.post(
+            reverse('purchase-invoice-list'), self._body(),
+            format='json', HTTP_IDEMPOTENCY_KEY='pit-stockitem-ok',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.content)
+
+
 class PurchaseInvoicePostingTests(_PurchaseInvoiceTestBase):
 
     def setUp(self):

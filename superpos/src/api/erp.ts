@@ -39,6 +39,7 @@ import type {
   ProductUnitPayload,
   ProductUnitTierPrice,
   ProductUnitTierPricePayload,
+  ProductTypeMetadata,
   PurchaseInvoice,
   PurchaseInvoicePayload,
   StandardUnitCode,
@@ -252,6 +253,17 @@ export const unitsApi = {
 
   standardCodes: () =>
     apiClient.get<StandardUnitCode[]>('/catalog/standard-unit-codes/').then(r => r.data),
+};
+
+/* ── Product type metadata (Batch 8 architectural-improvement pass) ──────
+ * The single source of truth for product-type behavior + required fields
+ * — `pos.services.product_types.PRODUCT_TYPE_BEHAVIOR`, read-only, never
+ * duplicated in React. Static reference data (no tenant scoping, changes
+ * only when a developer adds a new product type), so callers are expected
+ * to fetch it once and cache it for the session rather than re-fetch per
+ * form open — see `useProductTypeMetadata()`. */
+export const productTypesApi = {
+  list: () => apiClient.get<ProductTypeMetadata[]>('/catalog/product-types/').then(r => r.data),
 };
 
 /* ── Per-product unit conversions & pack barcodes ───────────────────────── */

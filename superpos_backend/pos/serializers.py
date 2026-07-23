@@ -1179,6 +1179,23 @@ class PurchaseInvoiceLineSerializer(serializers.ModelSerializer):
         if line_type == PurchaseInvoiceLine.LineType.STOCK_ITEM and attrs.get('product') is None:
             raise serializers.ValidationError(
                 {'product': 'product is required for a stock_item line.'})
+
+        # Product Type Enforcement (Batch 8 architectural-improvement pass):
+        # the purchase-side mirror of SaleSerializer's `can_sell` check. A
+        # type that may never be purchased (Recipe product/Prep item —
+        # produced from a recipe, not bought; Service/Bundle — no stock-in
+        # event of their own) must be rejected here, not just kept off a
+        # purchase-entry UI's product picker.
+        product = attrs.get('product')
+        if product is not None:
+            from pos.services.product_types import get_behavior
+            if not get_behavior(product.product_type).can_purchase:
+                raise serializers.ValidationError({
+                    'product': (
+                        f'"{product.get_product_type_display()}" products cannot be purchased.'
+                    ),
+                })
+
         for fld in ('unit_cost', 'discount_amount', 'tax_amount'):
             val = attrs.get(fld)
             if val is not None and val < 0:

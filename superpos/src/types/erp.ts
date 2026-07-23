@@ -560,6 +560,24 @@ export interface ProductTypeBehavior {
   can_have_recipe: boolean;
 }
 
+/** `GET /catalog/product-types/` (Batch 8 architectural-improvement pass)
+ * — the single source of truth for product-type behavior + required
+ * fields. Read straight off `pos.services.product_types
+ * .PRODUCT_TYPE_BEHAVIOR` on the backend; the frontend never hand-copies
+ * this matrix, only renders whatever this endpoint returns. */
+export interface ProductTypeMetadata {
+  value: ProductTypeValue;
+  label: string;
+  behavior: ProductTypeBehavior;
+  /** Backend-enforced: omitting one of these is a 400. */
+  required_fields: string[];
+  /** A real business-rule nudge (e.g. a sellable product with no
+   * sales_category), deliberately NOT backend-enforced — see the backend's
+   * `_recommended_fields` docstring for why (Quick Add stays unblocked;
+   * "Uncategorized" is a valid permanent state, matching mainstream ERPs). */
+  recommended_fields: string[];
+}
+
 /* ── Inventory costing (AVCO audit trail — read-only) ─────────────────────
  * Mirrors `InventoryCostMovement`/`InventoryCostMovementSerializer` on the
  * backend exactly: every field is server-computed, nothing here is ever

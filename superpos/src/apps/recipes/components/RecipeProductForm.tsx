@@ -216,7 +216,7 @@ export const RecipeProductForm: React.FC<{
         </>
       )}
 
-      <CostPreview productId={productId} />
+      <CostPreview productId={productId} recipeId={recipe?.id} versionId={selectedVersion?.id} />
 
       {variantId === null && (
         <>

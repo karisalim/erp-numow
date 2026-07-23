@@ -9,8 +9,11 @@ import { Badge } from '../ui/Badge';
 import { categoriesApi, asResults } from '../../api/erp';
 import { flattenTree } from '../../utils/tree';
 import { ProductCostHistoryDrawer } from './ProductCostHistoryDrawer';
+import { RecipeStatusStepper } from './RecipeStatusStepper';
+import { DerivedCostField } from './DerivedCostField';
+import { useProductTypeMetadata, findTypeMetadata } from '../../hooks/useProductTypeMetadata';
 import type { Product, ProductUnit } from '../../types';
-import type { CategoryTreeNode, ProductTypeValue } from '../../types/erp';
+import type { CategoryTreeNode, ProductTypeValue, ProductTypeMetadata } from '../../types/erp';
 
 export type FormMode = 'create' | 'edit' | 'view';
 type Tab = 'quick' | 'full';
@@ -58,21 +61,6 @@ interface FormState {
 
 const UNIT_OPTIONS: ProductUnit[] = ['piece', 'kg', 'liter', 'carton'];
 
-/** Mirrors pos/services/product_types.py ProductType — labels only; the
- * behavior matrix itself stays server-side (read-only `behavior` on the
- * product), never duplicated here. */
-const PRODUCT_TYPE_OPTIONS: { value: ProductTypeValue; label: string }[] = [
-  { value: 'stock_item',     label: 'Stock item' },
-  { value: 'ingredient',     label: 'Ingredient' },
-  { value: 'prep_item',      label: 'Prep item' },
-  { value: 'recipe_product', label: 'Recipe product' },
-  { value: 'resale',         label: 'Resale' },
-  { value: 'packaging',      label: 'Packaging' },
-  { value: 'service',        label: 'Service' },
-  { value: 'bundle',         label: 'Bundle' },
-  { value: 'fixed_asset',    label: 'Fixed asset' },
-];
-
 const HIDDEN_DEFAULTS = {
   reorder:  '10',
   tax_rate: '0.10',
@@ -84,34 +72,29 @@ const HIDDEN_DEFAULTS = {
   is_discountable: true,
 };
 
-/** Mirrors `pos/services/product_types.py`'s `PRODUCT_TYPE_BEHAVIOR` matrix
- * — booleans only, no derived/computed logic. This is display-visibility
- * data (which inputs to show before a product even exists yet, so there's
- * no server-returned `behavior` to read), not business logic: every rule
- * this drives (can_sell, show_on_pos, affects_stock/track_inventory) is
- * independently enforced server-side (`ProductSerializer.validate`,
- * `SaleSerializer`) regardless of what this form shows or hides. */
-const TYPE_BEHAVIOR: Record<ProductTypeValue, {
-  can_sell: boolean; can_purchase: boolean; track_inventory: boolean; requires_cost: boolean;
-}> = {
-  stock_item:     { can_sell: true,  can_purchase: true,  track_inventory: true,  requires_cost: true },
-  ingredient:     { can_sell: false, can_purchase: true,  track_inventory: true,  requires_cost: true },
-  prep_item:      { can_sell: false, can_purchase: false, track_inventory: true,  requires_cost: true },
-  recipe_product: { can_sell: true,  can_purchase: false, track_inventory: false, requires_cost: false },
-  resale:         { can_sell: true,  can_purchase: true,  track_inventory: true,  requires_cost: true },
-  packaging:      { can_sell: false, can_purchase: true,  track_inventory: true,  requires_cost: true },
-  service:        { can_sell: true,  can_purchase: false, track_inventory: false, requires_cost: false },
-  bundle:         { can_sell: true,  can_purchase: false, track_inventory: false, requires_cost: false },
-  fixed_asset:    { can_sell: false, can_purchase: true,  track_inventory: false, requires_cost: true },
-};
-
-function fieldVisibility(productType: ProductTypeValue) {
-  const b = TYPE_BEHAVIOR[productType];
+/** Single Source of Truth (Batch 8 architectural-improvement pass): field
+ * visibility is derived ENTIRELY from `GET /catalog/product-types/`
+ * (`pos.services.product_types.PRODUCT_TYPE_BEHAVIOR`, fetched once and
+ * cached by `useProductTypeMetadata`) — there is no second, hand-copied
+ * behavior matrix in this file anymore. This function is a pure renderer:
+ * it maps server-supplied booleans to which inputs show, nothing more.
+ * Every rule this drives (can_sell, show_on_pos, affects_stock/
+ * track_inventory) is still independently enforced server-side
+ * (`ProductSerializer.validate`, `SaleSerializer`) regardless of what this
+ * form shows or hides — the backend never trusts this. `meta` is
+ * `undefined` only before the metadata fetch resolves; callers gate on
+ * that via `typesLoading` before rendering type-dependent fields. */
+function fieldVisibility(meta: ProductTypeMetadata | undefined) {
+  const b = meta?.behavior;
+  const required = new Set(meta?.required_fields ?? []);
+  const recommended = new Set(meta?.recommended_fields ?? []);
   return {
-    showSale: b.can_sell,          // Price, Show on POS, Tax rate, Discountable, Sales category
-    showStock: b.track_inventory,  // Stock, Reorder, Unit, Pack qty, Weighted, Inventory category
-    showCost: b.requires_cost,     // Cost (opening cost on create; AVCO-derived read-only on edit)
-    showBuildRecipe: productType === 'recipe_product',
+    showSale: !!b?.can_sell,          // Price, Show on POS, Tax rate, Discountable, Sales category
+    showStock: !!b?.track_inventory,  // Stock, Reorder, Unit, Pack qty, Weighted, Inventory category
+    showCost: !!b?.requires_cost,     // Cost (opening cost on create; AVCO-derived read-only on edit)
+    showBuildRecipe: meta?.value === 'recipe_product',
+    required,
+    recommended,
   };
 }
 
@@ -161,8 +144,8 @@ function formFromProduct(p: Product): FormState {
 }
 
 /** Convert form → payload, applying Quick Add defaults for hidden fields. */
-function buildPayload(form: FormState, tab: Tab, isEdit: boolean) {
-  const visibility = fieldVisibility(form.product_type);
+function buildPayload(form: FormState, tab: Tab, isEdit: boolean, typeMeta: ProductTypeMetadata | undefined) {
+  const visibility = fieldVisibility(typeMeta);
   const sku = form.sku.trim() || form.barcode.trim();
   // PLU is only meaningful for weighted items (the scale prints `21<PLU><wt>`),
   // but we still send '' explicitly so editing a non-weighted product clears
@@ -280,7 +263,11 @@ export const ProductFormModal: React.FC<Props> = ({
   const [justCreatedRecipeProduct, setJustCreatedRecipeProduct] = useState<Product | null>(null);
   const navigate = useNavigate();
 
-  const visibility = fieldVisibility(form.product_type);
+  // Single Source of Truth: fetched once per session (cached), never
+  // hand-copied — see `fieldVisibility`'s docstring above.
+  const { data: typeMetaList, loading: typesLoading } = useProductTypeMetadata();
+  const typeMeta = findTypeMetadata(typeMetaList, form.product_type);
+  const visibility = fieldVisibility(typeMeta);
 
   // Keep state in sync if the parent swaps the product mid-flight (e.g. View → Edit).
   useEffect(() => {
@@ -336,7 +323,7 @@ export const ProductFormModal: React.FC<Props> = ({
 
     setSaving(true);
     try {
-      const payload = buildPayload(form, tab, isEdit);
+      const payload = buildPayload(form, tab, isEdit, typeMeta);
       const resp = isEdit && initialProduct
         ? await apiClient.patch<Product>(`/products/${initialProduct.id}/`, payload)
         : await apiClient.post<Product>('/products/', payload);
@@ -494,6 +481,15 @@ export const ProductFormModal: React.FC<Props> = ({
             </Field>
           )}
 
+          {/* Recipe products have no cost of their own to enter — instead
+              of hiding the Cost section entirely, show the real, live,
+              server-computed derived cost (Batch 8 architectural-
+              improvement pass, item 4). Only once the product already
+              exists (create-mode has no recipe yet to derive from). */}
+          {!visibility.showCost && typeMeta?.value === 'recipe_product' && (isEdit || isView) && initialProduct && (
+            <DerivedCostField productId={initialProduct.id} />
+          )}
+
           {visibility.showStock && (
             <Field label="Stock" error={fieldErrors.stock} hint="Supports decimals for weighted SKUs">
               <input
@@ -592,13 +588,26 @@ export const ProductFormModal: React.FC<Props> = ({
 
               <Field label="Product type" error={fieldErrors.product_type} className="col-span-2">
                 <select
-                  value={form.product_type} disabled={isView || saving}
+                  value={form.product_type} disabled={isView || saving || typesLoading}
                   onChange={(e) => set('product_type', e.target.value as ProductTypeValue)}
                   className={inputCls(!!fieldErrors.product_type, isView)}
                 >
-                  {PRODUCT_TYPE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  {(typeMetaList ?? []).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                 </select>
               </Field>
+
+              {/* Item 3 (Batch 8 architectural-improvement pass): a
+                  visible Recipe Workflow status for an existing Recipe
+                  product — (No Recipe) -> Build Recipe -> Manage Versions
+                  -> Activate Version -> POS Ready, read from real backend
+                  state, never guessed. */}
+              {visibility.showBuildRecipe && isEdit && initialProduct && (
+                <RecipeStatusStepper
+                  productId={initialProduct.id}
+                  canSell={visibility.showSale}
+                  showOnPos={form.show_on_pos}
+                />
+              )}
 
               {initialProduct?.behavior && (
                 <div className="col-span-2 -mt-1 flex flex-wrap gap-1.5">
@@ -611,7 +620,11 @@ export const ProductFormModal: React.FC<Props> = ({
               )}
 
               {visibility.showSale && (
-              <Field label="Sales category" error={fieldErrors.sales_category} hint="Menu/POS classification (Batch 2 tree) — independent of the legacy Category above.">
+              <Field
+                label="Sales category" error={fieldErrors.sales_category}
+                recommended={visibility.recommended.has('sales_category')}
+                hint="Menu/POS classification (Batch 2 tree) — independent of the legacy Category above."
+              >
                 <select
                   value={form.sales_category} disabled={isView || saving}
                   onChange={(e) => set('sales_category', e.target.value)}
@@ -628,7 +641,11 @@ export const ProductFormModal: React.FC<Props> = ({
               )}
 
               {visibility.showStock && (
-              <Field label="Inventory category" error={fieldErrors.inventory_category} hint="Stock/purchasing classification (Batch 2 tree).">
+              <Field
+                label="Inventory category" error={fieldErrors.inventory_category}
+                recommended={visibility.recommended.has('inventory_category')}
+                hint="Stock/purchasing classification (Batch 2 tree)."
+              >
                 <select
                   value={form.inventory_category} disabled={isView || saving}
                   onChange={(e) => set('inventory_category', e.target.value)}
@@ -765,12 +782,13 @@ const TabButton: React.FC<React.PropsWithChildren<{
 );
 
 const Field: React.FC<React.PropsWithChildren<{
-  label: string; required?: boolean; error?: string; hint?: React.ReactNode; className?: string;
-}>> = ({ label, required, error, hint, className = '', children }) => (
+  label: string; required?: boolean; recommended?: boolean; error?: string; hint?: React.ReactNode; className?: string;
+}>> = ({ label, required, recommended, error, hint, className = '', children }) => (
   <label className={`flex flex-col gap-1 text-[12.5px] font-semibold text-neutral-700 ${className}`}>
     <span>
       {label}
       {required && <span className="text-danger-600 ms-0.5">*</span>}
+      {!required && recommended && <span className="text-neutral-400 font-normal ms-1 text-[11px]">(recommended)</span>}
     </span>
     {children}
     {error

@@ -1,7 +1,8 @@
 from django.shortcuts import get_object_or_404
-from rest_framework import generics
+from rest_framework import generics, status
 from rest_framework.response import Response
 
+from accounts.models import Branch
 from accounts.permissions import IsCashierOrAbove, IsManagerOrAbove
 from pos.models import Product
 from pos.views import TenantMixin
@@ -190,6 +191,72 @@ class RecipeVersionActivateView(_RecipeVersionScopedMixin, generics.GenericAPIVi
         version = self.get_object()
         version = recipes_costing_svc.activate_recipe_version(version)
         return Response(self.get_serializer(version).data)
+
+
+class RecipeVersionCostPreviewView(_RecipeVersionScopedMixin, generics.GenericAPIView):
+    """GET — a live, read-only cost preview for a (draft or active) recipe
+    version, computed exactly the way `compute_recipe_cost` computes it at
+    sale time (branch-scoped AVCO roll-up over each component's current
+    cost) — but callable at menu-authoring time, before the recipe has ever
+    been sold.
+
+    Closes the documented gap `CostPreview.tsx` (frontend, Sprint 5 Batch 8)
+    explicitly left as a placeholder for: recomputing this in React would
+    have meant re-implementing the branch-scoped AVCO lookup client-side,
+    which the batch's own brief prohibited. This endpoint is that missing
+    piece — it does the same lookup `compute_recipe_cost` already does,
+    just exposed for a version that may not be active/sold yet.
+
+    Never cached, never stored on the version itself: recomputed on every
+    call from each component's live cost, matching this codebase's
+    standing "the recipe stays the same, the cost of the NEXT sale changes
+    automatically" principle. `?branch_id=` is optional — omitted, it
+    falls back to the tenant-wide `InventoryCost` row (same fallback
+    `pos.services.costing.get_cost_for_sale` already uses for any other
+    branch-less caller), giving a sane estimate before a branch is chosen.
+    """
+
+    queryset            = RecipeVersion.objects.all()
+    permission_classes = [IsManagerOrAbove]
+
+    def get_queryset(self):
+        return super().get_queryset().filter(recipe_id=self.kwargs['recipe_pk'])
+
+    def get(self, request, *args, **kwargs):
+        version = self.get_object()
+        tenant = self._tenant()
+
+        branch = None
+        branch_id = request.query_params.get('branch_id')
+        if branch_id:
+            try:
+                branch_id = int(branch_id)
+            except (TypeError, ValueError):
+                return Response(
+                    {'detail': 'Invalid branch_id: expected an integer.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            branch_qs = Branch.objects.filter(pk=branch_id)
+            if tenant is not None:
+                branch_qs = branch_qs.filter(tenant=tenant)
+            branch = get_object_or_404(branch_qs)
+
+        result = recipes_costing_svc.compute_recipe_cost(version, branch=branch)
+        return Response({
+            'recipe_version': version.id,
+            'branch_id': branch.id if branch else None,
+            'total_cost': str(result.total_cost),
+            'lines': [
+                {
+                    'component_product': line.component_product_id,
+                    'component_name': line.component_name,
+                    'qty_base': str(line.qty_base),
+                    'unit_cost': str(line.unit_cost),
+                    'line_cost': str(line.line_cost),
+                }
+                for line in result.lines
+            ],
+        })
 
 
 # ── Modifiers (Sprint 5 Batch 4) ─────────────────────────────────────────────

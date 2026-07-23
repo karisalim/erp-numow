@@ -270,6 +270,62 @@ class StandardUnitCodeTests(_UnitsTestBase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  Product type metadata (Batch 8 architectural-improvement pass — single
+#  source of truth for the frontend's Dynamic Product Form)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class ProductTypeMetadataTests(_UnitsTestBase):
+    """`GET /catalog/product-types/` is the ONE place the frontend reads
+    product-type behavior/required-fields from — it must read straight off
+    `PRODUCT_TYPE_BEHAVIOR`, never a second hand-copied list."""
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.manager)
+
+    def test_returns_one_entry_per_product_type(self):
+        from pos.services.product_types import ProductType
+        resp = self.client.get(reverse('product-type-metadata-list'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        body = resp.json()
+        self.assertEqual({row['value'] for row in body}, set(ProductType.values))
+
+    def test_behavior_matches_the_centralized_matrix(self):
+        from pos.services.product_types import behavior_flags
+        resp = self.client.get(reverse('product-type-metadata-list'))
+        body = {row['value']: row for row in resp.json()}
+        self.assertEqual(body['ingredient']['behavior'], behavior_flags('ingredient'))
+        self.assertEqual(body['recipe_product']['behavior'], behavior_flags('recipe_product'))
+
+    def test_required_fields_reflect_behavior_not_a_static_list(self):
+        resp = self.client.get(reverse('product-type-metadata-list'))
+        body = {row['value']: row for row in resp.json()}
+        # Ingredient: cannot sell -> no price; requires cost -> cost is
+        # hard-required. Tracks inventory -> inventory_category is only
+        # RECOMMENDED (the FK stays nullable at the model level — see
+        # `_recommended_fields`'s docstring for why this is deliberate).
+        ing_required = body['ingredient']['required_fields']
+        ing_recommended = body['ingredient']['recommended_fields']
+        self.assertNotIn('price', ing_required)
+        self.assertNotIn('sales_category', ing_required)
+        self.assertNotIn('sales_category', ing_recommended)
+        self.assertIn('inventory_category', ing_recommended)
+        self.assertIn('cost', ing_required)
+        # Recipe product: sellable, no inventory of its own, no opening cost.
+        recipe_required = body['recipe_product']['required_fields']
+        recipe_recommended = body['recipe_product']['recommended_fields']
+        self.assertIn('price', recipe_required)
+        self.assertNotIn('sales_category', recipe_required)
+        self.assertIn('sales_category', recipe_recommended)
+        self.assertNotIn('inventory_category', recipe_recommended)
+        self.assertNotIn('cost', recipe_required)
+
+    def test_list_is_cashier_readable(self):
+        self.client.force_authenticate(user=self.cashier)
+        resp = self.client.get(reverse('product-type-metadata-list'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  ProductUnit mapping rules
 # ══════════════════════════════════════════════════════════════════════════════
 

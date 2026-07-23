@@ -135,10 +135,65 @@ def behavior_flags(product_type: str) -> dict[str, bool]:
     return get_behavior(product_type)._asdict()
 
 
+#: Field-level requirements per type, derived from the SAME behavior matrix
+#: above (never a second, independently-maintained rule set). Split into two
+#: honest tiers so the metadata payload never claims more than the backend
+#: actually does:
+#:   * `required_fields`  — the backend REJECTS a write missing this field
+#:     for this type (`Product.price`/`Product.cost` have no DB default and
+#:     no `null=True`, so DRF already requires them; `name`/`barcode` are
+#:     always required). Every name here is a hard 400 if omitted.
+#:   * `recommended_fields` — a real business-rule gap review finding (a
+#:     sellable product with no `sales_category`, or a stock-tracked one
+#:     with no `inventory_category`, is bad menu/purchasing hygiene) that is
+#:     DELIBERATELY not backend-enforced: both FKs are `null=True,
+#:     blank=True` on `Product` (uncategorized is a valid, permanent state —
+#:     the same "Uncategorized" fallback every mainstream ERP allows — and
+#:     hard-requiring them would break the Quick Add fast-entry path this
+#:     app's POS relies on). The frontend nudges for these; the backend
+#:     never 400s over them.
+def _required_fields(behavior: ProductTypeBehavior) -> list[str]:
+    fields: list[str] = ['name', 'barcode']
+    if behavior.can_sell:
+        fields.append('price')
+    if behavior.requires_cost:
+        fields.append('cost')  # opening cost, create-time only — see ProductSerializer.create()
+    return fields
+
+
+def _recommended_fields(behavior: ProductTypeBehavior) -> list[str]:
+    fields: list[str] = []
+    if behavior.can_sell:
+        fields.append('sales_category')
+    if behavior.track_inventory:
+        fields.append('inventory_category')
+    return fields
+
+
+def product_type_metadata() -> list[dict]:
+    """The full per-type picture the frontend needs to render a dynamic
+    form: label, behavior flags, and required/recommended fields — all read
+    straight off `PRODUCT_TYPE_BEHAVIOR`/`_required_fields`/
+    `_recommended_fields`, zero duplication. Powers
+    `GET /api/catalog/product-types/`.
+    """
+    return [
+        {
+            'value': value,
+            'label': label,
+            'behavior': behavior_flags(value),
+            'required_fields': _required_fields(get_behavior(value)),
+            'recommended_fields': _recommended_fields(get_behavior(value)),
+        }
+        for value, label in ProductType.choices
+    ]
+
+
 __all__ = [
     'ProductType',
     'ProductTypeBehavior',
     'PRODUCT_TYPE_BEHAVIOR',
     'get_behavior',
     'behavior_flags',
+    'product_type_metadata',
 ]
