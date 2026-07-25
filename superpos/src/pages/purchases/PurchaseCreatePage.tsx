@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import apiClient from '../../api/client';
 import { Header } from '../../components/layout/Header';
@@ -76,18 +76,37 @@ const ProductPicker: React.FC<{
 }> = ({ value, onPick }) => {
   const [term, setTerm] = useState('');
   const [open, setOpen] = useState(false);
-  const debounced = useDebounced(term, 300);
+  const [highlightIndex, setHighlightIndex] = useState(0);
+  const debounced = useDebounced(term, 150);
   const boxRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (boxRef.current && !boxRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [open]);
 
   const q = useQuery(
     () =>
-      debounced.trim().length >= 1 && open
+      open
         ? apiClient
-            .get<Paginated<ProductLite>>('/products/', { params: { search: debounced.trim(), page_size: 10 } })
+            .get<Paginated<ProductLite>>('/products/', {
+              params: { search: debounced.trim() || undefined, page_size: 20 },
+            })
             .then((r) => r.data.results)
         : Promise.resolve([] as ProductLite[]),
     [debounced, open],
   );
+
+  // Reset highlighted index when search results change
+  useEffect(() => {
+    setHighlightIndex(0);
+  }, [q.data]);
 
   if (value) {
     return (
@@ -95,7 +114,10 @@ const ProductPicker: React.FC<{
         <span className="font-semibold text-[13.5px] truncate">{value.name}</span>
         <button
           type="button"
-          onClick={() => { onPick(null); setTerm(''); }}
+          onClick={() => {
+            onPick(null);
+            setTerm('');
+          }}
           aria-label="Change product"
           className="text-neutral-400 hover:text-neutral-600 shrink-0"
         >
@@ -105,48 +127,83 @@ const ProductPicker: React.FC<{
     );
   }
 
-  // Typed something, then clicked/tabbed away without picking a result from
-  // the dropdown — the line LOOKS filled in (qty/cost may already be typed)
-  // but `product` is still null and the line will be silently dropped on
-  // submit. Surface it instead of failing silently.
   const abandoned = !open && !value && term.trim().length > 0;
+  const products = q.data ?? [];
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!open) setOpen(true);
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (products.length > 0) {
+        setHighlightIndex((prev) => (prev + 1) % products.length);
+      }
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (products.length > 0) {
+        setHighlightIndex((prev) => (prev - 1 + products.length) % products.length);
+      }
+    } else if (e.key === 'Enter' || e.key === 'Tab') {
+      if (products.length > 0 && highlightIndex >= 0 && highlightIndex < products.length) {
+        e.preventDefault();
+        onPick(products[highlightIndex]);
+        setOpen(false);
+      }
+    } else if (e.key === 'Escape') {
+      setOpen(false);
+    }
+  };
 
   return (
     <div className="relative" ref={boxRef}>
       <input
         value={term}
-        onChange={(e) => { setTerm(e.target.value); setOpen(true); }}
+        onChange={(e) => {
+          setTerm(e.target.value);
+          setOpen(true);
+        }}
         onFocus={() => setOpen(true)}
-        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        onKeyDown={handleKeyDown}
         placeholder="Search product name / SKU / barcode…"
         className={`w-full h-9 px-2.5 rounded-md border bg-white text-[13px] focus-ring ${abandoned ? 'border-danger-500' : 'border-neutral-300'}`}
       />
       {abandoned && (
         <div className="text-[11.5px] text-danger-600 mt-1">
-          No product selected — click a result from the list, or clear this field.
+          No product selected — click a result from the list, or press Enter / Tab.
         </div>
       )}
-      {open && term.trim().length >= 1 && (
+      {open && (
         <div className="absolute z-20 top-10 start-0 w-full min-w-[260px] bg-white border border-neutral-200 rounded-md shadow-lg max-h-56 overflow-y-auto">
           {q.loading ? (
             <div className="px-3 py-2 text-[12.5px] text-neutral-400">Searching…</div>
-          ) : (q.data ?? []).length === 0 ? (
-            <div className="px-3 py-2 text-[12.5px] text-neutral-400">No products found for “{term.trim()}”.</div>
+          ) : products.length === 0 ? (
+            <div className="px-3 py-2 text-[12.5px] text-neutral-400">
+              {term.trim() ? `No products found for “${term.trim()}”.` : 'No products available.'}
+            </div>
           ) : (
-            (q.data ?? []).map((p) => (
-              <button
-                key={p.id}
-                type="button"
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => { onPick(p); setOpen(false); }}
-                className="w-full text-start px-3 py-2 hover:bg-neutral-50 text-[13px]"
-              >
-                <div className="font-semibold">{p.name}</div>
-                <div className="text-[11.5px] text-neutral-400 font-mono">
-                  {p.sku || p.barcode || `#${p.id}`}
-                </div>
-              </button>
-            ))
+            products.map((p, idx) => {
+              const isHighlighted = idx === highlightIndex;
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    onPick(p);
+                    setOpen(false);
+                  }}
+                  onMouseEnter={() => setHighlightIndex(idx)}
+                  className={`w-full text-start px-3 py-2 text-[13px] ${
+                    isHighlighted ? 'bg-primary-50 text-primary-900 font-medium' : 'hover:bg-neutral-50'
+                  }`}
+                >
+                  <div className="font-semibold">{p.name}</div>
+                  <div className="text-[11.5px] text-neutral-400 font-mono">
+                    {p.sku || p.barcode || `#${p.id}`}
+                  </div>
+                </button>
+              );
+            })
           )}
         </div>
       )}

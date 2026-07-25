@@ -55,6 +55,8 @@ class ProductFilter(django_filters.FilterSet):
     out_of_stock = django_filters.BooleanFilter(method='filter_out_of_stock')
     min_price    = django_filters.NumberFilter(field_name='price', lookup_expr='gte')
     max_price    = django_filters.NumberFilter(field_name='price', lookup_expr='lte')
+    active = django_filters.BooleanFilter(field_name='active')
+
 
     class Meta:
         model  = Product
